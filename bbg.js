@@ -1013,65 +1013,6 @@
     });
   }
 
-  function ensureLobbyTestPlayers(lobbyId, testPlayers) {
-    var lid = String(lobbyId || '').trim();
-    if (!lid) return Promise.reject(new Error('ロビーIDがありません'));
-    var list = Array.isArray(testPlayers) ? testPlayers.slice() : [];
-    if (!list.length) return Promise.resolve(null);
-
-    var now = serverNowMs ? serverNowMs() : Date.now();
-    return runTxn(lobbyPath(lid), function (current) {
-      if (!current) return current;
-      // Do not seed during an active game.
-      if (current.currentGame) return current;
-
-      if (!current.members) current.members = {};
-      if (!current.order || !Array.isArray(current.order)) current.order = [];
-
-      for (var i = 0; i < list.length; i++) {
-        var p = list[i] || {};
-        var id = String(p.id || '').trim();
-        var nm = String(p.name || '').trim();
-        if (!id || !nm) continue;
-
-        if (!current.members[id]) {
-          current.members[id] = { name: nm, joinedAt: now, lastSeenAt: now };
-        } else {
-          current.members[id].name = nm;
-          current.members[id].lastSeenAt = now;
-          try {
-            if (current.members[id] && current.members[id].isGmDevice) delete current.members[id].isGmDevice;
-          } catch (eDel) {
-            // ignore
-          }
-        }
-
-        var exists = false;
-        for (var j = 0; j < current.order.length; j++) {
-          if (String(current.order[j]) === id) {
-            exists = true;
-            break;
-          }
-        }
-        if (!exists) current.order.push(id);
-      }
-      return current;
-    });
-  }
-
-  function isDevDeployment() {
-    try {
-      var host = (typeof location !== 'undefined' && location && location.host) ? String(location.host) : '';
-      var path = (typeof location !== 'undefined' && location && location.pathname) ? String(location.pathname) : '';
-      // Treat the dev GitHub Pages site and localhost as dev.
-      if (host.indexOf('localhost') >= 0 || host.indexOf('127.0.0.1') >= 0) return true;
-      if (path.indexOf('B_BoardGames-dev') >= 0) return true;
-      return false;
-    } catch (e) {
-      return false;
-    }
-  }
-
   function setLobbyOrder(lobbyId, nextOrder) {
     if (!Array.isArray(nextOrder)) return Promise.reject(new Error('順番が不正です'));
     return setValue(lobbyPath(lobbyId) + '/order', nextOrder);
@@ -8103,22 +8044,11 @@
     }
     var verHtml = ver ? '<div class="muted" style="text-align:center">Version: ' + escapeHtml(ver) + '</div>' : '';
 
-    var debugBtns = '';
-    try {
-      if (isDevDebugSite()) {
-        debugBtns =
-          '\n      <div class="row">\n        <button id="homeLoveLetterSim" class="ghost">ラブレター（デバッグ）テーブルシミュレーション</button>\n      </div>\n      <div class="row">\n        <button id="homeHanninSim" class="ghost">犯人は踊る（デバッグ）テーブルシミュレーション</button>\n      </div>';
-      }
-    } catch (eDbgBtn) {
-      debugBtns = '';
-    }
-
     render(
       viewEl,
       '\n    <div class="stack">\n      ' +
         (verHtml || '') +
-        '\n      <div class="row">\n        <button id="homeCreateJoin" class="primary">ロビー作成（この端末もゲームに参加）</button>\n      </div>\n      <div class="row">\n        <button id="homeCreateGm" class="ghost">ロビー作成（この端末をゲームマスターデバイス）</button>\n      </div>' +
-        (debugBtns || '') +
+        '\n      <div class="row">\n        <button id="homeCreateJoin" class="primary">ロビー作成（この端末もゲームに参加）</button>\n      </div>\n      <div class="row">\n        <button id="homeCreateGm" class="primary">ロビー作成（この端末をゲームマスターデバイス）</button>\n      </div>' +
         '\n    </div>\n  '
     );
   }
@@ -8191,7 +8121,7 @@
       viewEl,
       '\n    <div class="stack">\n      <div class="big">ロビーを作成</div>\n      <div id="lobbyCreateError" class="form-error" role="alert"></div>\n\n      <div class="field">\n        <label>あなたの名前（表示用）</label>\n        <input id="lobbyHostName" placeholder="例: たろう" value="' +
         escapeHtml(persistedName || '') +
-        '" />\n      </div>\n\n      <div class="row">\n        <button id="lobbyCreateBtn" class="primary">作成</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n      <div class="row">\n        <button id="lobbyHanninSim" class="ghost">犯人は踊る（デバッグ）テーブルシミュレーション</button>\n      </div>\n    </div>\n  '
+        '" />\n      </div>\n\n      <div class="row">\n        <button id="lobbyCreateBtn" class="primary">作成</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n    </div>\n  '
     );
   }
 
@@ -10349,15 +10279,11 @@
 
     var btnJoin = document.getElementById('homeCreateJoin');
     var btnGm = document.getElementById('homeCreateGm');
-    var btnSim = document.getElementById('homeLoveLetterSim');
-    var btnHnSim = document.getElementById('homeHanninSim');
 
     function disableHomeButtons(disabled) {
       try {
         if (btnJoin) btnJoin.disabled = !!disabled;
         if (btnGm) btnGm.disabled = !!disabled;
-        if (btnSim) btnSim.disabled = !!disabled;
-        if (btnHnSim) btnHnSim.disabled = !!disabled;
       } catch (e) {
         // ignore
       }
@@ -10412,30 +10338,6 @@
       btnGm.addEventListener('click', function () {
         // Table-GM device: do not join as a participant.
         startCreate(true, false, true);
-      });
-    }
-
-    if (btnSim && !btnSim.__home_bound) {
-      btnSim.__home_bound = true;
-      btnSim.addEventListener('click', function () {
-        var q = {};
-        var v = getCacheBusterParam();
-        if (v) q.v = v;
-        q.screen = 'loveletter_sim_table';
-        setQuery(q);
-        route();
-      });
-    }
-
-    if (btnHnSim && !btnHnSim.__home_bound) {
-      btnHnSim.__home_bound = true;
-      btnHnSim.addEventListener('click', function () {
-        var q = {};
-        var v = getCacheBusterParam();
-        if (v) q.v = v;
-        q.screen = 'hannin_sim_table';
-        setQuery(q);
-        route();
       });
     }
   }
@@ -11446,17 +11348,6 @@
     renderLobbyCreate(viewEl);
     clearInlineError('lobbyCreateError');
 
-    var hnSimBtn = document.getElementById('lobbyHanninSim');
-    if (hnSimBtn && !hnSimBtn.__bound) {
-      hnSimBtn.__bound = true;
-      hnSimBtn.addEventListener('click', function () {
-        var q = parseQuery() || {};
-        q.screen = 'hannin_sim_table';
-        setQuery(q);
-        route();
-      });
-    }
-
     var btn = document.getElementById('lobbyCreateBtn');
     if (!btn) return;
     btn.addEventListener('click', function () {
@@ -11561,7 +11452,7 @@
     } catch (e0) {
       isTableGmDevice = false;
     }
-    var ui = { selectedKind: '', lastLobby: null, _autotestSeeded: false };
+    var ui = { selectedKind: '', lastLobby: null };
     var joinUrl = makeLobbyJoinUrl(lobbyId);
 
     function drawQr(size) {
@@ -12422,34 +12313,6 @@
           } catch (eAuth) {
             redirectToLobbyPlayer();
             return;
-          }
-
-          // Dev helper: seed lobby with test players for quick UI checks.
-          // Enabled only when URL has ?autotest=1 and only in lobby (no active game).
-          try {
-            if (!ui._autotestSeeded) {
-              ui._autotestSeeded = true;
-              var qAuto = null;
-              try {
-                qAuto = parseQuery();
-              } catch (eQAuto) {
-                qAuto = null;
-              }
-              var autoParam = qAuto ? String(qAuto.autotest || '') : '';
-              // Default-on for dev deployment; allow explicit disable with ?autotest=0
-              var want = autoParam === '0' ? false : (autoParam === '1' ? true : isDevDeployment());
-              if (want && !lobby.currentGame) {
-                ensureLobbyTestPlayers(lobbyId, [
-                  { id: 'test_p1', name: 'テスト1' },
-                  { id: 'test_p2', name: 'テスト2' },
-                  { id: 'test_p3', name: 'テスト3' }
-                ]).catch(function () {
-                  // ignore
-                });
-              }
-            }
-          } catch (eSeed) {
-            // ignore
           }
 
           // Avoid re-rendering on high-frequency heartbeat updates (keeps QR from resetting).
