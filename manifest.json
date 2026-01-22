@@ -1,0 +1,18 @@
+{
+  "name": "B_BoardGames",
+  "short_name": "BoardGames",
+  "description": "ワードウルフ、コードネーム、ラブレター、犯人は踊るなどのボードゲームをオンラインで遊べるアプリ",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#6c63ff",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./assets/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
