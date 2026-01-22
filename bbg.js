@@ -689,6 +689,81 @@
       });
   }
 
+  // -------------------- auto-cleanup old rooms --------------------
+  // 古いルーム（デフォルト7日以上前）を自動削除
+  var CLEANUP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7日
+  var CLEANUP_LS_KEY = 'bbg_last_cleanup_v1';
+  var CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1日に1回まで実行
+
+  function shouldRunCleanup() {
+    try {
+      var last = parseInt(localStorage.getItem(CLEANUP_LS_KEY) || '0', 10) || 0;
+      return nowMs() - last > CLEANUP_INTERVAL_MS;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function markCleanupDone() {
+    try {
+      localStorage.setItem(CLEANUP_LS_KEY, String(nowMs()));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function cleanupOldRooms() {
+    if (!shouldRunCleanup()) return Promise.resolve();
+
+    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'lobbies'];
+    var cutoff = nowMs() - CLEANUP_MAX_AGE_MS;
+
+    return firebaseReady()
+      .then(function (db) {
+        var promises = paths.map(function (basePath) {
+          return db
+            .ref(basePath)
+            .orderByChild('createdAt')
+            .endAt(cutoff)
+            .once('value')
+            .then(function (snap) {
+              var val = snap.val();
+              if (!val) return Promise.resolve();
+              var deletePromises = [];
+              Object.keys(val).forEach(function (key) {
+                deletePromises.push(db.ref(basePath + '/' + key).remove());
+              });
+              return Promise.all(deletePromises);
+            })
+            .catch(function (e) {
+              // クエリ失敗時は無視（indexがない場合など）
+              try {
+                if (typeof console !== 'undefined' && console.warn) {
+                  console.warn('cleanup failed for ' + basePath, e);
+                }
+              } catch (e2) {
+                // ignore
+              }
+              return Promise.resolve();
+            });
+        });
+        return Promise.all(promises);
+      })
+      .then(function () {
+        markCleanupDone();
+      })
+      .catch(function (e) {
+        // Firebase接続失敗時は無視
+        try {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('cleanup skipped', e);
+          }
+        } catch (e2) {
+          // ignore
+        }
+      });
+  }
+
   // -------------------- state --------------------
   function getUrlState() {
     var q = parseQuery();
@@ -19214,6 +19289,13 @@
       } catch (e2) {
         // ignore
       }
+    }
+
+    // 古いルームを自動削除（バックグラウンドで実行、失敗しても無視）
+    try {
+      cleanupOldRooms();
+    } catch (eCleanup) {
+      // ignore
     }
 
     try {
