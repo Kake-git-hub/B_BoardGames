@@ -9656,10 +9656,8 @@
     var endAt = room && room.discussion && room.discussion.endsAt ? room.discussion.endsAt : 0;
     var remain = phase === 'discussion' ? Math.max(0, Math.floor((endAt - serverNowMs()) / 1000)) : 0;
 
-    // For the top-right header: role/turn/time on separate lines.
+    // For the top-right header: turn/time on separate lines.
     var roleLine = '';
-    if (role === 'majority') roleLine = '多人数側';
-    else if (role === 'minority') roleLine = '少人数側';
 
     var gmDisplayName = '';
     try {
@@ -9691,7 +9689,6 @@
 
     var headerRightLines = [];
     if (statusShort) headerRightLines.push(String(statusShort));
-    if (roleLine) headerRightLines.push(String(roleLine));
     if (turnLine) headerRightLines.push(String(turnLine));
     if (phase === 'discussion' && role !== 'majority') headerRightLines.push('残り ' + formatMMSS(remain));
 
