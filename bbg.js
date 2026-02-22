@@ -8445,7 +8445,7 @@
         (isTableGmDevice ? '' : '\n\n      ' + gmNameCardHtml) +
         '\n\n      <hr />\n\n      <div class="field">\n        <label>ゲーム選択</label>\n        <select id="lobbyGameKind">\n          <option value="wordwolf" ' +
         (selectedKind === 'wordwolf' ? 'selected' : '') +
-        '>ワードウルフ</option>\n          <option value="loveletter" ' +
+        '>ワードウルフ修正済み</option>\n          <option value="loveletter" ' +
         (selectedKind === 'loveletter' ? 'selected' : '') +
         '>ラブレター</option>\n          <option value="codenames" ' +
         (selectedKind === 'codenames' ? 'selected' : '') +
@@ -9641,17 +9641,7 @@
       '</div></div>' +
       '</div>';
 
-    // Role label is hidden during voting; show only after reveal (guess/judge/finished).
-    var showRoleLabel = phase === 'guess' || phase === 'judge' || phase === 'finished';
-    var roleLabel = '';
-    if (showRoleLabel) {
-      if (role === 'majority') roleLabel = '多人数側';
-      if (role === 'minority') roleLabel = '少人数側';
-    }
-    var wordMainHtml = shouldRevealBothWords ? bothWordsHtml : singleWordHtml;
-    var wordHtml = roleLabel
-      ? '<div class="stack"><div class="inline-row"><span class="badge">' + escapeHtml(roleLabel) + '</span></div>' + wordMainHtml + '</div>'
-      : wordMainHtml;
+    var wordHtml = shouldRevealBothWords ? bothWordsHtml : singleWordHtml;
 
     var endAt = room && room.discussion && room.discussion.endsAt ? room.discussion.endsAt : 0;
     var remain = phase === 'discussion' ? Math.max(0, Math.floor((endAt - serverNowMs()) / 1000)) : 0;
@@ -10269,7 +10259,7 @@
     render(
       viewEl,
       '\n    <div class="stack">\n      <div class="row" style="justify-content:space-between;align-items:center">' +
-        '<div class="big">ワードウルフ（テーブル用）</div>' +
+        '<div class="big">ワードウルフ修正済み（テーブル用）</div>' +
         '<div class="muted" style="text-align:right">' +
         escapeHtml(statusShort || '') +
         '</div>' +
@@ -12107,7 +12097,7 @@
                     ? 'コードネーム'
                     : kind === 'hannin'
                       ? '犯人は踊る'
-                      : 'ワードウルフ';
+                      : 'ワードウルフ修正済み';
               setInlineError('lobbyHostError', '参加者が足りません（' + gameLabel + 'は' + String(min) + '人以上必要です）');
               return;
             }
@@ -12836,7 +12826,7 @@
 
       render(
         viewEl,
-        '\n    <div class="stack">\n      <div class="big">ワードウルフ：設定</div>\n      <div id="wwCreateError" class="form-error" role="alert"></div>\n\n      <div class="field">\n        <label>少数側の人数（最大5）</label>\n        <input id="minorityCount" type="range" min="1" max="5" step="1" value="1" />\n        <div class="kv"><span class="muted">現在</span><b id="minorityCountLabel">1</b></div>\n      </div>\n\n      <div class="field">\n        <label>お題カテゴリ</label>\n        <select id="topicCategory"></select>\n      </div>\n\n      <hr />\n\n      <div class="row">\n        <button id="wwLobbyStart" class="primary">ゲーム開始</button>\n        <a class="btn ghost" href="' +
+        '\n    <div class="stack">\n      <div class="big">ワードウルフ修正済み：設定</div>\n      <div id="wwCreateError" class="form-error" role="alert"></div>\n\n      <div class="field">\n        <label>少数側の人数（最大5）</label>\n        <input id="minorityCount" type="range" min="1" max="5" step="1" value="1" />\n        <div class="kv"><span class="muted">現在</span><b id="minorityCountLabel">1</b></div>\n      </div>\n\n      <div class="field">\n        <label>お題カテゴリ</label>\n        <select id="topicCategory"></select>\n      </div>\n\n      <hr />\n\n      <div class="row">\n        <button id="wwLobbyStart" class="primary">ゲーム開始</button>\n        <a class="btn ghost" href="' +
           escapeHtml(backHref) +
           '">戻る</a>\n      </div>\n    </div>\n  '
       );
