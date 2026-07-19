@@ -320,6 +320,11 @@ body.ok-player-screen{
 body.ok-player-screen input,body.ok-player-screen textarea{
   -webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;
 }
+/* 描く・ボタン操作以外（ダブルタップ/ピンチのズーム）を無効化。
+   manipulation=ダブルタップズームを無効化しつつタップ/スクロールは維持。
+   ピンチズームはJS(gesturestart/2本指touchmove)側で無効化する。 */
+body.ok-player-screen,body.ok-player-screen *{touch-action:manipulation}
+body.ok-player-screen #okCanvas{touch-action:none}
 .ok-stack{gap:8px}
 .ok-topbar{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .ok-topic{font-weight:900;font-size:16px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -351,6 +356,11 @@ body.ok-player-screen input,body.ok-player-screen textarea{
 .ok-fs-top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;min-height:52px}
 .ok-fs-topic{flex:1;min-width:0;font-weight:900;font-size:clamp(16px,5vw,26px);line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ok-fs-topic b{color:var(--accent);font-size:1.1em}
+.ok-fs-btn{
+  flex:0 0 auto;width:44px;height:44px;padding:0;border-radius:12px;
+  background:var(--card);border:1px solid var(--line);color:var(--text);
+  font-size:22px;line-height:1;font-weight:900;
+}
 .ok-ring{flex:0 0 auto}
 .ok-ring-bg{fill:none;stroke:var(--line);stroke-width:5}
 .ok-ring-fg{
@@ -446,3 +456,30 @@ body.ok-player-screen input,body.ok-player-screen textarea{
 .ok-result-img{width:100%;max-width:360px;height:auto;border-radius:10px;border:1px solid var(--line);background:#fff;margin:0 auto;display:block}
 .ok-comment{font-size:13px}
 .ok-error{border-color:var(--danger);color:var(--danger);font-size:13px}
+.ok-result-cards{display:flex;flex-direction:column;gap:12px}
+
+/* --- in-app confirm dialog (iOSのstandalone PWAではnative confirm()が無反応になるため) --- */
+.ok-confirm{
+  position:fixed;inset:0;z-index:2000;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+  background:rgba(0,0,0,.55);
+}
+.ok-confirm-box{
+  background:var(--card);border:1px solid var(--line);border-radius:16px;
+  padding:20px;width:min(360px,100%);box-shadow:0 12px 40px rgba(0,0,0,.5);
+  animation:okPop .22s cubic-bezier(.2,1.6,.4,1) both;
+}
+.ok-confirm-msg{font-size:18px;font-weight:800;text-align:center;margin-bottom:16px}
+.ok-confirm-btns{display:flex;gap:12px}
+.ok-confirm-btns button{flex:1;padding:14px 10px;font-size:16px;font-weight:800;border-radius:12px}
+
+/* --- landscape (iPad横画面など): 結果/判定を画面内に収める --- */
+@media (orientation:landscape){
+  body.ok-player-screen .app{max-width:960px}
+  .ok-result-cards{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:start;
+  }
+  .ok-result-img{max-height:40vh}
+  .ok-judge-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .ok-judge-img{max-height:34vh;width:auto;max-width:100%}
+}

@@ -1164,7 +1164,7 @@
     var mode = o.topicMode === 'custom' ? 'custom' : 'random';
     var age = o.topicAge === 'kids' || o.topicAge === 'adult' ? String(o.topicAge) : 'school';
     return {
-      drawSeconds: clamp(parseIntSafe(o.drawSeconds, 90), 30, 180),
+      drawSeconds: clamp(parseIntSafe(o.drawSeconds, 90), 30, 600),
       topicMode: mode,
       topicAge: age,
       customTopic: String(o.customTopic || '')
@@ -3828,7 +3828,7 @@
 
   function createOekakiRoom(roomId, settings, topic) {
     var s = settings && typeof settings === 'object' ? settings : {};
-    var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 180);
+    var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 600);
     var order = Array.isArray(s.order) ? s.order.slice() : [];
     var room = {
       createdAt: serverNowMs(),
@@ -3930,7 +3930,7 @@
       if (room.phase !== 'result') return room;
 
       var s = room.settings || {};
-      var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 180);
+      var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 600);
 
       var players = {};
       var src = room.players || {};
@@ -9045,18 +9045,28 @@
       var okKeyNote = loadGeminiApiKey()
         ? ''
         : '<div class="muted">※ Gemini APIキーが未設定です。AI判定を使うには<a href="?screen=setup">セットアップ</a>で設定してください（未設定でも開始はできます）。</div>';
+      var okTimeVals = [30, 60, 90, 120, 180, 300, 420, 600];
+      var okTimeOptions = '';
+      for (var okTi = 0; okTi < okTimeVals.length; okTi++) {
+        var okTv = okTimeVals[okTi];
+        okTimeOptions +=
+          '<option value="' +
+          okTv +
+          '"' +
+          (okSet.drawSeconds === okTv ? ' selected' : '') +
+          '>' +
+          escapeHtml(oekakiFormatSeconds(okTv)) +
+          '</option>';
+      }
       oekakiSetupHtml =
         '<hr />' +
         '<div class="stack">' +
         '<div class="muted">せってい（おえかきバトル）</div>' +
         '<div class="field">' +
         '<label>せいげんじかん</label>' +
-        '<input id="okDrawSecs" type="range" min="30" max="180" step="30" value="' +
-        String(okSet.drawSeconds) +
-        '" />' +
-        '<div class="kv"><span class="muted">いま</span><b id="okDrawSecsLabel">' +
-        escapeHtml(oekakiFormatSeconds(okSet.drawSeconds)) +
-        '</b></div>' +
+        '<select id="okDrawSecs">' +
+        okTimeOptions +
+        '</select>' +
         '</div>' +
         '<div class="field">' +
         '<label>おだい</label>' +
@@ -12756,7 +12766,7 @@
         var lob = currentLobby();
         var cur = normalizeOekakiLobbySettings(lob && lob.oekakiSettings);
         var elS = document.getElementById('okDrawSecs');
-        if (elS) cur.drawSeconds = clamp(parseIntSafe(elS.value, cur.drawSeconds), 30, 180);
+        if (elS) cur.drawSeconds = clamp(parseIntSafe(elS.value, cur.drawSeconds), 30, 600);
         var elM = document.getElementById('okTopicMode');
         if (elM) cur.topicMode = String(elM.value || '') === 'custom' ? 'custom' : 'random';
         var elA = document.getElementById('okTopicAge');
@@ -12778,10 +12788,6 @@
       var okDrawSecsEl = document.getElementById('okDrawSecs');
       if (okDrawSecsEl && !okDrawSecsEl.__lobby_bound) {
         okDrawSecsEl.__lobby_bound = true;
-        okDrawSecsEl.addEventListener('input', function () {
-          var lab = document.getElementById('okDrawSecsLabel');
-          if (lab) lab.textContent = oekakiFormatSeconds(clamp(parseIntSafe(okDrawSecsEl.value, 90), 30, 180));
-        });
         okDrawSecsEl.addEventListener('change', saveOekakiSettingsFromForm);
       }
 
@@ -18864,6 +18870,7 @@
           '<div class="ok-fs-topic">おだい「<b>' +
           escapeHtml(String((room.round && room.round.topic) || '')) +
           '</b>」</div>' +
+          '<button id="okFullscreen" class="ok-fs-btn" aria-label="ぜんがめん" title="ぜんがめん" style="display:none">⛶</button>' +
           '<svg class="ok-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">' +
           '<circle class="ok-ring-bg" cx="22" cy="22" r="18"></circle>' +
           '<circle class="ok-ring-fg" id="okRingFg" cx="22" cy="22" r="18"></circle>' +
@@ -19035,7 +19042,9 @@
           String(roundIndex) +
           '）</div>' +
           errorHtml +
+          '<div class="ok-result-cards">' +
           cards +
+          '</div>' +
           missingHtml +
           hostHtml +
           '</div>'
@@ -19128,7 +19137,11 @@
       judgeInFlight: false,
       judgeToken: '',
       lobbyReturnWatching: false,
-      lobbyUnsub: null
+      lobbyUnsub: null,
+      globalHandlersBound: false,
+      teardownGlobal: null,
+      resizeTimer: null,
+      fsAutoTried: false
     };
 
     function redirectToLobby() {
@@ -19221,7 +19234,7 @@
       var el = document.getElementById('okCountdown');
       if (!el) return;
       var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
-      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 180);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
       var startAt = endsAt - totalSec * 1000;
       var diff = startAt - serverNowMs();
       var span = document.getElementById('okCountdownNum');
@@ -19262,7 +19275,7 @@
     var OK_RING_CIRC = 113.097; // 2π×r(18)
     function updateTimerText(room) {
       var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
-      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 180);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
       var remainMs = Math.max(0, endsAt - serverNowMs());
       var remainSec = Math.max(0, Math.ceil(remainMs / 1000));
 
@@ -19382,6 +19395,7 @@
         if (!q2 || String(q2.screen || '') !== 'oekaki_player' || String(q2.room || '') !== String(roomId || '')) {
           clearInterval(ui.timerId);
           ui.timerId = null;
+          if (ui.teardownGlobal) ui.teardownGlobal();
           return;
         }
         var room = lastRoom;
@@ -19423,29 +19437,198 @@
       p.style.display = show ? '' : 'none';
     }
 
+    // 全画面（Fullscreen API）。QR参加者はSafariで開くため、操作中に
+    // ブラウザのツールバー（共有ボタン等）が出てしまう。iPadではFullscreen APIで
+    // ホストの「ホーム画面に追加」と同様の全画面にし、ツールバー/共有マークを隠す。
+    function okStandalone() {
+      try {
+        if (window.navigator && window.navigator.standalone) return true;
+        if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+      } catch (e) {
+        // ignore
+      }
+      return false;
+    }
+    function okFsAvailable() {
+      var el = document.documentElement;
+      return !!(el && (el.requestFullscreen || el.webkitRequestFullscreen));
+    }
+    function okIsFullscreen() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function okEnterFullscreen() {
+      var el = document.documentElement;
+      if (!el) return;
+      try {
+        if (el.requestFullscreen) el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } catch (e) {
+        // ignore
+      }
+    }
+    // 全画面ボタンの表示可否を更新（全画面中/standalone/非対応なら隠す）。
+    function updateFullscreenBtn() {
+      var b = document.getElementById('okFullscreen');
+      if (!b) return;
+      var show = okFsAvailable() && !okStandalone() && !okIsFullscreen();
+      b.style.display = show ? '' : 'none';
+    }
+
+    // アプリ内確認ダイアログ。iOSのホーム画面PWA(standalone)では
+    // ネイティブの confirm() が無反応になり「かんせい」ボタンが効かない不具合が出るため、
+    // DOM上の確認オーバーレイに置き換える（全環境で確実に動く）。
+    function okShowConfirm(message, yesLabel, onYes) {
+      var ex = document.getElementById('okConfirm');
+      if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
+      var host = document.getElementById('okFs') || document.body;
+      var ov = document.createElement('div');
+      ov.id = 'okConfirm';
+      ov.className = 'ok-confirm';
+      ov.innerHTML =
+        '<div class="ok-confirm-box"><div class="ok-confirm-msg">' +
+        escapeHtml(String(message || '')) +
+        '</div><div class="ok-confirm-btns">' +
+        '<button type="button" class="ghost" id="okConfirmNo">いいえ</button>' +
+        '<button type="button" class="primary" id="okConfirmYes">' +
+        escapeHtml(String(yesLabel || 'はい')) +
+        '</button></div></div>';
+      host.appendChild(ov);
+      var close = function () {
+        if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+      };
+      var noBtn = document.getElementById('okConfirmNo');
+      var yesBtn = document.getElementById('okConfirmYes');
+      if (noBtn) noBtn.addEventListener('click', close);
+      if (yesBtn)
+        yesBtn.addEventListener('click', function () {
+          close();
+          if (onYes) onYes();
+        });
+      ov.addEventListener('click', function (e) {
+        if (e.target === ov) close();
+      });
+    }
+
+    // キャンバスの内部解像度を表示領域のアスペクト比に合わせる（長辺640）。
+    // preserve=true のとき、現在の絵を保持したまま新しいサイズに描き直す
+    // （縦横回転時にアスペクト比が変わっても絵を消さない・歪ませない）。
+    function sizeOekakiCanvas(preserve) {
+      var cv = document.getElementById('okCanvas');
+      var wrap = document.getElementById('okCanvasWrap');
+      if (!cv || !wrap) return;
+      var rw = wrap.clientWidth;
+      var rh = wrap.clientHeight;
+      if (rw < 2 || rh < 2) return;
+      var sc = 640 / Math.max(rw, rh);
+      var nw = Math.max(64, Math.round(rw * sc));
+      var nh = Math.max(64, Math.round(rh * sc));
+      if (cv.width === nw && cv.height === nh) return; // 変化なし
+      var old = null;
+      if (preserve && cv.width > 0 && cv.height > 0) {
+        try {
+          old = document.createElement('canvas');
+          old.width = cv.width;
+          old.height = cv.height;
+          old.getContext('2d').drawImage(cv, 0, 0);
+        } catch (eCopy) {
+          old = null;
+        }
+      }
+      cv.width = nw; // 幅/高さ変更でキャンバスはクリアされる
+      cv.height = nh;
+      var ctx = cv.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, nw, nh);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      if (old) {
+        // アスペクト比を保ったまま（contain）中央に描き直す＝歪まない
+        var s = Math.min(nw / old.width, nh / old.height);
+        var dw = old.width * s;
+        var dh = old.height * s;
+        try {
+          ctx.drawImage(old, (nw - dw) / 2, (nh - dh) / 2, dw, dh);
+        } catch (eDraw) {
+          // ignore
+        }
+      }
+    }
+
+    // お絵かき画面のあいだだけ、縦横回転リサイズ対応と
+    // 「描く・ボタン」以外のジェスチャー（ピンチズーム/ダブルタップズーム）を無効化する。
+    // 画面を離れたら teardownOekakiGlobalHandlers() で必ず解除する（他画面のズームを妨げない）。
+    function setupOekakiGlobalHandlers() {
+      if (ui.globalHandlersBound) return;
+      ui.globalHandlersBound = true;
+
+      var onOkResize = function () {
+        if (ui.resizeTimer) clearTimeout(ui.resizeTimer);
+        ui.resizeTimer = setTimeout(function () {
+          if (document.getElementById('okCanvas')) sizeOekakiCanvas(true);
+        }, 150);
+      };
+      // iOSのピンチズーム（gesture*）と2本指操作を無効化
+      var stopGesture = function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+      };
+      var stopMultiTouch = function (e) {
+        if (e && e.touches && e.touches.length > 1 && e.preventDefault) e.preventDefault();
+      };
+      // 全画面の出入りでボタン表示とキャンバスサイズを合わせ直す
+      var onFsChange = function () {
+        try {
+          updateFullscreenBtn();
+        } catch (eF) {
+          // ignore
+        }
+        if (ui.resizeTimer) clearTimeout(ui.resizeTimer);
+        ui.resizeTimer = setTimeout(function () {
+          if (document.getElementById('okCanvas')) sizeOekakiCanvas(true);
+        }, 150);
+      };
+
+      window.addEventListener('resize', onOkResize);
+      window.addEventListener('orientationchange', onOkResize);
+      document.addEventListener('gesturestart', stopGesture, { passive: false });
+      document.addEventListener('gesturechange', stopGesture, { passive: false });
+      document.addEventListener('gestureend', stopGesture, { passive: false });
+      document.addEventListener('dblclick', stopGesture, { passive: false });
+      document.addEventListener('touchmove', stopMultiTouch, { passive: false });
+      document.addEventListener('fullscreenchange', onFsChange);
+      document.addEventListener('webkitfullscreenchange', onFsChange);
+
+      ui.teardownGlobal = function () {
+        try {
+          window.removeEventListener('resize', onOkResize);
+          window.removeEventListener('orientationchange', onOkResize);
+          document.removeEventListener('gesturestart', stopGesture, { passive: false });
+          document.removeEventListener('gesturechange', stopGesture, { passive: false });
+          document.removeEventListener('gestureend', stopGesture, { passive: false });
+          document.removeEventListener('dblclick', stopGesture, { passive: false });
+          document.removeEventListener('touchmove', stopMultiTouch, { passive: false });
+          document.removeEventListener('fullscreenchange', onFsChange);
+          document.removeEventListener('webkitfullscreenchange', onFsChange);
+        } catch (e) {
+          // ignore
+        }
+        if (ui.resizeTimer) {
+          clearTimeout(ui.resizeTimer);
+          ui.resizeTimer = null;
+        }
+        ui.globalHandlersBound = false;
+        ui.teardownGlobal = null;
+      };
+    }
+
     function setupCanvasAndTools() {
       var cv = document.getElementById('okCanvas');
       if (cv && !cv.__ok_bound) {
         cv.__ok_bound = true;
 
-        // 内部解像度を表示領域のアスペクト比に合わせる（長辺640）。
         // 画面いっぱいのキャンバス（スマホ縦長/タブレット横長どちらも全面）。
-        try {
-          var wrap = document.getElementById('okCanvasWrap');
-          var rw = wrap ? wrap.clientWidth : 0;
-          var rh = wrap ? wrap.clientHeight : 0;
-          if (rw > 2 && rh > 2) {
-            var sc = 640 / Math.max(rw, rh);
-            cv.width = Math.max(64, Math.round(rw * sc));
-            cv.height = Math.max(64, Math.round(rh * sc));
-          }
-        } catch (eSize) {
-          // keep default 640x640
-        }
+        sizeOekakiCanvas(false);
 
         var ctx = cv.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, cv.width, cv.height);
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
@@ -19478,6 +19661,16 @@
           if (ev.pointerType === 'mouse' && ev.button !== 0) return;
           if (ev.preventDefault) ev.preventDefault();
           setToolPanelVisible(false);
+          // 最初のタッチ操作で全画面へ（タブレット等のタッチ時のみ・ユーザー操作中に限る）。
+          // 一度試したら以後は自動では出さない（ユーザーが自分で解除した場合を尊重）。
+          if (!ui.fsAutoTried && ev.pointerType === 'touch') {
+            ui.fsAutoTried = true;
+            try {
+              if (!okStandalone() && okFsAvailable() && !okIsFullscreen()) okEnterFullscreen();
+            } catch (eFs) {
+              // ignore
+            }
+          }
           try {
             cv.setPointerCapture(ev.pointerId);
           } catch (eCap) {
@@ -19503,6 +19696,8 @@
         cv.addEventListener('pointercancel', endStroke);
       }
 
+      setupOekakiGlobalHandlers();
+
       var paletteBtn = document.getElementById('okPaletteBtn');
       if (paletteBtn && !paletteBtn.__ok_bound) {
         paletteBtn.__ok_bound = true;
@@ -19512,6 +19707,15 @@
           setToolPanelVisible(p.style.display === 'none');
         });
       }
+
+      var fsBtn = document.getElementById('okFullscreen');
+      if (fsBtn && !fsBtn.__ok_bound) {
+        fsBtn.__ok_bound = true;
+        fsBtn.addEventListener('click', function () {
+          okEnterFullscreen();
+        });
+      }
+      updateFullscreenBtn();
 
       var colorBtns = document.querySelectorAll('.okColorBtn');
       for (var i2 = 0; i2 < colorBtns.length; i2++) {
@@ -19550,18 +19754,19 @@
       if (clearBtn && !clearBtn.__ok_bound) {
         clearBtn.__ok_bound = true;
         clearBtn.addEventListener('click', function () {
-          if (!confirm('ぜんぶ けしますか？')) return;
-          try {
-            var cv2 = document.getElementById('okCanvas');
-            var ctx2 = cv2 ? cv2.getContext('2d') : null;
-            if (ctx2) {
-              ctx2.fillStyle = '#ffffff';
-              ctx2.fillRect(0, 0, cv2.width, cv2.height);
-            }
-          } catch (eClr) {
-            // ignore
-          }
           setToolPanelVisible(false);
+          okShowConfirm('ぜんぶ けしますか？', 'けす', function () {
+            try {
+              var cv2 = document.getElementById('okCanvas');
+              var ctx2 = cv2 ? cv2.getContext('2d') : null;
+              if (ctx2) {
+                ctx2.fillStyle = '#ffffff';
+                ctx2.fillRect(0, 0, cv2.width, cv2.height);
+              }
+            } catch (eClr) {
+              // ignore
+            }
+          });
         });
       }
 
@@ -19569,8 +19774,10 @@
       if (doneBtn && !doneBtn.__ok_bound) {
         doneBtn.__ok_bound = true;
         doneBtn.addEventListener('click', function () {
-          if (!confirm('このえで ていしゅつする？')) return;
-          submitNow(false);
+          setToolPanelVisible(false);
+          okShowConfirm('このえで ていしゅつする？', 'ていしゅつ', function () {
+            submitNow(false);
+          });
         });
       }
     }
@@ -19697,6 +19904,7 @@
         clearInterval(ui.timerId);
         ui.timerId = null;
       }
+      if (ui.teardownGlobal) ui.teardownGlobal();
     });
   }
 
