@@ -715,7 +715,7 @@
   function cleanupOldRooms() {
     if (!shouldRunCleanup()) return Promise.resolve();
 
-    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'lobbies'];
+    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'lobbies'];
     var cutoff = nowMs() - CLEANUP_MAX_AGE_MS;
 
     return firebaseReady()
@@ -890,6 +890,15 @@
   
   function subscribeHanninRoom(roomId, cb) {
     return onValue(hanninRoomPath(roomId), cb);
+  }
+
+  // -------------------- oekaki battle (state) --------------------
+  function oekakiRoomPath(roomId) {
+    return 'oekakiRooms/' + roomId;
+  }
+
+  function subscribeOekakiRoom(roomId, cb) {
+    return onValue(oekakiRoomPath(roomId), cb);
   }
 
   // -------------------- shared (persisted name) --------------------
@@ -1146,6 +1155,24 @@
   function setLobbyCodenamesAssignBulk(lobbyId, assignMap) {
     var m = assignMap && typeof assignMap === 'object' ? assignMap : {};
     return setValue(lobbyPath(lobbyId) + '/codenamesAssign', m);
+  }
+
+  function normalizeOekakiLobbySettings(s) {
+    var o = s && typeof s === 'object' ? s : {};
+    var mode = o.topicMode === 'custom' ? 'custom' : 'random';
+    var age = o.topicAge === 'kids' || o.topicAge === 'adult' ? String(o.topicAge) : 'school';
+    return {
+      drawSeconds: clamp(parseIntSafe(o.drawSeconds, 90), 30, 180),
+      topicMode: mode,
+      topicAge: age,
+      customTopic: String(o.customTopic || '')
+    };
+  }
+
+  function setLobbyOekakiSettings(lobbyId, settings) {
+    var out = normalizeOekakiLobbySettings(settings);
+    out.updatedAt = serverNowMs();
+    return setValue(lobbyPath(lobbyId) + '/oekakiSettings', out);
   }
 
   function parseWordListText(text) {
@@ -3741,6 +3768,413 @@
     '7:countess': { rank: 7, name: '女侯爵', desc: '将軍(6)か魔術師(5)と同時に持つなら必ず捨てる。', icon: './assets/loveletter/Onnakoushaku.png' },
     '8:megane': { rank: 8, name: '姫（眼鏡）', desc: '捨てたら脱落。', icon: './assets/loveletter/Himemegane.png' }
   };
+
+  // -------------------- oekaki battle (おえかきバトル) --------------------
+  // 全員が同じお題を制限時間内に描き、Gemini APIが採点してランキング発表する。
+  // 判定はホスト端末のみが実行する（APIキーもホスト端末のみ必要）。
+
+  var OEKAKI_TOPICS = {
+    kids: [
+      'りんご', 'ばなな', 'いちご', 'ねこ', 'いぬ', 'うさぎ', 'ぞう', 'きりん', 'さかな', 'ちょうちょ',
+      'おはな', 'たいよう', 'つき', 'ほし', 'くるま', 'でんしゃ', 'ひこうき', 'ふうせん', 'アイスクリーム', 'ケーキ',
+      'おにぎり', 'かさ', 'ぼうし', 'いえ', 'き', 'やま', 'にじ', 'ゆきだるま', 'カレーライス', 'とけい',
+      'めがね', 'ロボット'
+    ],
+    school: [
+      '消防車', 'パトカー', 'カブトムシ', 'クワガタ', 'ラーメン', 'おすし', 'ハンバーガー', 'サッカーボール', 'バスケットボール', '恐竜',
+      'ペンギン', 'パンダ', 'コアラ', 'ライオン', 'ワニ', 'サメ', 'タコ', 'カメ', 'ヘリコプター', '新幹線',
+      'ロケット', 'お城', '学校', 'ランドセル', 'リコーダー', '花火', 'プール', '忍者', 'おばけ', 'ドラゴン',
+      '魔法使い', '滑り台'
+    ],
+    adult: [
+      '自由の女神', 'モナリザ', 'スフィンクス', '東京タワー', '富士山', '二日酔い', '満員電車', 'お花見', '結婚式', '温泉',
+      '回転寿司', 'たこ焼き', 'お好み焼き', 'ラジオ体操', 'マラソン大会', 'サラリーマン', '宅配便', 'リモート会議', '自撮り', '猫カフェ',
+      '観覧車', 'ジェットコースター', 'バーベキュー', '釣り', 'ゴルフ', 'ボウリング', 'カラオケ', '歯医者', '美容室', '宇宙飛行士',
+      '相撲', '雪合戦'
+    ]
+  };
+
+  function oekakiPickTopic(age, excludeTopic) {
+    var pool = OEKAKI_TOPICS[age] || OEKAKI_TOPICS.school;
+    var ex = String(excludeTopic || '');
+    var cand = [];
+    for (var i = 0; i < pool.length; i++) {
+      if (String(pool[i]) !== ex) cand.push(pool[i]);
+    }
+    if (!cand.length) cand = pool.slice();
+    return String(cand[randomInt(cand.length)] || 'ねこ');
+  }
+
+  function oekakiFormatSeconds(sec) {
+    var s = clamp(parseIntSafe(sec, 0), 0, 3600);
+    var m = Math.floor(s / 60);
+    var r = s % 60;
+    if (m > 0 && r > 0) return String(m) + '分' + String(r) + '秒';
+    if (m > 0) return String(m) + '分';
+    return String(r) + '秒';
+  }
+
+  // 開始直後に画面読み込みが間に合うよう、制限時間には少しリード時間を足す。
+  var OEKAKI_LEAD_MS = 2000;
+  // 時間切れ後、各端末の自動提出がDBに届くのを待つ猶予。
+  var OEKAKI_JUDGE_GRACE_MS = 4000;
+
+  function createOekakiRoom(roomId, settings, topic) {
+    var s = settings && typeof settings === 'object' ? settings : {};
+    var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 180);
+    var order = Array.isArray(s.order) ? s.order.slice() : [];
+    var room = {
+      createdAt: serverNowMs(),
+      phase: 'drawing',
+      settings: {
+        order: order,
+        drawSeconds: drawSeconds,
+        topicMode: s.topicMode === 'custom' ? 'custom' : 'random',
+        topicAge: s.topicAge === 'kids' || s.topicAge === 'adult' ? String(s.topicAge) : 'school'
+      },
+      round: {
+        index: 1,
+        topic: String(topic || ''),
+        endsAt: serverNowMs() + drawSeconds * 1000 + OEKAKI_LEAD_MS
+      },
+      players: {}
+    };
+    return setValue(oekakiRoomPath(roomId), room);
+  }
+
+  function joinPlayerInOekakiRoom(roomId, playerId, name, isHostPlayer) {
+    var pid = String(playerId || '');
+    if (!pid) return Promise.reject(new Error('参加に失敗しました（ID不正）'));
+    return runTxn(oekakiRoomPath(roomId), function (room) {
+      if (!room) return room;
+
+      var players = assign({}, room.players || {});
+      var prev = players[pid] || {};
+      var next = assign({}, prev, {
+        name: name,
+        joinedAt: prev.joinedAt || serverNowMs(),
+        lastSeenAt: serverNowMs()
+      });
+      if (isHostPlayer) next.isHost = true;
+      players[pid] = next;
+
+      var st = assign({}, room.settings || {});
+      if (!Array.isArray(st.order)) st.order = [];
+      if (st.order.indexOf(pid) === -1) st.order = st.order.concat([pid]);
+
+      return assign({}, room, { players: players, settings: st });
+    });
+  }
+
+  // 提出はプレイヤーノード単位のトランザクション（画像を含む全room送信を避ける）。
+  // round番号を一緒に書き、判定側は現ラウンドの提出だけを採用する。
+  function oekakiSubmitImage(roomId, playerId, roundIndex, dataUrl) {
+    var pid = String(playerId || '');
+    if (!pid) return Promise.reject(new Error('提出に失敗しました（ID不正）'));
+    var rIdx = parseIntSafe(roundIndex, 0);
+    return runTxn(oekakiRoomPath(roomId) + '/players/' + pid, function (p) {
+      if (!p) return p;
+      if (p.image && parseIntSafe(p.round, 0) === rIdx) return p;
+      return assign({}, p, {
+        image: String(dataUrl || ''),
+        submittedAt: serverNowMs(),
+        round: rIdx
+      });
+    });
+  }
+
+  function oekakiCountSubmitted(room) {
+    var players = (room && room.players) || {};
+    var roundIndex = parseIntSafe(room && room.round && room.round.index, 1);
+    var ids = Object.keys(players);
+    var submitted = 0;
+    for (var i = 0; i < ids.length; i++) {
+      var p = players[ids[i]];
+      if (p && p.image && parseIntSafe(p.round, 0) === roundIndex) submitted++;
+    }
+    return { submitted: submitted, total: ids.length };
+  }
+
+  // phaseをCASで奪ってから判定を実行する（二重判定防止）。
+  // 勝者だけが true を受け取り、API呼び出しを行う。
+  function oekakiClaimJudging(roomId, token, fromPhase) {
+    var tk = String(token || '');
+    return runTxn(oekakiRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== String(fromPhase || 'drawing')) return room;
+      return assign({}, room, { phase: 'judging', judgeToken: tk, judgingAt: serverNowMs(), result: null });
+    }).then(function (room) {
+      return !!(room && room.phase === 'judging' && String(room.judgeToken || '') === tk);
+    });
+  }
+
+  function oekakiWriteResult(roomId, result) {
+    return runTxn(oekakiRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== 'judging') return room;
+      return assign({}, room, { phase: 'result', result: result || null });
+    });
+  }
+
+  // 同一メンバー・同一ルームのまま次ラウンドへ（画像と結果をクリア）。
+  function oekakiReplay(roomId, topic) {
+    return runTxn(oekakiRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== 'result') return room;
+
+      var s = room.settings || {};
+      var drawSeconds = clamp(parseIntSafe(s.drawSeconds, 90), 30, 180);
+
+      var players = {};
+      var src = room.players || {};
+      for (var k in src) {
+        if (!hasOwn.call(src, k)) continue;
+        var p = src[k] || {};
+        players[k] = {
+          name: p.name || '',
+          joinedAt: p.joinedAt || serverNowMs(),
+          lastSeenAt: p.lastSeenAt || 0
+        };
+        if (p.isHost) players[k].isHost = true;
+      }
+
+      var idx = parseIntSafe(room.round && room.round.index, 1) + 1;
+      return assign({}, room, {
+        phase: 'drawing',
+        round: {
+          index: idx,
+          topic: String(topic || ''),
+          endsAt: serverNowMs() + drawSeconds * 1000 + OEKAKI_LEAD_MS
+        },
+        players: players,
+        result: null,
+        judgeToken: null,
+        judgingAt: null
+      });
+    });
+  }
+
+  // -------------------- oekaki battle (Gemini AI judging) --------------------
+  var OEKAKI_GEMINI_KEY_LS = 'bbg_gemini_key_v1';
+  var OEKAKI_GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+
+  function loadGeminiApiKey() {
+    var k = '';
+    try {
+      k = String(localStorage.getItem(OEKAKI_GEMINI_KEY_LS) || '').trim();
+    } catch (e) {
+      k = '';
+    }
+    if (k) return k;
+    try {
+      if (window.geminiApiKey) return String(window.geminiApiKey || '').trim();
+    } catch (e2) {
+      // ignore
+    }
+    return '';
+  }
+
+  function saveGeminiApiKey(key) {
+    var k = String(key == null ? '' : key).trim();
+    try {
+      if (!k) localStorage.removeItem(OEKAKI_GEMINI_KEY_LS);
+      else localStorage.setItem(OEKAKI_GEMINI_KEY_LS, k);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function oekakiJudgePrompt(topic, count) {
+    return (
+      'あなたはお絵かきゲームの審査員です。お題は「' + String(topic || '') + '」です。\n' +
+      'これから' + String(count) + '枚の絵を順番に見せます。それぞれについて、お題らしさ・伝わりやすさ・工夫を基準に0〜100点で採点し、' +
+      '日本語20文字以内のポジティブな一言コメントを付けてください。\n' +
+      '点数には差をつけ、同点は避けてください。\n' +
+      'indexは提示順の1始まりの番号です。指定されたJSONスキーマの配列のみを返してください。'
+    );
+  }
+
+  function oekakiCallGeminiOnce(model, apiKey, topic, entries) {
+    var parts = [{ text: oekakiJudgePrompt(topic, entries.length) }];
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      parts.push({ text: '絵' + String(i + 1) + '（プレイヤー: ' + String(e.name || '?') + '）' });
+      parts.push({ inline_data: { mime_type: e.mime || 'image/jpeg', data: e.b64 } });
+    }
+    var body = {
+      contents: [{ parts: parts }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              index: { type: 'INTEGER' },
+              score: { type: 'INTEGER' },
+              comment: { type: 'STRING' }
+            },
+            required: ['index', 'score', 'comment']
+          }
+        }
+      }
+    };
+    var url =
+      'https://generativelanguage.googleapis.com/v1beta/models/' +
+      encodeURIComponent(model) +
+      ':generateContent?key=' +
+      encodeURIComponent(apiKey);
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            var msg = 'Gemini APIエラー (' + String(res.status) + ')';
+            try {
+              var j = JSON.parse(t);
+              if (j && j.error && j.error.message) msg += ': ' + String(j.error.message).slice(0, 200);
+            } catch (e2) {
+              // ignore
+            }
+            var err = new Error(msg);
+            err.status = res.status;
+            throw err;
+          });
+        }
+        return res.json();
+      })
+      .then(function (json) {
+        var text = '';
+        try {
+          var ps = json.candidates[0].content.parts || [];
+          for (var i2 = 0; i2 < ps.length; i2++) {
+            if (ps[i2] && typeof ps[i2].text === 'string') text += ps[i2].text;
+          }
+        } catch (e3) {
+          text = '';
+        }
+        var arr = null;
+        try {
+          arr = JSON.parse(text);
+        } catch (e4) {
+          arr = null;
+        }
+        if (!Array.isArray(arr)) throw new Error('AI判定結果の解析に失敗しました');
+        return arr;
+      });
+  }
+
+  function oekakiCallGemini(apiKey, topic, entries) {
+    var idx = 0;
+    function tryNext(lastErr) {
+      if (idx >= OEKAKI_GEMINI_MODELS.length) {
+        return Promise.reject(lastErr || new Error('Gemini APIに接続できません'));
+      }
+      var model = OEKAKI_GEMINI_MODELS[idx++];
+      return oekakiCallGeminiOnce(model, apiKey, topic, entries).catch(function (e) {
+        // モデル名が無効(404)の場合のみ次の候補を試す。
+        if (e && e.status === 404 && idx < OEKAKI_GEMINI_MODELS.length) return tryNext(e);
+        throw e;
+      });
+    }
+    return tryNext(null);
+  }
+
+  function oekakiParseDataUrl(dataUrl) {
+    var img = String(dataUrl || '');
+    if (img.indexOf('data:') !== 0) return null;
+    var comma = img.indexOf(';base64,');
+    if (comma <= 5) return null;
+    var b64 = img.slice(comma + 8);
+    if (!b64) return null;
+    return { mime: img.slice(5, comma) || 'image/jpeg', b64: b64 };
+  }
+
+  // 判定の実行（claim勝者のみ呼ぶこと）。API失敗時もresultを書いてresultフェーズへ進める。
+  function oekakiRunJudge(roomId, room) {
+    var topic = String((room && room.round && room.round.topic) || '');
+    var roundIndex = parseIntSafe(room && room.round && room.round.index, 1);
+    var players = (room && room.players) || {};
+    var order = room && room.settings && Array.isArray(room.settings.order) ? room.settings.order : Object.keys(players);
+
+    var entries = [];
+    for (var i = 0; i < order.length; i++) {
+      var pid = String(order[i] || '');
+      if (!pid) continue;
+      var p = players[pid];
+      if (!p) continue;
+      if (parseIntSafe(p.round, 0) !== roundIndex) continue;
+      var parsed = oekakiParseDataUrl(p.image);
+      if (!parsed) continue;
+      entries.push({ pid: pid, name: String(p.name || ''), b64: parsed.b64, mime: parsed.mime });
+    }
+
+    function noScoreEntries() {
+      return entries.map(function (e) {
+        return { pid: e.pid, name: e.name, comment: '' };
+      });
+    }
+
+    if (!entries.length) {
+      return oekakiWriteResult(roomId, {
+        judgedAt: serverNowMs(),
+        entries: [],
+        error: '提出された絵がありませんでした'
+      });
+    }
+
+    var apiKey = loadGeminiApiKey();
+    if (!apiKey) {
+      return oekakiWriteResult(roomId, {
+        judgedAt: serverNowMs(),
+        entries: noScoreEntries(),
+        error: 'Gemini APIキーが未設定のため、AI判定なしで発表します（セットアップ画面で設定できます）'
+      });
+    }
+
+    return oekakiCallGemini(apiKey, topic, entries)
+      .then(function (arr) {
+        var scored = entries.map(function (e, i2) {
+          var hit = null;
+          for (var j = 0; j < arr.length; j++) {
+            var a = arr[j];
+            if (a && parseIntSafe(a.index, -1) === i2 + 1) {
+              hit = a;
+              break;
+            }
+          }
+          return {
+            pid: e.pid,
+            name: e.name,
+            score: hit ? clamp(parseIntSafe(hit.score, 0), 0, 100) : 0,
+            comment: hit ? String(hit.comment || '').slice(0, 60) : ''
+          };
+        });
+        scored.sort(function (a, b) {
+          return (b.score || 0) - (a.score || 0);
+        });
+        var rank = 0;
+        var prevScore = null;
+        for (var k2 = 0; k2 < scored.length; k2++) {
+          if (prevScore === null || scored[k2].score !== prevScore) {
+            rank = k2 + 1;
+            prevScore = scored[k2].score;
+          }
+          scored[k2].rank = rank;
+        }
+        return oekakiWriteResult(roomId, { judgedAt: serverNowMs(), entries: scored, error: null });
+      })
+      .catch(function (e) {
+        return oekakiWriteResult(roomId, {
+          judgedAt: serverNowMs(),
+          entries: noScoreEntries(),
+          error: 'AI判定に失敗しました: ' + String((e && e.message) || e)
+        });
+      });
+  }
 
   // -------------------- hannin (犯人は踊る) --------------------
   // NOTE: This is UI metadata (labels/icons). Game rules/effects are implemented separately.
@@ -8418,6 +8852,55 @@
         '</div>';
     }
 
+    var oekakiSetupHtml = '';
+    if (selectedKind === 'oekaki') {
+      var okSet = normalizeOekakiLobbySettings(lobby && lobby.oekakiSettings);
+      var okKeyNote = loadGeminiApiKey()
+        ? ''
+        : '<div class="muted">※ Gemini APIキーが未設定です。AI判定を使うには<a href="?screen=setup">セットアップ</a>で設定してください（未設定でも開始はできます）。</div>';
+      oekakiSetupHtml =
+        '<hr />' +
+        '<div class="stack">' +
+        '<div class="muted">設定（おえかきバトル）</div>' +
+        '<div class="field">' +
+        '<label>制限時間</label>' +
+        '<input id="okDrawSecs" type="range" min="30" max="180" step="30" value="' +
+        String(okSet.drawSeconds) +
+        '" />' +
+        '<div class="kv"><span class="muted">現在</span><b id="okDrawSecsLabel">' +
+        escapeHtml(oekakiFormatSeconds(okSet.drawSeconds)) +
+        '</b></div>' +
+        '</div>' +
+        '<div class="field">' +
+        '<label>お題</label>' +
+        '<select id="okTopicMode">' +
+        '<option value="random" ' +
+        (okSet.topicMode === 'random' ? 'selected' : '') +
+        '>ランダム</option>' +
+        '<option value="custom" ' +
+        (okSet.topicMode === 'custom' ? 'selected' : '') +
+        '>自由記入</option>' +
+        '</select>' +
+        '</div>' +
+        (okSet.topicMode === 'custom'
+          ? '<div class="field"><label>お題（自由記入・全員に表示されます）</label><input id="okCustomTopic" placeholder="例: 消防車" value="' +
+            escapeHtml(okSet.customTopic) +
+            '" /></div>'
+          : '<div class="field"><label>お題の対象年齢</label><select id="okTopicAge">' +
+            '<option value="kids" ' +
+            (okSet.topicAge === 'kids' ? 'selected' : '') +
+            '>こども（〜6歳）</option>' +
+            '<option value="school" ' +
+            (okSet.topicAge === 'school' ? 'selected' : '') +
+            '>小学生</option>' +
+            '<option value="adult" ' +
+            (okSet.topicAge === 'adult' ? 'selected' : '') +
+            '>一般</option>' +
+            '</select></div>') +
+        okKeyNote +
+        '</div>';
+    }
+
     var tableGmNoteHtml = '';
     if (isTableGmDevice) {
       tableGmNoteHtml =
@@ -8451,12 +8934,15 @@
         (selectedKind === 'codenames' ? 'selected' : '') +
         '>コードネーム</option>\n          <option value="hannin" ' +
         (selectedKind === 'hannin' ? 'selected' : '') +
-        '>犯人は踊る</option>\n        </select>\n        <div class="muted">現在: ' +
+        '>犯人は踊る</option>\n          <option value="oekaki" ' +
+        (selectedKind === 'oekaki' ? 'selected' : '') +
+        '>おえかきバトル</option>\n        </select>\n        <div class="muted">現在: ' +
         escapeHtml(currentLabel || '未開始') +
         '</div>\n      </div>' +
         loveletterSetupHtml +
         hanninSetupHtml +
         codenamesSetupHtml +
+        oekakiSetupHtml +
         '\n\n      <hr />\n\n      <div class="row">\n        <button id="lobbyStartGame" class="primary">ゲーム開始</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n    </div>\n  '
     );
   }
@@ -9293,13 +9779,20 @@
   function renderSetup(viewEl) {
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="big">セットアップ</div>\n      <div class="muted">Firebase（Realtime Database）のWeb設定を貼り付けて保存します（JSON でも firebaseConfig のサンプルコードでもOK）。</div>\n\n      <div class="field">\n        <label>Firebase config</label>\n        <textarea id="firebaseConfigJson" placeholder=\'{"apiKey":"...","authDomain":"...","databaseURL":"...","projectId":"...","appId":"..."}\n\nまたは\n\nconst firebaseConfig = { apiKey: "...", databaseURL: "..." }\'></textarea>\n        <div class="muted">※ databaseURL は https:// から始まるRealtime DatabaseのURLです（firebaseio.com / firebasedatabase.app）。</div>\n      </div>\n\n      <div class="row">\n        <button id="saveSetup" class="primary">保存</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n    </div>\n  '
+      '\n    <div class="stack">\n      <div class="big">セットアップ</div>\n      <div class="muted">Firebase（Realtime Database）のWeb設定を貼り付けて保存します（JSON でも firebaseConfig のサンプルコードでもOK）。</div>\n\n      <div class="field">\n        <label>Firebase config</label>\n        <textarea id="firebaseConfigJson" placeholder=\'{"apiKey":"...","authDomain":"...","databaseURL":"...","projectId":"...","appId":"..."}\n\nまたは\n\nconst firebaseConfig = { apiKey: "...", databaseURL: "..." }\'></textarea>\n        <div class="muted">※ databaseURL は https:// から始まるRealtime DatabaseのURLです（firebaseio.com / firebasedatabase.app）。</div>\n      </div>\n\n      <hr />\n\n      <div class="field">\n        <label>Gemini APIキー（おえかきバトルのAI判定用・任意）</label>\n        <input id="geminiApiKeyInput" type="password" placeholder="AIza..." autocomplete="off" />\n        <div class="muted">※ ゲーム開始するホスト端末のみ必要です。Google AI Studio（aistudio.google.com/app/apikey）で無料発行できます。空欄で保存すると削除されます。</div>\n      </div>\n\n      <div class="row">\n        <button id="saveSetup" class="primary">保存</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n    </div>\n  '
     );
 
     var saved = loadFirebaseConfigFromLocalStorage();
     if (saved) {
       var el = document.getElementById('firebaseConfigJson');
       if (el) el.value = JSON.stringify(saved);
+    }
+
+    try {
+      var gk = document.getElementById('geminiApiKeyInput');
+      if (gk) gk.value = loadGeminiApiKey();
+    } catch (eGk) {
+      // ignore
     }
   }
 
@@ -12071,6 +12564,58 @@
         });
       }
 
+      // Oekaki settings: read current form state (fallback to saved lobby settings).
+      function readOekakiFormSettings() {
+        var lob = currentLobby();
+        var cur = normalizeOekakiLobbySettings(lob && lob.oekakiSettings);
+        var elS = document.getElementById('okDrawSecs');
+        if (elS) cur.drawSeconds = clamp(parseIntSafe(elS.value, cur.drawSeconds), 30, 180);
+        var elM = document.getElementById('okTopicMode');
+        if (elM) cur.topicMode = String(elM.value || '') === 'custom' ? 'custom' : 'random';
+        var elA = document.getElementById('okTopicAge');
+        if (elA) {
+          var av = String(elA.value || '');
+          if (av === 'kids' || av === 'school' || av === 'adult') cur.topicAge = av;
+        }
+        var elT = document.getElementById('okCustomTopic');
+        if (elT) cur.customTopic = String(elT.value || '');
+        return cur;
+      }
+
+      function saveOekakiSettingsFromForm() {
+        setLobbyOekakiSettings(lobbyId, readOekakiFormSettings()).catch(function (e) {
+          setInlineError('lobbyHostError', (e && e.message) || '設定の保存に失敗しました');
+        });
+      }
+
+      var okDrawSecsEl = document.getElementById('okDrawSecs');
+      if (okDrawSecsEl && !okDrawSecsEl.__lobby_bound) {
+        okDrawSecsEl.__lobby_bound = true;
+        okDrawSecsEl.addEventListener('input', function () {
+          var lab = document.getElementById('okDrawSecsLabel');
+          if (lab) lab.textContent = oekakiFormatSeconds(clamp(parseIntSafe(okDrawSecsEl.value, 90), 30, 180));
+        });
+        okDrawSecsEl.addEventListener('change', saveOekakiSettingsFromForm);
+      }
+
+      var okTopicModeEl = document.getElementById('okTopicMode');
+      if (okTopicModeEl && !okTopicModeEl.__lobby_bound) {
+        okTopicModeEl.__lobby_bound = true;
+        okTopicModeEl.addEventListener('change', saveOekakiSettingsFromForm);
+      }
+
+      var okTopicAgeEl = document.getElementById('okTopicAge');
+      if (okTopicAgeEl && !okTopicAgeEl.__lobby_bound) {
+        okTopicAgeEl.__lobby_bound = true;
+        okTopicAgeEl.addEventListener('change', saveOekakiSettingsFromForm);
+      }
+
+      var okCustomTopicEl = document.getElementById('okCustomTopic');
+      if (okCustomTopicEl && !okCustomTopicEl.__lobby_bound) {
+        okCustomTopicEl.__lobby_bound = true;
+        okCustomTopicEl.addEventListener('change', saveOekakiSettingsFromForm);
+      }
+
       var startBtn = document.getElementById('lobbyStartGame');
       if (startBtn && !startBtn.__lobby_bound) {
         startBtn.__lobby_bound = true;
@@ -12086,6 +12631,7 @@
             if (kind === 'loveletter') min = 2;
             else if (kind === 'codenames') min = 4;
             else if (kind === 'hannin') min = 3;
+            else if (kind === 'oekaki') min = 2;
             else min = 3; // wordwolf
 
             if (n0 < min) {
@@ -12097,7 +12643,9 @@
                     ? 'コードネーム'
                     : kind === 'hannin'
                       ? '犯人は踊る'
-                      : 'ワードウルフ修正済み';
+                      : kind === 'oekaki'
+                        ? 'おえかきバトル'
+                        : 'ワードウルフ修正済み';
               setInlineError('lobbyHostError', '参加者が足りません（' + gameLabel + 'は' + String(min) + '人以上必要です）');
               return;
             }
@@ -12105,8 +12653,18 @@
             // ignore (fallback to existing flow)
           }
 
+          // Oekaki: custom topic must be filled before start.
+          if (kind === 'oekaki') {
+            var okSetV = readOekakiFormSettings();
+            if (okSetV.topicMode === 'custom' && !String(okSetV.customTopic || '').trim()) {
+              clearInlineError('lobbyHostError');
+              setInlineError('lobbyHostError', 'お題（自由記入）を入力してください');
+              return;
+            }
+          }
+
           // Wordwolf requires the legacy settings screen.
-          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin') {
+          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin' && kind !== 'oekaki') {
             var qWw = {};
             var vWw = getCacheBusterParam();
             if (vWw) qWw.v = vWw;
@@ -12141,6 +12699,7 @@
           var roomId = makeRoomId();
           // Used for hannin redirect after room creation (needs to survive promise chain).
           var hostPidH = '';
+          var hostPidO = '';
           firebaseReady()
             .then(function () {
               if (kind === 'codenames') {
@@ -12254,6 +12813,49 @@
                     return;
                   });
               }
+
+              if (kind === 'oekaki') {
+                var orderO = normalizeOrder(lobby);
+                var membersO = (lobby && lobby.members) || {};
+                var okSetStart = readOekakiFormSettings();
+                var topicO = '';
+                if (okSetStart.topicMode === 'custom') topicO = String(okSetStart.customTopic || '').trim();
+                else topicO = oekakiPickTopic(okSetStart.topicAge, '');
+
+                hostPidO = isTableGm ? '' : String(mid || '');
+                return setLobbyOekakiSettings(lobbyId, okSetStart)
+                  .catch(function () {
+                    return null;
+                  })
+                  .then(function () {
+                    return createOekakiRoom(
+                      roomId,
+                      {
+                        order: orderO,
+                        drawSeconds: okSetStart.drawSeconds,
+                        topicMode: okSetStart.topicMode,
+                        topicAge: okSetStart.topicAge
+                      },
+                      topicO
+                    );
+                  })
+                  .then(function () {
+                    var seqO = Promise.resolve();
+                    for (var oA = 0; oA < orderO.length; oA++) {
+                      (function (pidO) {
+                        seqO = seqO.then(function () {
+                          var nmO = membersO && membersO[pidO] && membersO[pidO].name ? String(membersO[pidO].name) : '';
+                          if (!nmO) nmO = '-';
+                          return joinPlayerInOekakiRoom(roomId, pidO, nmO, hostPidO && String(pidO) === String(hostPidO));
+                        });
+                      })(orderO[oA]);
+                    }
+                    return seqO;
+                  })
+                  .then(function () {
+                    return;
+                  });
+              }
               return;
             })
             .then(function () {
@@ -12285,6 +12887,10 @@
                 // この端末もプレイヤーとして参加したい場合は、別途プレイヤー用URLで参加する。
                 if (!isTableGm && hostPidH) q.player = String(hostPidH);
                 q.screen = isTableGm ? 'hannin_table' : 'hannin_player';
+              } else if (kind === 'oekaki') {
+                q.host = '1';
+                if (!isTableGm && hostPidO) q.player = String(hostPidO);
+                q.screen = 'oekaki_player';
               }
               setQuery(q);
               route();
@@ -12338,7 +12944,8 @@
           order: Array.isArray(lobby && lobby.order) ? lobby.order.slice() : [],
           members: {},
           loveletterExtraCards: Array.isArray(lobby && lobby.loveletterExtraCards) ? lobby.loveletterExtraCards.slice() : [],
-          codenamesAssign: lobby && lobby.codenamesAssign ? lobby.codenamesAssign : null
+          codenamesAssign: lobby && lobby.codenamesAssign ? lobby.codenamesAssign : null,
+          oekakiSettings: lobby && lobby.oekakiSettings ? lobby.oekakiSettings : null
         };
         var members = (lobby && lobby.members) || {};
         var keys = Object.keys(members);
@@ -12432,6 +13039,10 @@
         }
       } else if (kind === 'hannin') {
         q.screen = 'hannin_player';
+        if (isHostDevice) q.host = '1';
+        q.player = String(mid);
+      } else if (kind === 'oekaki') {
+        q.screen = 'oekaki_player';
         if (isHostDevice) q.host = '1';
         q.player = String(mid);
       } else {
@@ -12776,10 +13387,40 @@
     if (saveBtn) {
       saveBtn.addEventListener('click', function () {
         try {
-          var cfg = readSetupForm();
-          saveFirebaseConfigToLocalStorage(cfg);
-        } catch (e) {
-          renderError(viewEl, (e && e.message) || '保存に失敗しました');
+          var gk = document.getElementById('geminiApiKeyInput');
+          if (gk) saveGeminiApiKey(gk.value);
+        } catch (eGk) {
+          // ignore
+        }
+
+        // Firebase config: only parse when the textarea has content.
+        // On devices using embedded config (bbg-config.js), the box is empty and
+        // the user may just want to save the Gemini key — don't treat that as an error.
+        var cfgEl = document.getElementById('firebaseConfigJson');
+        var cfgRaw = String((cfgEl && cfgEl.value) || '').trim();
+        if (cfgRaw) {
+          try {
+            var cfg = readSetupForm();
+            saveFirebaseConfigToLocalStorage(cfg);
+          } catch (e) {
+            renderError(viewEl, (e && e.message) || '保存に失敗しました');
+            return;
+          }
+        } else if (!(window.firebaseConfig || loadFirebaseConfigFromLocalStorage())) {
+          renderError(viewEl, 'Firebase config JSON を貼り付けてください。');
+          return;
+        } else {
+          // Embedded/existing config present and only the Gemini key was updated.
+          try {
+            alert('保存しました。');
+          } catch (eAlert) {
+            // ignore
+          }
+          var qk = {};
+          var vk = getCacheBusterParam();
+          if (vk) qk.v = vk;
+          setQuery(qk);
+          route();
           return;
         }
 
@@ -17957,12 +18598,681 @@
     });
   }
 
+  // ==================== oekaki battle (screens) ====================
+
+  // 12色: 黒/灰/茶/赤/橙/黄/黄緑/緑/水色/青/紫/ピンク（白背景キャンバス前提。消しゴム=白）
+  var OEKAKI_COLORS = [
+    '#111111', '#8a8a8a', '#8b5a2b', '#e5322d',
+    '#f5821f', '#f5d10c', '#8cc63f', '#1f9d55',
+    '#4fc3f7', '#2158d2', '#8e44ad', '#f06292'
+  ];
+
+  function oekakiTopicHtml(room) {
+    var topic = String((room && room.round && room.round.topic) || '');
+    return 'お題「<b>' + escapeHtml(topic) + '</b>」';
+  }
+
+  function renderOekakiPlayer(viewEl, opts) {
+    var room = opts.room;
+    var playerId = opts.playerId;
+    var isHost = !!opts.isHost;
+    var isTableGmDevice = !!opts.isTableGmDevice;
+    var ui = opts.ui;
+
+    var phase = String((room && room.phase) || '');
+    var players = (room && room.players) || {};
+    var roundIndex = parseIntSafe(room && room.round && room.round.index, 1);
+    var counts = oekakiCountSubmitted(room);
+    var me = playerId ? players[playerId] : null;
+    var meSubmitted = !!(me && me.image && parseIntSafe(me.round, 0) === roundIndex);
+    var canDraw = !!(playerId && !isTableGmDevice && me);
+
+    if (phase === 'drawing' && canDraw && !meSubmitted) {
+      var paletteHtml = '';
+      for (var i = 0; i < OEKAKI_COLORS.length; i++) {
+        var c = OEKAKI_COLORS[i];
+        paletteHtml +=
+          '<button class="ok-color okColorBtn' +
+          (!ui.eraser && ui.color === c ? ' sel' : '') +
+          '" data-c="' +
+          escapeHtml(c) +
+          '" style="background:' +
+          escapeHtml(c) +
+          '" aria-label="色"></button>';
+      }
+      paletteHtml +=
+        '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="消しゴム" title="消しゴム">🧽</button>';
+
+      render(
+        viewEl,
+        '<div class="stack ok-stack">' +
+          '<div class="ok-topbar"><div class="ok-topic">' +
+          oekakiTopicHtml(room) +
+          '</div><div class="ok-timer" id="okTimer">--:--</div></div>' +
+          '<div class="ok-canvas-wrap"><canvas id="okCanvas" width="640" height="640"></canvas></div>' +
+          '<div class="ok-palette">' +
+          paletteHtml +
+          '</div>' +
+          '<div class="row ok-tools"><span class="muted ok-pen-label">太さ</span><input id="okPen" type="range" min="2" max="24" step="2" value="' +
+          String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
+          '" /><button id="okDone" class="primary">完成！</button></div>' +
+          '<div class="muted center" id="okStatus">提出済み ' +
+          String(counts.submitted) +
+          '/' +
+          String(counts.total) +
+          '</div>' +
+          '</div>'
+      );
+      return;
+    }
+
+    if (phase === 'drawing' || phase === 'judging') {
+      var waitBadge = '';
+      if (phase === 'judging') waitBadge = '<div class="big">AI判定中…</div><div class="muted">みんなの絵を採点しています</div>';
+      else if (meSubmitted) waitBadge = '<div class="badge">提出しました！あとは待つだけ</div>';
+      else waitBadge = '<div class="ok-timer" id="okTimer">--:--</div>';
+
+      var myImgHtml = '';
+      if (meSubmitted && me && me.image) {
+        myImgHtml = '<img class="ok-mythumb" src="' + escapeHtml(String(me.image)) + '" alt="自分の絵" />';
+      }
+
+      render(
+        viewEl,
+        '<div class="stack center">' +
+          '<div class="ok-topic big">' +
+          oekakiTopicHtml(room) +
+          '</div>' +
+          waitBadge +
+          myImgHtml +
+          '<div class="kv"><span class="muted">提出状況</span><b id="okStatusCount">' +
+          String(counts.submitted) +
+          '/' +
+          String(counts.total) +
+          '</b></div>' +
+          (phase === 'drawing' ? '<div class="muted">全員そろうか時間切れでAI判定に進みます。</div>' : '') +
+          '</div>'
+      );
+      return;
+    }
+
+    if (phase === 'result') {
+      var result = (room && room.result) || {};
+      var entries = Array.isArray(result.entries) ? result.entries : [];
+
+      var cards = '';
+      var entryPids = {};
+      for (var j = 0; j < entries.length; j++) {
+        var en = entries[j] || {};
+        var pid = String(en.pid || '');
+        entryPids[pid] = true;
+        var p = players[pid] || {};
+        var img = p.image && parseIntSafe(p.round, 0) === roundIndex ? String(p.image) : '';
+        var hasScore = en.score != null;
+        var rank = parseIntSafe(en.rank, 0);
+        cards +=
+          '<div class="ok-result-card' +
+          (hasScore && rank === 1 ? ' ok-first' : '') +
+          '">' +
+          '<div class="ok-result-head">' +
+          (hasScore ? '<span class="ok-rank">' + (rank === 1 ? '👑 ' : '') + String(rank) + '位</span>' : '') +
+          '<b class="ok-result-name">' +
+          escapeHtml(String(en.name || '')) +
+          '</b>' +
+          (hasScore ? '<span class="ok-score">' + String(clamp(parseIntSafe(en.score, 0), 0, 100)) + '点</span>' : '') +
+          '</div>' +
+          (img ? '<img class="ok-result-img" src="' + escapeHtml(img) + '" alt="" />' : '<div class="muted">（画像なし）</div>') +
+          (en.comment ? '<div class="muted ok-comment">' + escapeHtml(String(en.comment)) + '</div>' : '') +
+          '</div>';
+      }
+
+      var missingNames = [];
+      var orderR = room && room.settings && Array.isArray(room.settings.order) ? room.settings.order : Object.keys(players);
+      for (var k = 0; k < orderR.length; k++) {
+        var pidM = String(orderR[k] || '');
+        if (!pidM || entryPids[pidM]) continue;
+        var pm = players[pidM];
+        if (!pm) continue;
+        missingNames.push(String(pm.name || '（無名）'));
+      }
+      var missingHtml = missingNames.length
+        ? '<div class="muted center">未提出: ' + escapeHtml(missingNames.join('、')) + '</div>'
+        : '';
+
+      var errorHtml = result.error ? '<div class="card ok-error">' + escapeHtml(String(result.error)) + '</div>' : '';
+
+      var hostHtml = '';
+      if (isHost) {
+        var modeR = room && room.settings && room.settings.topicMode === 'custom' ? 'custom' : 'random';
+        hostHtml += '<hr />';
+        if (result.error) {
+          hostHtml += '<div class="row"><button id="okRejudge" class="ghost">AI判定をやり直す</button></div>';
+        }
+        if (modeR === 'custom') {
+          hostHtml +=
+            '<div class="field"><label>次のお題</label><input id="okReplayTopic" placeholder="例: 富士山" /></div>' +
+            '<div class="row"><button id="okReplayCustom" class="primary">このお題でもういっかい</button></div>';
+        } else {
+          hostHtml += '<div class="row"><button id="okReplay" class="primary">もういっかい（新しいお題）</button></div>';
+        }
+        hostHtml += '<div class="muted">終了するときは画面上部のタイトル（ロビーへ）をタップしてください。</div>';
+        hostHtml += '<div id="okHostError" class="form-error" role="alert"></div>';
+      }
+
+      render(
+        viewEl,
+        '<div class="stack">' +
+          '<div class="big center">結果発表！</div>' +
+          '<div class="muted center">' +
+          oekakiTopicHtml(room) +
+          '（ラウンド' +
+          String(roundIndex) +
+          '）</div>' +
+          errorHtml +
+          cards +
+          missingHtml +
+          hostHtml +
+          '</div>'
+      );
+      return;
+    }
+
+    render(viewEl, '<div class="stack center"><div class="muted">読み込み中…</div></div>');
+  }
+
+  function routeOekakiPlayer(roomId, isHost) {
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (e0) {
+      lobbyId = '';
+    }
+
+    var isTableGmDevice = false;
+    try {
+      var qGm0 = parseQuery();
+      isTableGmDevice = !!(qGm0 && String(qGm0.gmdev || '') === '1');
+    } catch (eGm0) {
+      isTableGmDevice = false;
+    }
+
+    var playerId = '';
+    try {
+      var q1 = parseQuery();
+      playerId = q1 && q1.player ? String(q1.player) : '';
+    } catch (eP) {
+      playerId = '';
+    }
+    if (!playerId && !isTableGmDevice && lobbyId) {
+      try {
+        playerId = String(getOrCreateLobbyMemberId(lobbyId) || '');
+      } catch (eMid) {
+        playerId = '';
+      }
+    }
+    // テーブルGM端末は描かない（進行状況の表示のみ）。
+    if (isTableGmDevice) playerId = '';
+
+    try {
+      if (document.body && document.body.classList) document.body.classList.add('ok-player-screen');
+    } catch (eCls) {
+      // ignore
+    }
+
+    var lastRoom = null;
+    var ui = {
+      color: OEKAKI_COLORS[0],
+      penW: 6,
+      eraser: false,
+      everDrew: false,
+      renderKey: '',
+      timerId: null,
+      submitInFlight: false,
+      judgeInFlight: false,
+      judgeToken: '',
+      lobbyReturnWatching: false,
+      lobbyUnsub: null
+    };
+
+    function redirectToLobby() {
+      if (!lobbyId) return;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = isHost ? 'lobby_host' : 'lobby_player';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (ui.lobbyReturnWatching) return;
+      ui.lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'oekaki' || rid !== String(roomId || '')) {
+              try {
+                if (ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
+              redirectToLobby();
+            }
+          });
+        })
+        .then(function (u2) {
+          ui.lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    function currentRoundIndex(room) {
+      return parseIntSafe(room && room.round && room.round.index, 1);
+    }
+
+    function isMeSubmitted(room) {
+      if (!playerId) return false;
+      var p = room && room.players ? room.players[playerId] : null;
+      return !!(p && p.image && parseIntSafe(p.round, 0) === currentRoundIndex(room));
+    }
+
+    function computeRenderKey(room) {
+      var c = oekakiCountSubmitted(room);
+      var ri = currentRoundIndex(room);
+      var phase = String((room && room.phase) || '');
+      if (phase === 'drawing') {
+        var canDraw = !!(playerId && !isTableGmDevice && room.players && room.players[playerId]);
+        if (canDraw && !isMeSubmitted(room)) {
+          // キャンバス表示中は再描画しない（描きかけの絵が消えるため）。提出数はupdateDynamicで更新。
+          return 'draw|' + ri;
+        }
+        return 'wait|' + ri + '|' + c.submitted + '|' + c.total + '|' + (isMeSubmitted(room) ? 1 : 0);
+      }
+      if (phase === 'judging') return 'judge|' + ri;
+      if (phase === 'result') {
+        var r = (room && room.result) || {};
+        return 'result|' + ri + '|' + String(r.judgedAt || 0) + '|' + (r.error ? 1 : 0);
+      }
+      return 'x|' + phase + '|' + ri;
+    }
+
+    function updateDynamic(room) {
+      var c = oekakiCountSubmitted(room);
+      var st = document.getElementById('okStatus');
+      if (st) st.textContent = '提出済み ' + String(c.submitted) + '/' + String(c.total);
+      var stc = document.getElementById('okStatusCount');
+      if (stc) stc.textContent = String(c.submitted) + '/' + String(c.total);
+    }
+
+    function updateTimerText(room) {
+      var el = document.getElementById('okTimer');
+      if (!el) return 0;
+      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
+      var remainSec = Math.max(0, Math.ceil((endsAt - serverNowMs()) / 1000));
+      el.textContent = formatMMSS(remainSec);
+      return remainSec;
+    }
+
+    function submitNow(isAuto) {
+      if (!playerId || isTableGmDevice) return;
+      if (ui.submitInFlight) return;
+      var room = lastRoom;
+      if (!room || room.phase !== 'drawing') return;
+      if (isMeSubmitted(room)) return;
+      if (!(room.players && room.players[playerId])) return;
+      if (isAuto && !ui.everDrew) return; // 何も描いていなければ自動提出しない（未提出扱い）
+      var cv = document.getElementById('okCanvas');
+      if (!cv) return;
+      var dataUrl = '';
+      try {
+        var out = document.createElement('canvas');
+        out.width = 480;
+        out.height = 480;
+        var octx = out.getContext('2d');
+        octx.fillStyle = '#ffffff';
+        octx.fillRect(0, 0, out.width, out.height);
+        octx.drawImage(cv, 0, 0, out.width, out.height);
+        dataUrl = out.toDataURL('image/jpeg', 0.7);
+      } catch (eC) {
+        dataUrl = '';
+      }
+      if (!dataUrl) return;
+      ui.submitInFlight = true;
+      oekakiSubmitImage(roomId, playerId, currentRoundIndex(room), dataUrl)
+        .catch(function (e) {
+          if (!isAuto) alert((e && e.message) || '提出に失敗しました');
+        })
+        .finally(function () {
+          ui.submitInFlight = false;
+        });
+    }
+
+    function startJudging(fromPhase) {
+      ui.judgeInFlight = true;
+      ui.judgeToken = randomId(10);
+      oekakiClaimJudging(roomId, ui.judgeToken, fromPhase)
+        .then(function (won) {
+          if (!won) return null;
+          // クレーム後に最新スナップショットで判定（直前の提出を取りこぼさない）。
+          return getValueOnce(oekakiRoomPath(roomId)).then(function (fresh) {
+            if (!fresh || fresh.phase !== 'judging') return null;
+            return oekakiRunJudge(roomId, fresh);
+          });
+        })
+        .catch(function (e) {
+          try {
+            if (typeof console !== 'undefined' && console.warn) console.warn('oekaki judge failed', e);
+          } catch (e2) {
+            // ignore
+          }
+        })
+        .finally(function () {
+          ui.judgeInFlight = false;
+        });
+    }
+
+    function maybeStartJudging(room) {
+      if (!isHost) return;
+      if (!room || room.phase !== 'drawing') return;
+      if (ui.judgeInFlight) return;
+      var c = oekakiCountSubmitted(room);
+      var allSubmitted = c.total > 0 && c.submitted >= c.total;
+      var endsAt = parseIntSafe(room.round && room.round.endsAt, 0);
+      var timeUp = endsAt > 0 && serverNowMs() > endsAt + OEKAKI_JUDGE_GRACE_MS;
+      if (!allSubmitted && !timeUp) return;
+      startJudging('drawing');
+    }
+
+    function maybeRecoverJudging(room) {
+      // 判定担当端末が落ちてjudgingのまま止まった場合の再クレーム。
+      if (!isHost) return;
+      if (!room || room.phase !== 'judging') return;
+      if (ui.judgeInFlight) return;
+      var t0 = parseIntSafe(room.judgingAt, 0);
+      if (!t0 || serverNowMs() - t0 < 60000) return;
+      startJudging('judging');
+    }
+
+    function ensureTimer() {
+      if (ui.timerId) return;
+      ui.timerId = setInterval(function () {
+        var q2 = null;
+        try {
+          q2 = parseQuery();
+        } catch (e) {
+          q2 = null;
+        }
+        if (!q2 || String(q2.screen || '') !== 'oekaki_player' || String(q2.room || '') !== String(roomId || '')) {
+          clearInterval(ui.timerId);
+          ui.timerId = null;
+          return;
+        }
+        var room = lastRoom;
+        if (!room) return;
+        if (room.phase === 'drawing') {
+          var remainSec = updateTimerText(room);
+          if (remainSec <= 0) submitNow(true);
+          maybeStartJudging(room);
+        } else if (room.phase === 'judging') {
+          maybeRecoverJudging(room);
+        }
+      }, 250);
+    }
+
+    function updateToolSelection() {
+      var colorBtns = document.querySelectorAll('.okColorBtn');
+      for (var i = 0; i < colorBtns.length; i++) {
+        var b = colorBtns[i];
+        if (!b) continue;
+        var c = String(b.getAttribute('data-c') || '');
+        if (!ui.eraser && c === ui.color) b.classList.add('sel');
+        else b.classList.remove('sel');
+      }
+      var er = document.getElementById('okEraser');
+      if (er) {
+        if (ui.eraser) er.classList.add('sel');
+        else er.classList.remove('sel');
+      }
+    }
+
+    function setupCanvasAndTools() {
+      var cv = document.getElementById('okCanvas');
+      if (cv && !cv.__ok_bound) {
+        cv.__ok_bound = true;
+        var ctx = cv.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        var drawing = false;
+        var last = null;
+
+        function posFromEvent(ev) {
+          var r = cv.getBoundingClientRect();
+          if (!r || !r.width || !r.height) return { x: 0, y: 0 };
+          return {
+            x: (ev.clientX - r.left) * (cv.width / r.width),
+            y: (ev.clientY - r.top) * (cv.height / r.height)
+          };
+        }
+
+        function strokeSeg(a, b) {
+          var r = cv.getBoundingClientRect();
+          var scale = r && r.width ? cv.width / r.width : 1;
+          ctx.strokeStyle = ui.eraser ? '#ffffff' : ui.color;
+          var w = clamp(parseIntSafe(ui.penW, 6), 2, 24) * scale;
+          if (ui.eraser) w = w * 3;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+
+        cv.addEventListener('pointerdown', function (ev) {
+          if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+          if (ev.preventDefault) ev.preventDefault();
+          try {
+            cv.setPointerCapture(ev.pointerId);
+          } catch (eCap) {
+            // ignore
+          }
+          drawing = true;
+          ui.everDrew = true;
+          last = posFromEvent(ev);
+          strokeSeg(last, { x: last.x + 0.01, y: last.y + 0.01 });
+        });
+        cv.addEventListener('pointermove', function (ev) {
+          if (!drawing) return;
+          if (ev.preventDefault) ev.preventDefault();
+          var p = posFromEvent(ev);
+          strokeSeg(last, p);
+          last = p;
+        });
+        var endStroke = function () {
+          drawing = false;
+          last = null;
+        };
+        cv.addEventListener('pointerup', endStroke);
+        cv.addEventListener('pointercancel', endStroke);
+      }
+
+      var colorBtns = document.querySelectorAll('.okColorBtn');
+      for (var i2 = 0; i2 < colorBtns.length; i2++) {
+        var btn = colorBtns[i2];
+        if (!btn || btn.__ok_bound) continue;
+        btn.__ok_bound = true;
+        btn.addEventListener('click', function (ev) {
+          var t = ev && ev.currentTarget ? ev.currentTarget : null;
+          if (!t) return;
+          ui.color = String(t.getAttribute('data-c') || OEKAKI_COLORS[0]);
+          ui.eraser = false;
+          updateToolSelection();
+        });
+      }
+
+      var eraserBtn = document.getElementById('okEraser');
+      if (eraserBtn && !eraserBtn.__ok_bound) {
+        eraserBtn.__ok_bound = true;
+        eraserBtn.addEventListener('click', function () {
+          ui.eraser = !ui.eraser;
+          updateToolSelection();
+        });
+      }
+
+      var penEl = document.getElementById('okPen');
+      if (penEl && !penEl.__ok_bound) {
+        penEl.__ok_bound = true;
+        penEl.addEventListener('input', function () {
+          ui.penW = clamp(parseIntSafe(penEl.value, 6), 2, 24);
+        });
+      }
+
+      var doneBtn = document.getElementById('okDone');
+      if (doneBtn && !doneBtn.__ok_bound) {
+        doneBtn.__ok_bound = true;
+        doneBtn.addEventListener('click', function () {
+          if (!confirm('この絵で提出しますか？')) return;
+          submitNow(false);
+        });
+      }
+    }
+
+    function bindResultButtons(room) {
+      var replayBtn = document.getElementById('okReplay');
+      if (replayBtn && !replayBtn.__ok_bound) {
+        replayBtn.__ok_bound = true;
+        replayBtn.addEventListener('click', function () {
+          replayBtn.disabled = true;
+          var cur = lastRoom || room;
+          var prevTopic = String((cur && cur.round && cur.round.topic) || '');
+          var age = cur && cur.settings && cur.settings.topicAge ? String(cur.settings.topicAge) : 'school';
+          oekakiReplay(roomId, oekakiPickTopic(age, prevTopic))
+            .catch(function (e) {
+              setInlineError('okHostError', (e && e.message) || '失敗しました');
+            })
+            .finally(function () {
+              replayBtn.disabled = false;
+            });
+        });
+      }
+
+      var replayCustomBtn = document.getElementById('okReplayCustom');
+      if (replayCustomBtn && !replayCustomBtn.__ok_bound) {
+        replayCustomBtn.__ok_bound = true;
+        replayCustomBtn.addEventListener('click', function () {
+          var inp = document.getElementById('okReplayTopic');
+          var topic = String((inp && inp.value) || '').trim();
+          if (!topic) {
+            setInlineError('okHostError', '次のお題を入力してください');
+            return;
+          }
+          replayCustomBtn.disabled = true;
+          oekakiReplay(roomId, topic)
+            .catch(function (e) {
+              setInlineError('okHostError', (e && e.message) || '失敗しました');
+            })
+            .finally(function () {
+              replayCustomBtn.disabled = false;
+            });
+        });
+      }
+
+      var rejudgeBtn = document.getElementById('okRejudge');
+      if (rejudgeBtn && !rejudgeBtn.__ok_bound) {
+        rejudgeBtn.__ok_bound = true;
+        rejudgeBtn.addEventListener('click', function () {
+          rejudgeBtn.disabled = true;
+          startJudging('result');
+        });
+      }
+    }
+
+    function renderNow(room) {
+      lastRoom = room;
+
+      try {
+        if (lobbyId) ensureLobbyReturnWatcher();
+      } catch (eLW) {
+        // ignore
+      }
+
+      var key = computeRenderKey(room);
+      if (ui.renderKey !== key) {
+        ui.renderKey = key;
+        renderOekakiPlayer(viewEl, {
+          room: room,
+          roomId: roomId,
+          playerId: playerId,
+          isHost: isHost,
+          isTableGmDevice: isTableGmDevice,
+          ui: ui
+        });
+        setupCanvasAndTools();
+        bindResultButtons(room);
+        if (room.phase === 'drawing') updateTimerText(room);
+      } else {
+        updateDynamic(room);
+      }
+      ensureTimer();
+    }
+
+    firebaseReady()
+      .then(function () {
+        return subscribeOekakiRoom(roomId, function (room) {
+          if (!room) {
+            renderError(viewEl, '部屋が見つかりません');
+            return;
+          }
+          renderNow(room);
+          try {
+            maybeStartJudging(room);
+          } catch (eJ) {
+            // ignore
+          }
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      if (unsub) unsub();
+      if (ui.lobbyUnsub) ui.lobbyUnsub();
+      if (ui.timerId) {
+        clearInterval(ui.timerId);
+        ui.timerId = null;
+      }
+    });
+  }
+
   function route() {
     try {
       if (document && document.body && document.body.classList) {
         document.body.classList.remove('ll-player-screen');
         document.body.classList.remove('ll-table-screen');
         document.body.classList.remove('gm-participant');
+        document.body.classList.remove('ok-player-screen');
       }
     } catch (e0) {
       // ignore
@@ -18050,7 +19360,8 @@
         codenames_player: 1,
         codenames_rejoin: 1,
         hannin_table: 1,
-        hannin_player: 1
+        hannin_player: 1,
+        oekaki_player: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
@@ -18162,6 +19473,11 @@
     if (screen === 'hannin_player') {
       if (!roomId) return routeHome();
       return routeHanninPlayer(roomId, isHost);
+    }
+
+    if (screen === 'oekaki_player') {
+      if (!roomId) return routeHome();
+      return routeOekakiPlayer(roomId, isHost);
     }
 
     if (!roomId) return routeHome();

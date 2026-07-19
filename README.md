@@ -2,12 +2,13 @@
 
 対面で集まって遊ぶボードゲームを、各自スマホのブラウザで補助するためのシンプルなSPAです。
 
-対応ゲーム（2026-01時点）
+対応ゲーム（2026-07時点）
 
 - ワードウルフ（Wordwolf）
 - コードネーム（Codenames）
 - ラブレター（LoveLetter）
 - 犯人は踊る（Hannin）
+- おえかきバトル（Oekaki）… AI判定にGemini APIを使用（後述）
 
 このアプリは「静的ファイル + Firebase Realtime Database」で動きます。
 
@@ -100,6 +101,7 @@ Realtime Database を使い、複数端末で同じ状態を共有します。
 - コードネーム: `codenamesRooms/<roomId>`
 - ラブレター: `loveletterRooms/<roomId>`
 - 犯人は踊る: `hanninRooms/<roomId>`
+- おえかきバトル: `oekakiRooms/<roomId>`
 
 いずれも「ホストが作成 → 参加者がjoin → 以降はroomの状態遷移で全画面が追従」という流れです。
 
@@ -146,6 +148,17 @@ UI
 
 - テーブル表示とプレイヤー表示があり、テーブル端末（`gmdev=1`）の扱いに注意
 
+### 6.5 おえかきバトル
+
+- 全員が同じお題を制限時間内に描き、AI（Gemini）が100点満点で採点＋一言コメント→ランキング発表
+- 画面は `oekaki_player` の1つ（phaseで 描画/待機/判定中/結果 を切替。gmdev端末は進行状況表示のみ）
+- ロビー設定: 制限時間（30秒〜3分、30秒刻み）/ お題（ランダム＋対象年齢3段階 or 自由記入）
+- 絵は 480×480 JPEG(base64) で `oekakiRooms/<id>/players/<pid>/image` に保存（Storage不使用）
+- 判定はホスト端末（URLに `host=1`）だけが実行。phaseのCASトランザクションで二重判定を防止
+- タイマーは既存同様 `round.endsAt`（サーバー時刻基準）。時間切れは各端末が自動提出（何も描いていない場合は未提出扱い）
+- 「もういっかい」（ホストのみ）で同室のまま新お題の次ラウンドへ（累積ポイントなし）
+- API失敗/キー未設定時は「AIなし発表」にフォールバック。結果画面から再判定も可能
+
 ---
 
 ## 7) Firebase セットアップ
@@ -173,10 +186,28 @@ UI
     "rooms": { ".read": true, ".write": true },
     "codenamesRooms": { ".read": true, ".write": true },
     "loveletterRooms": { ".read": true, ".write": true },
-    "hanninRooms": { ".read": true, ".write": true }
+    "hanninRooms": { ".read": true, ".write": true },
+    "oekakiRooms": { ".read": true, ".write": true }
   }
 }
 ```
+
+※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。
+
+### 7.4 Gemini APIキー（おえかきバトルのAI判定）
+
+おえかきバトルは、全員の絵を Gemini API（無料枠あり）で採点します。
+
+1. [Google AI Studio](https://aistudio.google.com/app/apikey) でAPIキーを無料発行（Googleアカウントのみ）
+2. **ゲームを開始するホスト端末**で `?screen=setup` を開き、「Gemini APIキー」欄に貼り付けて保存
+   - 参加者の端末には不要です
+   - `bbg-config.js` の `GEMINI_API_KEY` に埋め込むことも可能（配布先URL固定時）
+3. 公開サイトに埋め込む場合は、Google Cloud Console でキーに
+   - 「アプリケーションの制限: HTTPリファラー（公開URLのみ許可）」
+   - 「API の制限: Generative Language API のみ」
+   を設定してください
+
+キー未設定でもゲームは動作します（AI採点なしで絵の発表のみ）。判定は1ラウンドにつきAPI1リクエスト（全員分の絵をまとめて送信）なので、無料枠で十分足ります。
 
 ---
 

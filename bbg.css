@@ -308,3 +308,38 @@ body.ll-table-screen .app{max-width:980px}
 /* Modal spacing tweaks */
 .ll-overlay-panel .stack{gap:14px}
 .ll-guess-grid{gap:14px}
+
+/* Oekaki battle (おえかきバトル) */
+body.ok-player-screen .app{padding:8px;max-width:560px}
+body.ok-player-screen #view{padding:10px}
+.ok-stack{gap:8px}
+.ok-topbar{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.ok-topic{font-weight:900;font-size:16px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ok-topic b{font-size:1.2em}
+.ok-timer{font-variant-numeric:tabular-nums;font-size:24px;font-weight:900;white-space:nowrap}
+.ok-canvas-wrap{width:100%}
+#okCanvas{
+  width:100%;height:auto;display:block;
+  background:#fff;border-radius:12px;border:1px solid var(--line);
+  touch-action:none;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  cursor:crosshair;
+}
+.ok-palette{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.ok-color{aspect-ratio:1;min-height:36px;border-radius:8px;border:2px solid var(--line);padding:0}
+.ok-color.sel{outline:3px solid var(--text);outline-offset:1px}
+.ok-eraser{aspect-ratio:1;min-height:36px;border-radius:8px;padding:0;background:#fff;color:#111;font-size:18px;line-height:1}
+.ok-eraser.sel{outline:3px solid var(--text);outline-offset:1px}
+.ok-tools{flex-wrap:nowrap}
+.ok-tools input[type="range"]{flex:1;min-width:0;padding:0}
+.ok-pen-label{white-space:nowrap;font-size:12px}
+.ok-mythumb{width:min(240px,60vw);height:auto;border-radius:12px;border:1px solid var(--line);background:#fff;margin:0 auto;display:block}
+.ok-result-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.ok-result-card.ok-first{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}
+.ok-result-head{display:flex;align-items:center;gap:10px}
+.ok-rank{font-weight:900;white-space:nowrap}
+.ok-result-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ok-score{font-weight:900;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ok-result-img{width:100%;max-width:360px;height:auto;border-radius:10px;border:1px solid var(--line);background:#fff;margin:0 auto;display:block}
+.ok-comment{font-size:13px}
+.ok-error{border-color:var(--danger);color:var(--danger);font-size:13px}

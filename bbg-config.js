@@ -38,4 +38,14 @@
   if (firebaseConfig && firebaseConfig.apiKey) {
     window.firebaseConfig = firebaseConfig;
   }
+
+  // Optional: Gemini API key for おえかきバトル (AI judging, host device only).
+  // Get a free key at https://aistudio.google.com/app/apikey
+  // 公開サイトに埋め込む場合は Google Cloud Console でキーに
+  // 「HTTPリファラー制限（公開URLのみ）」と「Generative Language API 限定」を掛けること。
+  // 通常は空のままにして、アプリ内の ?screen=setup で端末ごとに設定するのを推奨。
+  var GEMINI_API_KEY = '';
+  if (GEMINI_API_KEY) {
+    window.geminiApiKey = GEMINI_API_KEY;
+  }
 })();
