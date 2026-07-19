@@ -12765,7 +12765,7 @@
             if (kind === 'loveletter') min = 2;
             else if (kind === 'codenames') min = 4;
             else if (kind === 'hannin') min = 3;
-            else if (kind === 'oekaki') min = 2;
+            else if (kind === 'oekaki') min = 1; // 一人でもOK（採点のみ）
             else min = 3; // wordwolf
 
             if (n0 < min) {
@@ -18857,6 +18857,7 @@
       var result = (room && room.result) || {};
       var entries = Array.isArray(result.entries) ? result.entries : [];
 
+      var isSolo = Object.keys(players).length <= 1;
       var cards = '';
       var entryPids = {};
       for (var j = 0; j < entries.length; j++) {
@@ -18869,10 +18870,10 @@
         var rank = parseIntSafe(en.rank, 0);
         cards +=
           '<div class="ok-result-card' +
-          (hasScore && rank === 1 ? ' ok-first' : '') +
+          (!isSolo && hasScore && rank === 1 ? ' ok-first' : '') +
           '">' +
           '<div class="ok-result-head">' +
-          (hasScore ? '<span class="ok-rank">' + (rank === 1 ? '👑 ' : '') + String(rank) + '位</span>' : '') +
+          (!isSolo && hasScore ? '<span class="ok-rank">' + (rank === 1 ? '👑 ' : '') + String(rank) + '位</span>' : '') +
           '<b class="ok-result-name">' +
           escapeHtml(String(en.name || '')) +
           '</b>' +
@@ -18919,7 +18920,7 @@
       render(
         viewEl,
         '<div class="stack">' +
-          '<div class="big center">結果発表！</div>' +
+          '<div class="big center">' + (isSolo ? '採点結果' : '結果発表！') + '</div>' +
           '<div class="muted center">' +
           oekakiTopicHtml(room) +
           '（ラウンド' +
