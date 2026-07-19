@@ -731,6 +731,8 @@
               if (!val) return Promise.resolve();
               var deletePromises = [];
               Object.keys(val).forEach(function (key) {
+                // '_'で始まるキーは設定用ノード（例: lobbies/_config）なので削除しない
+                if (String(key).charAt(0) === '_') return;
                 deletePromises.push(db.ref(basePath + '/' + key).remove());
               });
               return Promise.all(deletePromises);
@@ -3781,16 +3783,16 @@
       'めがね', 'ロボット'
     ],
     school: [
-      '消防車', 'パトカー', 'カブトムシ', 'クワガタ', 'ラーメン', 'おすし', 'ハンバーガー', 'サッカーボール', 'バスケットボール', '恐竜',
-      'ペンギン', 'パンダ', 'コアラ', 'ライオン', 'ワニ', 'サメ', 'タコ', 'カメ', 'ヘリコプター', '新幹線',
-      'ロケット', 'お城', '学校', 'ランドセル', 'リコーダー', '花火', 'プール', '忍者', 'おばけ', 'ドラゴン',
-      '魔法使い', '滑り台'
+      'しょうぼうしゃ', 'パトカー', 'カブトムシ', 'クワガタ', 'ラーメン', 'おすし', 'ハンバーガー', 'サッカーボール', 'バスケットボール', 'きょうりゅう',
+      'ペンギン', 'パンダ', 'コアラ', 'ライオン', 'ワニ', 'サメ', 'タコ', 'カメ', 'ヘリコプター', 'しんかんせん',
+      'ロケット', 'おしろ', 'がっこう', 'ランドセル', 'リコーダー', 'はなび', 'プール', 'にんじゃ', 'おばけ', 'ドラゴン',
+      'まほうつかい', 'すべりだい'
     ],
     adult: [
-      '自由の女神', 'モナリザ', 'スフィンクス', '東京タワー', '富士山', '二日酔い', '満員電車', 'お花見', '結婚式', '温泉',
-      '回転寿司', 'たこ焼き', 'お好み焼き', 'ラジオ体操', 'マラソン大会', 'サラリーマン', '宅配便', 'リモート会議', '自撮り', '猫カフェ',
-      '観覧車', 'ジェットコースター', 'バーベキュー', '釣り', 'ゴルフ', 'ボウリング', 'カラオケ', '歯医者', '美容室', '宇宙飛行士',
-      '相撲', '雪合戦'
+      'じゆうのめがみ', 'モナリザ', 'スフィンクス', 'とうきょうタワー', 'ふじさん', 'ふつかよい', 'まんいんでんしゃ', 'おはなみ', 'けっこんしき', 'おんせん',
+      'かいてんずし', 'たこやき', 'おこのみやき', 'ラジオたいそう', 'マラソンたいかい', 'サラリーマン', 'たくはいびん', 'リモートかいぎ', 'じどり', 'ねこカフェ',
+      'かんらんしゃ', 'ジェットコースター', 'バーベキュー', 'つり', 'ゴルフ', 'ボウリング', 'カラオケ', 'はいしゃ', 'びよういん', 'うちゅうひこうし',
+      'すもう', 'ゆきがっせん'
     ]
   };
 
@@ -3809,9 +3811,9 @@
     var s = clamp(parseIntSafe(sec, 0), 0, 3600);
     var m = Math.floor(s / 60);
     var r = s % 60;
-    if (m > 0 && r > 0) return String(m) + '分' + String(r) + '秒';
-    if (m > 0) return String(m) + '分';
-    return String(r) + '秒';
+    if (m > 0 && r > 0) return String(m) + 'ぷん' + String(r) + 'びょう';
+    if (m > 0) return String(m) + 'ぷん';
+    return String(r) + 'びょう';
   }
 
   // 開始直後に画面読み込みが間に合うよう、制限時間には少しリード時間を足す。
@@ -3984,6 +3986,33 @@
     }
   }
 
+  // キーのDBバックアップ（PWA/ホーム画面追加でlocalStorageが分離されても消えないように）。
+  // lobbies/_config は既存ルールの $lobbyId ワイルドカードで読み書き可能。
+  // cleanupOldRooms は '_' 始まりキーを削除対象から除外している。
+  var OEKAKI_KEY_DB_PATH = 'lobbies/_config/geminiKey';
+
+  function syncGeminiKeyToDb(key) {
+    var k = String(key == null ? '' : key).trim();
+    return setValue(OEKAKI_KEY_DB_PATH, k ? { key: k, updatedAt: serverNowMs() } : null).catch(function () {
+      // ignore (offline / permission)
+    });
+  }
+
+  // localStorage → 埋め込み → DBバックアップ の順でキーを解決する。
+  function ensureGeminiKeyLoaded() {
+    var k = loadGeminiApiKey();
+    if (k) return Promise.resolve(k);
+    return getValueOnce(OEKAKI_KEY_DB_PATH)
+      .then(function (v) {
+        var kk = v && v.key ? String(v.key).trim() : '';
+        if (kk) saveGeminiApiKey(kk);
+        return kk;
+      })
+      .catch(function () {
+        return '';
+      });
+  }
+
   // --- Gemini key easy-transfer (QR / link / copy) ---
   // キーは公開ファイルに置かず、端末間で「URLフラグメント(#gkey=)」で受け渡す。
   // フラグメントはサーバーに送られずRefererにも乗らないため、クエリ文字列より安全。
@@ -4008,6 +4037,11 @@
     key = String(key || '').trim();
     if (!key) return false;
     saveGeminiApiKey(key);
+    try {
+      syncGeminiKeyToDb(key);
+    } catch (eSync) {
+      // ignore
+    }
     _oekakiKeyJustImported = true;
     // フラグメントをURLから消す（アドレスバー・履歴にキーを残さない）。
     try {
@@ -4123,6 +4157,7 @@
       'あなたはお絵かきゲームの審査員です。お題は「' + String(topic || '') + '」です。\n' +
       'これから' + String(count) + '枚の絵を順番に見せます。それぞれについて、お題らしさ・伝わりやすさ・工夫を基準に0〜100点で採点し、' +
       '日本語20文字以内のポジティブな一言コメントを付けてください。\n' +
+      'コメントは子供も読めるように、ひらがなとカタカナだけで書いてください（漢字は使わないこと）。\n' +
       '点数には差をつけ、同点は避けてください。\n' +
       'indexは提示順の1始まりの番号です。指定されたJSONスキーマの配列のみを返してください。'
     );
@@ -4256,20 +4291,20 @@
       return oekakiWriteResult(roomId, {
         judgedAt: serverNowMs(),
         entries: [],
-        error: '提出された絵がありませんでした'
+        error: 'ていしゅつされた えが ありませんでした'
       });
     }
 
-    var apiKey = loadGeminiApiKey();
-    if (!apiKey) {
-      return oekakiWriteResult(roomId, {
-        judgedAt: serverNowMs(),
-        entries: noScoreEntries(),
-        error: 'Gemini APIキーが未設定のため、AI判定なしで発表します（セットアップ画面で設定できます）'
-      });
-    }
+    return ensureGeminiKeyLoaded().then(function (apiKey) {
+      if (!apiKey) {
+        return oekakiWriteResult(roomId, {
+          judgedAt: serverNowMs(),
+          entries: noScoreEntries(),
+          error: 'AIのキーが みせってい なので、さいてんなしで はっぴょうします（セットアップがめんで せっていできます）'
+        });
+      }
 
-    return oekakiCallGemini(apiKey, topic, entries)
+      return oekakiCallGemini(apiKey, topic, entries)
       .then(function (arr) {
         var scored = entries.map(function (e, i2) {
           var hit = null;
@@ -4305,9 +4340,10 @@
         return oekakiWriteResult(roomId, {
           judgedAt: serverNowMs(),
           entries: noScoreEntries(),
-          error: 'AI判定に失敗しました: ' + String((e && e.message) || e)
+          error: 'AIはんてい に しっぱいしました: ' + String((e && e.message) || e)
         });
       });
+    });
   }
 
   // -------------------- hannin (犯人は踊る) --------------------
@@ -8995,41 +9031,41 @@
       oekakiSetupHtml =
         '<hr />' +
         '<div class="stack">' +
-        '<div class="muted">設定（おえかきバトル）</div>' +
+        '<div class="muted">せってい（おえかきバトル）</div>' +
         '<div class="field">' +
-        '<label>制限時間</label>' +
+        '<label>せいげんじかん</label>' +
         '<input id="okDrawSecs" type="range" min="30" max="180" step="30" value="' +
         String(okSet.drawSeconds) +
         '" />' +
-        '<div class="kv"><span class="muted">現在</span><b id="okDrawSecsLabel">' +
+        '<div class="kv"><span class="muted">いま</span><b id="okDrawSecsLabel">' +
         escapeHtml(oekakiFormatSeconds(okSet.drawSeconds)) +
         '</b></div>' +
         '</div>' +
         '<div class="field">' +
-        '<label>お題</label>' +
+        '<label>おだい</label>' +
         '<select id="okTopicMode">' +
         '<option value="random" ' +
         (okSet.topicMode === 'random' ? 'selected' : '') +
         '>ランダム</option>' +
         '<option value="custom" ' +
         (okSet.topicMode === 'custom' ? 'selected' : '') +
-        '>自由記入</option>' +
+        '>じゆうきにゅう</option>' +
         '</select>' +
         '</div>' +
         (okSet.topicMode === 'custom'
-          ? '<div class="field"><label>お題（自由記入・全員に表示されます）</label><input id="okCustomTopic" placeholder="例: 消防車" value="' +
+          ? '<div class="field"><label>おだい（じゆうきにゅう・ぜんいんに ひょうじされます）</label><input id="okCustomTopic" placeholder="れい: しょうぼうしゃ" value="' +
             escapeHtml(okSet.customTopic) +
             '" /></div>'
-          : '<div class="field"><label>お題の対象年齢</label><select id="okTopicAge">' +
+          : '<div class="field"><label>おだいの たいしょうねんれい</label><select id="okTopicAge">' +
             '<option value="kids" ' +
             (okSet.topicAge === 'kids' ? 'selected' : '') +
-            '>こども（〜6歳）</option>' +
+            '>こども（〜6さい）</option>' +
             '<option value="school" ' +
             (okSet.topicAge === 'school' ? 'selected' : '') +
-            '>小学生</option>' +
+            '>しょうがくせい</option>' +
             '<option value="adult" ' +
             (okSet.topicAge === 'adult' ? 'selected' : '') +
-            '>一般</option>' +
+            '>おとな</option>' +
             '</select></div>') +
         okKeyNote +
         '</div>';
@@ -12792,7 +12828,7 @@
             var okSetV = readOekakiFormSettings();
             if (okSetV.topicMode === 'custom' && !String(okSetV.customTopic || '').trim()) {
               clearInlineError('lobbyHostError');
-              setInlineError('lobbyHostError', 'お題（自由記入）を入力してください');
+              setInlineError('lobbyHostError', 'おだい（じゆうきにゅう）を いれてください');
               return;
             }
           }
@@ -13544,7 +13580,10 @@
       saveBtn.addEventListener('click', function () {
         try {
           var gk = document.getElementById('geminiApiKeyInput');
-          if (gk) saveGeminiApiKey(gk.value);
+          if (gk) {
+            saveGeminiApiKey(gk.value);
+            syncGeminiKeyToDb(gk.value);
+          }
         } catch (eGk) {
           // ignore
         }
@@ -18766,7 +18805,7 @@
 
   function oekakiTopicHtml(room) {
     var topic = String((room && room.round && room.round.topic) || '');
-    return 'お題「<b>' + escapeHtml(topic) + '</b>」';
+    return 'おだい「<b>' + escapeHtml(topic) + '</b>」';
   }
 
   function renderOekakiPlayer(viewEl, opts) {
@@ -18795,28 +18834,42 @@
           escapeHtml(c) +
           '" style="background:' +
           escapeHtml(c) +
-          '" aria-label="色"></button>';
+          '" aria-label="いろ"></button>';
       }
       paletteHtml +=
-        '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="消しゴム" title="消しゴム">🧽</button>';
+        '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="けしゴム" title="けしゴム">🧽</button>';
 
+      // フルスクリーン描画レイアウト（スマホ/タブレットの画面いっぱいにキャンバスを広げる）
       render(
         viewEl,
-        '<div class="stack ok-stack">' +
-          '<div class="ok-topbar"><div class="ok-topic">' +
-          oekakiTopicHtml(room) +
-          '</div><div class="ok-timer" id="okTimer">--:--</div></div>' +
-          '<div class="ok-canvas-wrap"><canvas id="okCanvas" width="640" height="640"></canvas></div>' +
+        '<div class="ok-fs" id="okFs">' +
+          '<div class="ok-fs-top">' +
+          '<div class="ok-fs-topic">おだい「<b>' +
+          escapeHtml(String((room.round && room.round.topic) || '')) +
+          '</b>」</div>' +
+          '<svg class="ok-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">' +
+          '<circle class="ok-ring-bg" cx="22" cy="22" r="18"></circle>' +
+          '<circle class="ok-ring-fg" id="okRingFg" cx="22" cy="22" r="18"></circle>' +
+          '</svg>' +
+          '</div>' +
+          '<div class="ok-fs-canvaswrap" id="okCanvasWrap">' +
+          '<canvas id="okCanvas" width="640" height="640"></canvas>' +
+          '<button id="okPaletteBtn" class="ok-fab ok-fab-palette" aria-label="パレット">🎨</button>' +
+          '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
           '<div class="ok-palette">' +
           paletteHtml +
           '</div>' +
-          '<div class="row ok-tools"><span class="muted ok-pen-label">太さ</span><input id="okPen" type="range" min="2" max="24" step="2" value="' +
+          '<div class="ok-pen-row"><span class="muted ok-pen-label">ふとさ</span><input id="okPen" type="range" min="2" max="24" step="2" value="' +
           String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
-          '" /><button id="okDone" class="primary">完成！</button></div>' +
-          '<div class="muted center" id="okStatus">提出済み ' +
+          '" /></div>' +
+          '<button id="okClearAll" class="danger">ぜんぶ けす</button>' +
+          '</div>' +
+          '<button id="okDone" class="primary ok-fab ok-fab-done">かんせい！</button>' +
+          '<div class="ok-fs-status" id="okStatus">ていしゅつ ' +
           String(counts.submitted) +
           '/' +
           String(counts.total) +
+          '</div>' +
           '</div>' +
           '</div>'
       );
@@ -18824,14 +18877,23 @@
     }
 
     if (phase === 'drawing' || phase === 'judging') {
-      var waitBadge = '';
-      if (phase === 'judging') waitBadge = '<div class="big">AI判定中…</div><div class="muted">みんなの絵を採点しています</div>';
-      else if (meSubmitted) waitBadge = '<div class="badge">提出しました！あとは待つだけ</div>';
-      else waitBadge = '<div class="ok-timer" id="okTimer">--:--</div>';
+      var centerHtml = '';
+      if (phase === 'judging') {
+        centerHtml =
+          '<div class="ok-judge-icon">✏️</div>' +
+          '<div class="big ok-pop">AIはんていちゅう<span class="ok-dots"><span>.</span><span>.</span><span>.</span></span></div>' +
+          '<div class="muted">みんなの えを さいてんしています</div>';
+      } else if (meSubmitted) {
+        centerHtml =
+          '<div><span class="ok-stamp">ていしゅつ かんりょう！</span></div>' +
+          '<div class="muted">みんなが かきおわるのを まってるよ<span class="ok-dots"><span>.</span><span>.</span><span>.</span></span></div>';
+      } else {
+        centerHtml = '<div class="ok-timer" id="okTimer">--:--</div>';
+      }
 
       var myImgHtml = '';
       if (meSubmitted && me && me.image) {
-        myImgHtml = '<img class="ok-mythumb" src="' + escapeHtml(String(me.image)) + '" alt="自分の絵" />';
+        myImgHtml = '<img class="ok-mythumb ok-pop" src="' + escapeHtml(String(me.image)) + '" alt="じぶんのえ" />';
       }
 
       render(
@@ -18840,14 +18902,14 @@
           '<div class="ok-topic big">' +
           oekakiTopicHtml(room) +
           '</div>' +
-          waitBadge +
+          centerHtml +
           myImgHtml +
-          '<div class="kv"><span class="muted">提出状況</span><b id="okStatusCount">' +
+          '<div class="kv"><span class="muted">ていしゅつ</span><b id="okStatusCount">' +
           String(counts.submitted) +
           '/' +
           String(counts.total) +
           '</b></div>' +
-          (phase === 'drawing' ? '<div class="muted">全員そろうか時間切れでAI判定に進みます。</div>' : '') +
+          (phase === 'drawing' ? '<div class="muted">ぜんいん そろうか じかんぎれ で AIはんてい に すすみます。</div>' : '') +
           '</div>'
       );
       return;
@@ -18869,17 +18931,23 @@
         var hasScore = en.score != null;
         var rank = parseIntSafe(en.rank, 0);
         cards +=
-          '<div class="ok-result-card' +
+          '<div class="ok-result-card ok-in' +
           (!isSolo && hasScore && rank === 1 ? ' ok-first' : '') +
-          '">' +
+          '" style="animation-delay:' +
+          String(Math.round(j * 150) / 1000) +
+          's">' +
           '<div class="ok-result-head">' +
-          (!isSolo && hasScore ? '<span class="ok-rank">' + (rank === 1 ? '👑 ' : '') + String(rank) + '位</span>' : '') +
+          (!isSolo && hasScore ? '<span class="ok-rank">' + (rank === 1 ? '👑 ' : '') + String(rank) + 'ばん</span>' : '') +
           '<b class="ok-result-name">' +
           escapeHtml(String(en.name || '')) +
           '</b>' +
-          (hasScore ? '<span class="ok-score">' + String(clamp(parseIntSafe(en.score, 0), 0, 100)) + '点</span>' : '') +
+          (hasScore
+            ? '<span class="ok-score"><span class="okScoreNum" data-score="' +
+              String(clamp(parseIntSafe(en.score, 0), 0, 100)) +
+              '">0</span>てん</span>'
+            : '') +
           '</div>' +
-          (img ? '<img class="ok-result-img" src="' + escapeHtml(img) + '" alt="" />' : '<div class="muted">（画像なし）</div>') +
+          (img ? '<img class="ok-result-img" src="' + escapeHtml(img) + '" alt="" />' : '<div class="muted">（がぞうなし）</div>') +
           (en.comment ? '<div class="muted ok-comment">' + escapeHtml(String(en.comment)) + '</div>' : '') +
           '</div>';
       }
@@ -18894,7 +18962,7 @@
         missingNames.push(String(pm.name || '（無名）'));
       }
       var missingHtml = missingNames.length
-        ? '<div class="muted center">未提出: ' + escapeHtml(missingNames.join('、')) + '</div>'
+        ? '<div class="muted center">みていしゅつ: ' + escapeHtml(missingNames.join('、')) + '</div>'
         : '';
 
       var errorHtml = result.error ? '<div class="card ok-error">' + escapeHtml(String(result.error)) + '</div>' : '';
@@ -18904,23 +18972,23 @@
         var modeR = room && room.settings && room.settings.topicMode === 'custom' ? 'custom' : 'random';
         hostHtml += '<hr />';
         if (result.error) {
-          hostHtml += '<div class="row"><button id="okRejudge" class="ghost">AI判定をやり直す</button></div>';
+          hostHtml += '<div class="row"><button id="okRejudge" class="ghost">AIはんていを やりなおす</button></div>';
         }
         if (modeR === 'custom') {
           hostHtml +=
-            '<div class="field"><label>次のお題</label><input id="okReplayTopic" placeholder="例: 富士山" /></div>' +
-            '<div class="row"><button id="okReplayCustom" class="primary">このお題でもういっかい</button></div>';
+            '<div class="field"><label>つぎのおだい</label><input id="okReplayTopic" placeholder="れい: ふじさん" /></div>' +
+            '<div class="row"><button id="okReplayCustom" class="primary">このおだいで もういっかい</button></div>';
         } else {
-          hostHtml += '<div class="row"><button id="okReplay" class="primary">もういっかい（新しいお題）</button></div>';
+          hostHtml += '<div class="row"><button id="okReplay" class="primary">もういっかい（あたらしいおだい）</button></div>';
         }
-        hostHtml += '<div class="muted">終了するときは画面上部のタイトル（ロビーへ）をタップしてください。</div>';
+        hostHtml += '<div class="muted">おわるときは がめん うえの タイトル（ロビーへ）を タップしてね。</div>';
         hostHtml += '<div id="okHostError" class="form-error" role="alert"></div>';
       }
 
       render(
         viewEl,
         '<div class="stack">' +
-          '<div class="big center">' + (isSolo ? '採点結果' : '結果発表！') + '</div>' +
+          '<div class="big center ok-pop">' + (isSolo ? 'さいてんけっか' : 'けっかはっぴょう！') + '</div>' +
           '<div class="muted center">' +
           oekakiTopicHtml(room) +
           '（ラウンド' +
@@ -18935,7 +19003,36 @@
       return;
     }
 
-    render(viewEl, '<div class="stack center"><div class="muted">読み込み中…</div></div>');
+    render(viewEl, '<div class="stack center"><div class="muted">よみこみちゅう…</div></div>');
+  }
+
+  // 結果画面のスコアを0からカウントアップさせる演出
+  function animateOekakiScores() {
+    var nodes = document.querySelectorAll('.okScoreNum');
+    for (var i = 0; i < nodes.length; i++) {
+      (function (node) {
+        if (!node || node.__ok_animated) return;
+        node.__ok_animated = true;
+        var target = parseIntSafe(node.getAttribute('data-score'), 0);
+        var start = nowMs();
+        var dur = 900;
+        // requestAnimationFrame はバックグラウンドタブで止まるため setTimeout で進める
+        function step() {
+          var t = (nowMs() - start) / dur;
+          if (t >= 1) {
+            node.textContent = String(target);
+            return;
+          }
+          node.textContent = String(Math.floor(target * t));
+          setTimeout(step, 33);
+        }
+        try {
+          setTimeout(step, 33);
+        } catch (e) {
+          node.textContent = String(target);
+        }
+      })(nodes[i]);
+    }
   }
 
   function routeOekakiPlayer(roomId, isHost) {
@@ -19073,17 +19170,38 @@
     function updateDynamic(room) {
       var c = oekakiCountSubmitted(room);
       var st = document.getElementById('okStatus');
-      if (st) st.textContent = '提出済み ' + String(c.submitted) + '/' + String(c.total);
+      if (st) st.textContent = 'ていしゅつ ' + String(c.submitted) + '/' + String(c.total);
       var stc = document.getElementById('okStatusCount');
       if (stc) stc.textContent = String(c.submitted) + '/' + String(c.total);
     }
 
+    // タイマー表示更新: フルスクリーン描画中は円形リング、それ以外の画面ではテキスト。
+    // 残り10秒からはキャンバス枠の赤点滅(ok-warn)も付ける。
+    var OK_RING_CIRC = 113.097; // 2π×r(18)
     function updateTimerText(room) {
-      var el = document.getElementById('okTimer');
-      if (!el) return 0;
       var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
-      var remainSec = Math.max(0, Math.ceil((endsAt - serverNowMs()) / 1000));
-      el.textContent = formatMMSS(remainSec);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 180);
+      var remainMs = Math.max(0, endsAt - serverNowMs());
+      var remainSec = Math.max(0, Math.ceil(remainMs / 1000));
+
+      var fg = document.getElementById('okRingFg');
+      if (fg) {
+        var frac = Math.max(0, Math.min(1, remainMs / (totalSec * 1000)));
+        fg.style.strokeDashoffset = String(OK_RING_CIRC * (1 - frac));
+      }
+
+      var el = document.getElementById('okTimer');
+      if (el) el.textContent = formatMMSS(remainSec);
+
+      try {
+        var fs = document.getElementById('okFs');
+        if (fs) {
+          if (remainSec <= 10 && remainSec > 0) fs.classList.add('ok-warn');
+          else fs.classList.remove('ok-warn');
+        }
+      } catch (eWarn) {
+        // ignore
+      }
       return remainSec;
     }
 
@@ -19099,9 +19217,12 @@
       if (!cv) return;
       var dataUrl = '';
       try {
+        // 端末ごとのキャンバス縦横比を保ったまま長辺480に縮小して提出
         var out = document.createElement('canvas');
-        out.width = 480;
-        out.height = 480;
+        var scO = 480 / Math.max(cv.width, cv.height);
+        if (scO > 1) scO = 1;
+        out.width = Math.max(1, Math.round(cv.width * scO));
+        out.height = Math.max(1, Math.round(cv.height * scO));
         var octx = out.getContext('2d');
         octx.fillStyle = '#ffffff';
         octx.fillRect(0, 0, out.width, out.height);
@@ -19114,7 +19235,7 @@
       ui.submitInFlight = true;
       oekakiSubmitImage(roomId, playerId, currentRoundIndex(room), dataUrl)
         .catch(function (e) {
-          if (!isAuto) alert((e && e.message) || '提出に失敗しました');
+          if (!isAuto) alert((e && e.message) || 'ていしゅつに しっぱいしました');
         })
         .finally(function () {
           ui.submitInFlight = false;
@@ -19209,10 +19330,32 @@
       }
     }
 
+    function setToolPanelVisible(show) {
+      var p = document.getElementById('okToolPanel');
+      if (!p) return;
+      p.style.display = show ? '' : 'none';
+    }
+
     function setupCanvasAndTools() {
       var cv = document.getElementById('okCanvas');
       if (cv && !cv.__ok_bound) {
         cv.__ok_bound = true;
+
+        // 内部解像度を表示領域のアスペクト比に合わせる（長辺640）。
+        // 画面いっぱいのキャンバス（スマホ縦長/タブレット横長どちらも全面）。
+        try {
+          var wrap = document.getElementById('okCanvasWrap');
+          var rw = wrap ? wrap.clientWidth : 0;
+          var rh = wrap ? wrap.clientHeight : 0;
+          if (rw > 2 && rh > 2) {
+            var sc = 640 / Math.max(rw, rh);
+            cv.width = Math.max(64, Math.round(rw * sc));
+            cv.height = Math.max(64, Math.round(rh * sc));
+          }
+        } catch (eSize) {
+          // keep default 640x640
+        }
+
         var ctx = cv.getContext('2d');
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, cv.width, cv.height);
@@ -19247,6 +19390,7 @@
         cv.addEventListener('pointerdown', function (ev) {
           if (ev.pointerType === 'mouse' && ev.button !== 0) return;
           if (ev.preventDefault) ev.preventDefault();
+          setToolPanelVisible(false);
           try {
             cv.setPointerCapture(ev.pointerId);
           } catch (eCap) {
@@ -19272,6 +19416,16 @@
         cv.addEventListener('pointercancel', endStroke);
       }
 
+      var paletteBtn = document.getElementById('okPaletteBtn');
+      if (paletteBtn && !paletteBtn.__ok_bound) {
+        paletteBtn.__ok_bound = true;
+        paletteBtn.addEventListener('click', function () {
+          var p = document.getElementById('okToolPanel');
+          if (!p) return;
+          setToolPanelVisible(p.style.display === 'none');
+        });
+      }
+
       var colorBtns = document.querySelectorAll('.okColorBtn');
       for (var i2 = 0; i2 < colorBtns.length; i2++) {
         var btn = colorBtns[i2];
@@ -19283,6 +19437,7 @@
           ui.color = String(t.getAttribute('data-c') || OEKAKI_COLORS[0]);
           ui.eraser = false;
           updateToolSelection();
+          setToolPanelVisible(false);
         });
       }
 
@@ -19292,6 +19447,7 @@
         eraserBtn.addEventListener('click', function () {
           ui.eraser = !ui.eraser;
           updateToolSelection();
+          setToolPanelVisible(false);
         });
       }
 
@@ -19303,11 +19459,30 @@
         });
       }
 
+      var clearBtn = document.getElementById('okClearAll');
+      if (clearBtn && !clearBtn.__ok_bound) {
+        clearBtn.__ok_bound = true;
+        clearBtn.addEventListener('click', function () {
+          if (!confirm('ぜんぶ けしますか？')) return;
+          try {
+            var cv2 = document.getElementById('okCanvas');
+            var ctx2 = cv2 ? cv2.getContext('2d') : null;
+            if (ctx2) {
+              ctx2.fillStyle = '#ffffff';
+              ctx2.fillRect(0, 0, cv2.width, cv2.height);
+            }
+          } catch (eClr) {
+            // ignore
+          }
+          setToolPanelVisible(false);
+        });
+      }
+
       var doneBtn = document.getElementById('okDone');
       if (doneBtn && !doneBtn.__ok_bound) {
         doneBtn.__ok_bound = true;
         doneBtn.addEventListener('click', function () {
-          if (!confirm('この絵で提出しますか？')) return;
+          if (!confirm('このえで ていしゅつする？')) return;
           submitNow(false);
         });
       }
@@ -19386,6 +19561,13 @@
         setupCanvasAndTools();
         bindResultButtons(room);
         if (room.phase === 'drawing') updateTimerText(room);
+        if (room.phase === 'result') {
+          try {
+            animateOekakiScores();
+          } catch (eAnim) {
+            // ignore
+          }
+        }
       } else {
         updateDynamic(room);
       }
@@ -20763,6 +20945,20 @@
     try {
       importGeminiKeyFromHash();
     } catch (eGkImport) {
+      // ignore
+    }
+
+    // キーをDBと同期（PWA等の別ストレージ環境でも自動復元、保有端末からは自動バックアップ）
+    try {
+      ensureGeminiKeyLoaded()
+        .then(function (k) {
+          if (k) return syncGeminiKeyToDb(k);
+          return null;
+        })
+        .catch(function () {
+          // ignore
+        });
+    } catch (eGkSync) {
       // ignore
     }
 
