@@ -3816,10 +3816,12 @@
     return String(r) + 'びょう';
   }
 
-  // 開始直後に画面読み込みが間に合うよう、制限時間には少しリード時間を足す。
-  var OEKAKI_LEAD_MS = 2000;
+  // 開始前の3カウントダウン表示のためのリード時間（3秒カウント+読み込みバッファ）。
+  var OEKAKI_LEAD_MS = 3500;
   // 時間切れ後、各端末の自動提出がDBに届くのを待つ猶予。
   var OEKAKI_JUDGE_GRACE_MS = 4000;
+  // ドキドキ感の演出: 判定は最低この時間見せてから結果発表する（API応答が速くてもあえて待つ）。
+  var OEKAKI_JUDGE_MIN_MS = 12000;
 
   function createOekakiRoom(roomId, settings, topic) {
     var s = settings && typeof settings === 'object' ? settings : {};
@@ -4262,6 +4264,15 @@
     return { mime: img.slice(5, comma) || 'image/jpeg', b64: b64 };
   }
 
+  // 結果発表をあえて遅らせる（judgingAt から最低 OEKAKI_JUDGE_MIN_MS 経過するまで待つ）。
+  function oekakiSuspenseDelay(room) {
+    var startedAt = parseIntSafe(room && room.judgingAt, 0) || serverNowMs();
+    var waitMs = Math.max(0, OEKAKI_JUDGE_MIN_MS - (serverNowMs() - startedAt));
+    return new Promise(function (resolve) {
+      setTimeout(resolve, waitMs);
+    });
+  }
+
   // 判定の実行（claim勝者のみ呼ぶこと）。API失敗時もresultを書いてresultフェーズへ進める。
   function oekakiRunJudge(roomId, room) {
     var topic = String((room && room.round && room.round.topic) || '');
@@ -4334,7 +4345,10 @@
           }
           scored[k2].rank = rank;
         }
-        return oekakiWriteResult(roomId, { judgedAt: serverNowMs(), entries: scored, error: null });
+        // ドキドキ演出: 最低時間が経つまで結果を出さない
+        return oekakiSuspenseDelay(room).then(function () {
+          return oekakiWriteResult(roomId, { judgedAt: serverNowMs(), entries: scored, error: null });
+        });
       })
       .catch(function (e) {
         return oekakiWriteResult(roomId, {
@@ -18870,6 +18884,7 @@
           '/' +
           String(counts.total) +
           '</div>' +
+          '<div id="okCountdown" class="ok-countdown" style="display:none"><span id="okCountdownNum" class="ok-count-num"></span></div>' +
           '</div>' +
           '</div>'
       );
@@ -18879,10 +18894,32 @@
     if (phase === 'drawing' || phase === 'judging') {
       var centerHtml = '';
       if (phase === 'judging') {
+        // 判定中は全員の絵をギャラリー表示（ドキドキ感の演出）
+        var galleryHtml = '';
+        var orderJ = room && room.settings && Array.isArray(room.settings.order) ? room.settings.order : Object.keys(players);
+        var gIdx = 0;
+        for (var gi = 0; gi < orderJ.length; gi++) {
+          var gPid = String(orderJ[gi] || '');
+          if (!gPid) continue;
+          var gp = players[gPid];
+          if (!gp || !gp.image || parseIntSafe(gp.round, 0) !== roundIndex) continue;
+          galleryHtml +=
+            '<div class="ok-judge-item ok-in" style="animation-delay:' +
+            String(Math.round(gIdx * 120) / 1000) +
+            's"><img class="ok-judge-img" style="animation-delay:' +
+            String(Math.round(gIdx * 300) / 1000) +
+            's" src="' +
+            escapeHtml(String(gp.image)) +
+            '" alt="" /><div class="ok-judge-name">' +
+            escapeHtml(String(gp.name || '')) +
+            '</div></div>';
+          gIdx++;
+        }
         centerHtml =
           '<div class="ok-judge-icon">✏️</div>' +
           '<div class="big ok-pop">AIはんていちゅう<span class="ok-dots"><span>.</span><span>.</span><span>.</span></span></div>' +
-          '<div class="muted">みんなの えを さいてんしています</div>';
+          '<div class="muted">みんなの えを さいてんしています</div>' +
+          (galleryHtml ? '<div class="ok-judge-grid">' + galleryHtml + '</div>' : '');
       } else if (meSubmitted) {
         centerHtml =
           '<div><span class="ok-stamp">ていしゅつ かんりょう！</span></div>' +
@@ -18892,7 +18929,7 @@
       }
 
       var myImgHtml = '';
-      if (meSubmitted && me && me.image) {
+      if (phase === 'drawing' && meSubmitted && me && me.image) {
         myImgHtml = '<img class="ok-mythumb ok-pop" src="' + escapeHtml(String(me.image)) + '" alt="じぶんのえ" />';
       }
 
@@ -19175,6 +19212,41 @@
       if (stc) stc.textContent = String(c.submitted) + '/' + String(c.total);
     }
 
+    // ゲーム開始時の3カウントダウン（サーバー時刻基準なので全端末で同期する）。
+    // ラウンド開始時刻 = endsAt - drawSeconds*1000。それより前なら 3,2,1 を最前面に表示。
+    function updateCountdown(room) {
+      var el = document.getElementById('okCountdown');
+      if (!el) return;
+      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 180);
+      var startAt = endsAt - totalSec * 1000;
+      var diff = startAt - serverNowMs();
+      var span = document.getElementById('okCountdownNum');
+      if (!span) return;
+
+      function setNum(text, isGo) {
+        if (span.textContent === text) return;
+        span.textContent = text;
+        if (isGo) el.classList.add('ok-count-go');
+        else el.classList.remove('ok-count-go');
+        // 数字が変わるたびにポップアニメを再トリガー
+        span.classList.remove('ok-count-pop');
+        void span.offsetWidth;
+        span.classList.add('ok-count-pop');
+      }
+
+      if (diff > 0) {
+        el.style.display = '';
+        setNum(String(Math.min(3, Math.ceil(diff / 1000))), false);
+      } else if (diff > -900) {
+        // スタートの瞬間: 「かいて！」を出す（タッチは通す）
+        el.style.display = '';
+        setNum('かいて！', true);
+      } else {
+        el.style.display = 'none';
+      }
+    }
+
     // タイマー表示更新: フルスクリーン描画中は円形リング、それ以外の画面ではテキスト。
     // 残り10秒からはキャンバス枠の赤点滅(ok-warn)も付ける。
     var OK_RING_CIRC = 113.097; // 2π×r(18)
@@ -19306,6 +19378,11 @@
         if (!room) return;
         if (room.phase === 'drawing') {
           var remainSec = updateTimerText(room);
+          try {
+            updateCountdown(room);
+          } catch (eCd) {
+            // ignore
+          }
           if (remainSec <= 0) submitNow(true);
           maybeStartJudging(room);
         } else if (room.phase === 'judging') {
@@ -19560,7 +19637,14 @@
         });
         setupCanvasAndTools();
         bindResultButtons(room);
-        if (room.phase === 'drawing') updateTimerText(room);
+        if (room.phase === 'drawing') {
+          updateTimerText(room);
+          try {
+            updateCountdown(room);
+          } catch (eCd0) {
+            // ignore
+          }
+        }
         if (room.phase === 'result') {
           try {
             animateOekakiScores();

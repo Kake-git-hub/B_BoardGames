@@ -381,6 +381,32 @@ body.ok-player-screen #view{padding:10px}
 .ok-pen-row{display:flex;gap:8px;align-items:center}
 .ok-pen-row input{flex:1;min-width:0;padding:0}
 
+/* --- countdown overlay (game start 3,2,1) --- */
+.ok-countdown{
+  position:absolute;inset:0;z-index:20;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.55);border-radius:12px;
+}
+.ok-countdown.ok-count-go{background:transparent;pointer-events:none}
+.ok-count-num{
+  font-size:clamp(96px,40vw,220px);font-weight:900;color:#fff;
+  text-shadow:0 4px 24px rgba(0,0,0,.6);
+  font-variant-numeric:tabular-nums;
+}
+.ok-count-go .ok-count-num{font-size:clamp(40px,16vw,96px);color:var(--ok)}
+.ok-count-num.ok-count-pop{animation:okCountPop .9s cubic-bezier(.2,1.6,.4,1) both}
+@keyframes okCountPop{from{transform:scale(2.2);opacity:0}40%{transform:scale(1);opacity:1}to{transform:scale(.92);opacity:.9}}
+
+/* --- judging gallery (all drawings visible while AI judges) --- */
+.ok-judge-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;width:100%;margin-top:6px}
+.ok-judge-item{display:flex;flex-direction:column;gap:4px;align-items:center;min-width:0}
+.ok-judge-img{
+  width:100%;height:auto;border-radius:10px;border:1px solid var(--line);background:#fff;
+  animation:okJudgePulse 1.6s ease-in-out infinite;
+}
+@keyframes okJudgePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+.ok-judge-name{font-size:12px;color:var(--muted);font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* --- animations --- */
 .ok-pop{animation:okPop .45s cubic-bezier(.2,1.6,.4,1) both}
 @keyframes okPop{from{transform:scale(.3);opacity:0}60%{transform:scale(1.12)}to{transform:scale(1);opacity:1}}
