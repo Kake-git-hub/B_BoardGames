@@ -3816,8 +3816,11 @@
     return String(r) + 'びょう';
   }
 
-  // 開始前の3カウントダウン表示のためのリード時間（3秒カウント+読み込みバッファ）。
-  var OEKAKI_LEAD_MS = 3500;
+  // 開始前カウントダウンの各ステップの長さ（3→2→1 を1つずつ表示する間隔）。
+  var OEKAKI_COUNT_STEP_MS = 1000;
+  // 開始前のリード時間。ルーム作成/画面読み込みの遅れを吸収し、
+  // 3カウントダウンの前に「よーい…」の間を置いて「3」を確実に見せるため長めにとる。
+  var OEKAKI_LEAD_MS = 5000;
   // 時間切れ後、各端末の自動提出がDBに届くのを待つ猶予。
   var OEKAKI_JUDGE_GRACE_MS = 4000;
   // ドキドキ感の演出: 判定は最低この時間見せてから結果発表する（API応答が速くてもあえて待つ）。
@@ -19224,24 +19227,31 @@
       var span = document.getElementById('okCountdownNum');
       if (!span) return;
 
-      function setNum(text, isGo) {
+      var S = OEKAKI_COUNT_STEP_MS;
+
+      // mode: 'num'（大きい数字） / 'ready'（よーい…） / 'go'（かいて！・タッチ通過）
+      function setNum(text, mode) {
+        el.classList.toggle('ok-count-go', mode === 'go');
+        el.classList.toggle('ok-count-ready', mode === 'ready');
         if (span.textContent === text) return;
         span.textContent = text;
-        if (isGo) el.classList.add('ok-count-go');
-        else el.classList.remove('ok-count-go');
         // 数字が変わるたびにポップアニメを再トリガー
         span.classList.remove('ok-count-pop');
         void span.offsetWidth;
         span.classList.add('ok-count-pop');
       }
 
-      if (diff > 0) {
+      if (diff > 3 * S) {
+        // 3の前に「よーい…」の間を置く（読み込み遅れをここで吸収し、3を確実に見せる）
         el.style.display = '';
-        setNum(String(Math.min(3, Math.ceil(diff / 1000))), false);
-      } else if (diff > -900) {
+        setNum('よーい…', 'ready');
+      } else if (diff > 0) {
+        el.style.display = '';
+        setNum(String(Math.ceil(diff / S)), 'num');
+      } else if (diff > -1000) {
         // スタートの瞬間: 「かいて！」を出す（タッチは通す）
         el.style.display = '';
-        setNum('かいて！', true);
+        setNum('かいて！', 'go');
       } else {
         el.style.display = 'none';
       }

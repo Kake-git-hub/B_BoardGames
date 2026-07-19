@@ -312,6 +312,14 @@ body.ll-table-screen .app{max-width:980px}
 /* Oekaki battle (おえかきバトル) */
 body.ok-player-screen .app{padding:8px;max-width:560px}
 body.ok-player-screen #view{padding:10px}
+/* お絵かき中の誤タッチでテキスト選択されないようにする（入力欄だけは選択可） */
+body.ok-player-screen{
+  -webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;
+  -webkit-touch-callout:none;
+}
+body.ok-player-screen input,body.ok-player-screen textarea{
+  -webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;
+}
 .ok-stack{gap:8px}
 .ok-topbar{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .ok-topic{font-weight:900;font-size:16px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -364,9 +372,9 @@ body.ok-player-screen #view{padding:10px}
 }
 .ok-fab{position:absolute;z-index:5;border-radius:999px;box-shadow:0 4px 14px rgba(0,0,0,.35)}
 .ok-fab-palette{top:10px;left:10px;width:54px;height:54px;font-size:28px;line-height:1;padding:0;background:var(--card);border:1px solid var(--line)}
-.ok-fab-done{right:10px;bottom:12px;font-weight:900;font-size:18px;padding:12px 20px}
+.ok-fab-done{left:10px;bottom:12px;font-weight:900;font-size:18px;padding:12px 20px}
 .ok-fs-status{
-  position:absolute;left:10px;bottom:16px;z-index:4;
+  position:absolute;right:10px;bottom:16px;z-index:4;
   background:rgba(255,255,255,.85);color:#333;
   padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;
 }
@@ -393,7 +401,9 @@ body.ok-player-screen #view{padding:10px}
   text-shadow:0 4px 24px rgba(0,0,0,.6);
   font-variant-numeric:tabular-nums;
 }
-.ok-count-go .ok-count-num{font-size:clamp(40px,16vw,96px);color:var(--ok)}
+.ok-count-go .ok-count-num,.ok-count-ready .ok-count-num{font-size:clamp(40px,15vw,110px)}
+.ok-count-go .ok-count-num{color:var(--ok)}
+.ok-count-ready .ok-count-num{color:#fff;opacity:.92}
 .ok-count-num.ok-count-pop{animation:okCountPop .9s cubic-bezier(.2,1.6,.4,1) both}
 @keyframes okCountPop{from{transform:scale(2.2);opacity:0}40%{transform:scale(1);opacity:1}to{transform:scale(.92);opacity:.9}}
 
