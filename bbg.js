@@ -3984,6 +3984,140 @@
     }
   }
 
+  // --- Gemini key easy-transfer (QR / link / copy) ---
+  // キーは公開ファイルに置かず、端末間で「URLフラグメント(#gkey=)」で受け渡す。
+  // フラグメントはサーバーに送られずRefererにも乗らないため、クエリ文字列より安全。
+  var _oekakiKeyJustImported = false;
+
+  function importGeminiKeyFromHash() {
+    var h = '';
+    try {
+      h = String(location.hash || '');
+    } catch (e) {
+      h = '';
+    }
+    if (!h) return false;
+    var m = h.match(/[#&]gkey=([^&]+)/);
+    if (!m) return false;
+    var key = '';
+    try {
+      key = decodeURIComponent(m[1]);
+    } catch (e2) {
+      key = m[1];
+    }
+    key = String(key || '').trim();
+    if (!key) return false;
+    saveGeminiApiKey(key);
+    _oekakiKeyJustImported = true;
+    // フラグメントをURLから消す（アドレスバー・履歴にキーを残さない）。
+    try {
+      history.replaceState(null, '', (location.pathname || '') + (location.search || ''));
+    } catch (e3) {
+      try {
+        location.hash = '';
+      } catch (e4) {
+        // ignore
+      }
+    }
+    return true;
+  }
+
+  function maskGeminiKey(key) {
+    var k = String(key || '');
+    if (!k) return '';
+    if (k.length <= 10) return k.charAt(0) + '••••';
+    return k.slice(0, 6) + '••••' + k.slice(-3);
+  }
+
+  // 共有用URL（現在のキーをフラグメントに載せて setup 画面を開く）
+  function buildGeminiKeyShareUrl() {
+    var key = loadGeminiApiKey();
+    if (!key) return '';
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    q.screen = 'setup';
+    var qs = buildQuery(q);
+    return baseUrl() + (qs ? '?' + qs : '') + '#gkey=' + encodeQS(key);
+  }
+
+  // キー入りQRは必ずローカル生成のみ（外部QRサービスに送るとキーが漏れるため使わない）。
+  function drawGeminiKeyQr(url) {
+    var canvas = document.getElementById('geminiKeyQr');
+    var note = document.getElementById('geminiKeyQrNote');
+    if (!canvas) return;
+    var qr = window.QRCode || window.qrcode || window.QR;
+    if (qr && qr.toCanvas) {
+      try {
+        qr.toCanvas(canvas, String(url || ''), { margin: 1, width: 200 }, function (err) {
+          if (err && note) note.textContent = 'QRを生成できませんでした。下のリンク/キーをコピーして使ってください。';
+        });
+        return;
+      } catch (e) {
+        // fall through
+      }
+    }
+    try {
+      canvas.style.display = 'none';
+    } catch (e2) {
+      // ignore
+    }
+    if (note) note.textContent = 'この端末ではQRを生成できません。下のリンク/キーをコピーして使ってください。';
+  }
+
+  function renderGeminiShareArea() {
+    var area = document.getElementById('geminiShareArea');
+    if (!area) return;
+    var key = loadGeminiApiKey();
+    if (!key) {
+      area.innerHTML = '';
+      return;
+    }
+    var shareUrl = buildGeminiKeyShareUrl();
+    area.innerHTML =
+      '<hr />' +
+      '<div class="stack">' +
+      '<div class="muted">このキーを別の端末に渡す（QR / リンク / コピー）</div>' +
+      '<div class="center"><canvas id="geminiKeyQr" width="200" height="200" style="background:#fff;border-radius:12px;padding:8px"></canvas></div>' +
+      '<div class="muted center" id="geminiKeyQrNote"></div>' +
+      '<div class="field" style="margin:0"><label>共有リンク（別端末で開くとキーが入ります）</label><div class="code" id="geminiShareUrlText">' +
+      escapeHtml(shareUrl) +
+      '</div></div>' +
+      '<div class="row">' +
+      '<button id="copyGeminiKey" class="ghost">キーをコピー</button>' +
+      '<button id="copyGeminiLink" class="ghost">共有リンクをコピー</button>' +
+      '</div>' +
+      '<div class="muted" id="geminiShareStatus"></div>' +
+      '<div class="form-error">⚠ このQR・リンクにはキーが含まれます。SNS等に公開しないでください（仲間内での共有だけに使ってください）。</div>' +
+      '<div class="muted">現在のキー: ' +
+      escapeHtml(maskGeminiKey(key)) +
+      '</div>' +
+      '</div>';
+
+    drawGeminiKeyQr(shareUrl);
+
+    function setStatus(ok, okMsg) {
+      var st = document.getElementById('geminiShareStatus');
+      if (st) st.textContent = ok ? okMsg : 'コピーに失敗しました（手動で選択してください）';
+    }
+    var ck = document.getElementById('copyGeminiKey');
+    if (ck) {
+      ck.addEventListener('click', function () {
+        copyTextToClipboard(key).then(function (ok) {
+          setStatus(ok, 'キーをコピーしました');
+        });
+      });
+    }
+    var cl = document.getElementById('copyGeminiLink');
+    if (cl) {
+      cl.addEventListener('click', function () {
+        copyTextToClipboard(shareUrl).then(function (ok) {
+          setStatus(ok, '共有リンクをコピーしました');
+        });
+      });
+    }
+  }
+
   function oekakiJudgePrompt(topic, count) {
     return (
       'あなたはお絵かきゲームの審査員です。お題は「' + String(topic || '') + '」です。\n' +
@@ -9779,7 +9913,7 @@
   function renderSetup(viewEl) {
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="big">セットアップ</div>\n      <div class="muted">Firebase（Realtime Database）のWeb設定を貼り付けて保存します（JSON でも firebaseConfig のサンプルコードでもOK）。</div>\n\n      <div class="field">\n        <label>Firebase config</label>\n        <textarea id="firebaseConfigJson" placeholder=\'{"apiKey":"...","authDomain":"...","databaseURL":"...","projectId":"...","appId":"..."}\n\nまたは\n\nconst firebaseConfig = { apiKey: "...", databaseURL: "..." }\'></textarea>\n        <div class="muted">※ databaseURL は https:// から始まるRealtime DatabaseのURLです（firebaseio.com / firebasedatabase.app）。</div>\n      </div>\n\n      <hr />\n\n      <div class="field">\n        <label>Gemini APIキー（おえかきバトルのAI判定用・任意）</label>\n        <input id="geminiApiKeyInput" type="password" placeholder="AIza..." autocomplete="off" />\n        <div class="muted">※ ゲーム開始するホスト端末のみ必要です。Google AI Studio（aistudio.google.com/app/apikey）で無料発行できます。空欄で保存すると削除されます。</div>\n      </div>\n\n      <div class="row">\n        <button id="saveSetup" class="primary">保存</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n    </div>\n  '
+      '\n    <div class="stack">\n      <div class="big">セットアップ</div>\n      <div class="muted">Firebase（Realtime Database）のWeb設定を貼り付けて保存します（JSON でも firebaseConfig のサンプルコードでもOK）。</div>\n\n      <div class="field">\n        <label>Firebase config</label>\n        <textarea id="firebaseConfigJson" placeholder=\'{"apiKey":"...","authDomain":"...","databaseURL":"...","projectId":"...","appId":"..."}\n\nまたは\n\nconst firebaseConfig = { apiKey: "...", databaseURL: "..." }\'></textarea>\n        <div class="muted">※ databaseURL は https:// から始まるRealtime DatabaseのURLです（firebaseio.com / firebasedatabase.app）。</div>\n      </div>\n\n      <hr />\n\n      <div class="field">\n        <label>Gemini APIキー（おえかきバトルのAI判定用・任意）</label>\n        <input id="geminiApiKeyInput" type="password" placeholder="AIza..." autocomplete="off" />\n        <div class="muted">※ ゲーム開始するホスト端末のみ必要です。Google AI Studio（aistudio.google.com/app/apikey）で無料発行できます。空欄で保存すると削除されます。一度入れた端末では以降ずっと保持されます。</div>\n      </div>\n\n      <div id="geminiImportNotice" class="badge" style="display:none"></div>\n\n      <div class="row">\n        <button id="saveSetup" class="primary">保存</button>\n        <a class="btn ghost" href="./">戻る</a>\n      </div>\n\n      <div id="geminiShareArea"></div>\n    </div>\n  '
     );
 
     var saved = loadFirebaseConfigFromLocalStorage();
@@ -13383,6 +13517,28 @@
 
   function routeSetup() {
     renderSetup(viewEl);
+
+    // Show the QR / link / copy area for propagating the key to other host devices.
+    try {
+      renderGeminiShareArea();
+    } catch (eShare) {
+      // ignore
+    }
+
+    // If we just imported a key via #gkey=..., tell the user.
+    try {
+      if (_oekakiKeyJustImported) {
+        _oekakiKeyJustImported = false;
+        var notice = document.getElementById('geminiImportNotice');
+        if (notice) {
+          notice.textContent = '✓ キーを取り込みました（この端末に保存済み）';
+          notice.style.display = '';
+        }
+      }
+    } catch (eNotice) {
+      // ignore
+    }
+
     var saveBtn = document.getElementById('saveSetup');
     if (saveBtn) {
       saveBtn.addEventListener('click', function () {
@@ -13411,16 +13567,17 @@
           return;
         } else {
           // Embedded/existing config present and only the Gemini key was updated.
+          // Stay on setup and refresh the share area so the QR/link appear immediately.
           try {
-            alert('保存しました。');
-          } catch (eAlert) {
+            renderGeminiShareArea();
+          } catch (eShare2) {
             // ignore
           }
-          var qk = {};
-          var vk = getCacheBusterParam();
-          if (vk) qk.v = vk;
-          setQuery(qk);
-          route();
+          var notice2 = document.getElementById('geminiImportNotice');
+          if (notice2) {
+            notice2.textContent = loadGeminiApiKey() ? '✓ 保存しました。下のQR/リンクで他の端末に渡せます。' : '✓ キーを削除しました。';
+            notice2.style.display = '';
+          }
           return;
         }
 
@@ -20598,6 +20755,13 @@
     try {
       cleanupOldRooms();
     } catch (eCleanup) {
+      // ignore
+    }
+
+    // おえかきバトル: 共有リンク/QR(#gkey=...)からGeminiキーを取り込む
+    try {
+      importGeminiKeyFromHash();
+    } catch (eGkImport) {
       // ignore
     }
 
