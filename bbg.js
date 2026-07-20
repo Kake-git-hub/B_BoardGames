@@ -18826,6 +18826,9 @@
     '#4fc3f7', '#2158d2', '#8e44ad', '#f06292'
   ];
 
+  // スタンプ（絵文字）: タップした場所に押せる。ふとさスライダーで大きさが変わる。
+  var OEKAKI_STAMPS = ['⭐', '❤️', '😀', '🐱', '🌸', '🍎', '☀️', '🌈'];
+
   function oekakiTopicHtml(room) {
     var topic = String((room && room.round && room.round.topic) || '');
     return 'おだい「<b>' + escapeHtml(topic) + '</b>」';
@@ -18862,6 +18865,19 @@
       paletteHtml +=
         '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="けしゴム" title="けしゴム">🧽</button>';
 
+      var stampHtml = '';
+      for (var si = 0; si < OEKAKI_STAMPS.length; si++) {
+        var st = OEKAKI_STAMPS[si];
+        stampHtml +=
+          '<button class="ok-stampbtn okStampBtn' +
+          (ui.stamp === st ? ' sel' : '') +
+          '" data-s="' +
+          escapeHtml(st) +
+          '" aria-label="スタンプ">' +
+          st +
+          '</button>';
+      }
+
       // フルスクリーン描画レイアウト（スマホ/タブレットの画面いっぱいにキャンバスを広げる）
       render(
         viewEl,
@@ -18882,6 +18898,9 @@
           '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
           '<div class="ok-palette">' +
           paletteHtml +
+          '</div>' +
+          '<div class="ok-stamps">' +
+          stampHtml +
           '</div>' +
           '<div class="ok-pen-row"><span class="muted ok-pen-label">ふとさ</span><input id="okPen" type="range" min="2" max="24" step="2" value="' +
           String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
@@ -19130,6 +19149,7 @@
       color: OEKAKI_COLORS[0],
       penW: 6,
       eraser: false,
+      stamp: '',
       everDrew: false,
       renderKey: '',
       timerId: null,
@@ -19421,13 +19441,22 @@
         var b = colorBtns[i];
         if (!b) continue;
         var c = String(b.getAttribute('data-c') || '');
-        if (!ui.eraser && c === ui.color) b.classList.add('sel');
+        // スタンプ選択中や消しゴム中は色ハイライトを消す
+        if (!ui.eraser && !ui.stamp && c === ui.color) b.classList.add('sel');
         else b.classList.remove('sel');
       }
       var er = document.getElementById('okEraser');
       if (er) {
         if (ui.eraser) er.classList.add('sel');
         else er.classList.remove('sel');
+      }
+      var stampBtns = document.querySelectorAll('.okStampBtn');
+      for (var j = 0; j < stampBtns.length; j++) {
+        var sb = stampBtns[j];
+        if (!sb) continue;
+        var sv = String(sb.getAttribute('data-s') || '');
+        if (ui.stamp && sv === ui.stamp) sb.classList.add('sel');
+        else sb.classList.remove('sel');
       }
     }
 
@@ -19657,9 +19686,32 @@
           ctx.stroke();
         }
 
+        // スタンプ（絵文字）を1回押す。大きさは「ふとさ」に連動。
+        function placeStamp(pos) {
+          if (!ui.stamp) return;
+          var sizePx = clamp(parseIntSafe(ui.penW, 6), 2, 24) * (Math.min(cv.width, cv.height) / 90);
+          sizePx = Math.max(20, Math.round(sizePx));
+          ctx.save();
+          ctx.font = sizePx + 'px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          try {
+            ctx.fillText(ui.stamp, pos.x, pos.y);
+          } catch (eStamp) {
+            // ignore
+          }
+          ctx.restore();
+        }
+
         cv.addEventListener('pointerdown', function (ev) {
           if (ev.pointerType === 'mouse' && ev.button !== 0) return;
           if (ev.preventDefault) ev.preventDefault();
+          // パレットが開いているときは、最初のタップは閉じるだけ（誤って点を描かない）。
+          var panelEl = document.getElementById('okToolPanel');
+          if (panelEl && panelEl.style.display !== 'none') {
+            setToolPanelVisible(false);
+            return;
+          }
           setToolPanelVisible(false);
           // 最初のタッチ操作で全画面へ（タブレット等のタッチ時のみ・ユーザー操作中に限る）。
           // 一度試したら以後は自動では出さない（ユーザーが自分で解除した場合を尊重）。
@@ -19671,6 +19723,13 @@
               // ignore
             }
           }
+          last = posFromEvent(ev);
+          // スタンプ選択中はタップ位置に1個押す（フリーハンドはしない）。
+          if (ui.stamp && !ui.eraser) {
+            ui.everDrew = true;
+            placeStamp(last);
+            return;
+          }
           try {
             cv.setPointerCapture(ev.pointerId);
           } catch (eCap) {
@@ -19678,7 +19737,6 @@
           }
           drawing = true;
           ui.everDrew = true;
-          last = posFromEvent(ev);
           strokeSeg(last, { x: last.x + 0.01, y: last.y + 0.01 });
         });
         cv.addEventListener('pointermove', function (ev) {
@@ -19727,6 +19785,7 @@
           if (!t) return;
           ui.color = String(t.getAttribute('data-c') || OEKAKI_COLORS[0]);
           ui.eraser = false;
+          ui.stamp = ''; // 色を選んだらペンに戻す
           updateToolSelection();
           setToolPanelVisible(false);
         });
@@ -19737,6 +19796,24 @@
         eraserBtn.__ok_bound = true;
         eraserBtn.addEventListener('click', function () {
           ui.eraser = !ui.eraser;
+          ui.stamp = ''; // 消しゴムはスタンプ解除
+          updateToolSelection();
+          setToolPanelVisible(false);
+        });
+      }
+
+      var stampBtns = document.querySelectorAll('.okStampBtn');
+      for (var i3 = 0; i3 < stampBtns.length; i3++) {
+        var sbtn = stampBtns[i3];
+        if (!sbtn || sbtn.__ok_bound) continue;
+        sbtn.__ok_bound = true;
+        sbtn.addEventListener('click', function (ev) {
+          var t = ev && ev.currentTarget ? ev.currentTarget : null;
+          if (!t) return;
+          var sv = String(t.getAttribute('data-s') || '');
+          // 同じスタンプを再タップで解除（ペンに戻す）。
+          ui.stamp = ui.stamp === sv ? '' : sv;
+          ui.eraser = false;
           updateToolSelection();
           setToolPanelVisible(false);
         });

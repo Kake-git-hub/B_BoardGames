@@ -325,6 +325,9 @@ body.ok-player-screen input,body.ok-player-screen textarea{
    ピンチズームはJS(gesturestart/2本指touchmove)側で無効化する。 */
 body.ok-player-screen,body.ok-player-screen *{touch-action:manipulation}
 body.ok-player-screen #okCanvas{touch-action:none}
+/* お絵かき全画面は端を塗るときの誤ピンチ/ズームを完全に無効化（スライダーだけ横ドラッグ許可） */
+body.ok-player-screen .ok-fs,body.ok-player-screen .ok-fs *{touch-action:none}
+body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .ok-stack{gap:8px}
 .ok-topbar{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .ok-topic{font-weight:900;font-size:16px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -338,11 +341,16 @@ body.ok-player-screen #okCanvas{touch-action:none}
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   cursor:crosshair;
 }
-.ok-palette{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
-.ok-color{aspect-ratio:1;min-height:36px;border-radius:8px;border:2px solid var(--line);padding:0}
-.ok-color.sel{outline:3px solid var(--text);outline-offset:1px}
-.ok-eraser{aspect-ratio:1;min-height:36px;border-radius:8px;padding:0;background:#fff;color:#111;font-size:18px;line-height:1}
-.ok-eraser.sel{outline:3px solid var(--text);outline-offset:1px}
+/* カラーは1行に収める（12色＋消しゴム＝13個） */
+.ok-palette{display:grid;grid-template-columns:repeat(13,1fr);gap:5px}
+.ok-color{aspect-ratio:1;min-height:0;border-radius:8px;border:2px solid var(--line);padding:0}
+.ok-color.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
+.ok-eraser{aspect-ratio:1;min-height:0;border-radius:8px;padding:0;background:#fff;color:#111;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
+.ok-eraser.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
+/* スタンプ行（.ok-stamp は結果画面の別用途で使用済みのため .ok-stampbtn を使う） */
+.ok-stamps{display:grid;grid-template-columns:repeat(8,1fr);gap:8px}
+.ok-stampbtn{aspect-ratio:1;min-height:0;border-radius:12px;border:2px solid var(--line);background:#fff;font-size:clamp(20px,6vw,30px);line-height:1;padding:0;display:flex;align-items:center;justify-content:center}
+.ok-stampbtn.sel{outline:4px solid var(--accent);outline-offset:2px;z-index:1}
 .ok-tools{flex-wrap:nowrap}
 .ok-tools input[type="range"]{flex:1;min-width:0;padding:0}
 .ok-pen-label{white-space:nowrap;font-size:12px}
@@ -389,15 +397,34 @@ body.ok-player-screen #okCanvas{touch-action:none}
   padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;
 }
 .ok-tool-panel{
-  position:absolute;top:72px;left:10px;z-index:6;
-  background:var(--card);border:1px solid var(--line);border-radius:14px;
-  padding:12px;display:flex;flex-direction:column;gap:10px;
-  width:min(300px, calc(100% - 20px));
-  box-shadow:0 8px 24px rgba(0,0,0,.45);
-  animation:okPop .25s ease-out both;
+  position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:30;
+  background:var(--card);border:1px solid var(--line);border-radius:18px;
+  padding:22px;display:flex;flex-direction:column;gap:18px;
+  width:min(560px, 96vw);max-height:90vh;overflow:auto;
+  box-shadow:0 18px 52px rgba(0,0,0,.6);
+  animation:okPanelIn .2s ease-out both;
 }
-.ok-pen-row{display:flex;gap:8px;align-items:center}
-.ok-pen-row input{flex:1;min-width:0;padding:0}
+/* 中央寄せ(translate)を保ったままポップさせる（okPopはtransformを上書きして中央がずれるため専用） */
+@keyframes okPanelIn{
+  from{opacity:0;transform:translate(-50%,-50%) scale(.85)}
+  to{opacity:1;transform:translate(-50%,-50%) scale(1)}
+}
+/* ペンの太さ: 上下に余白をとってスライダーを触りやすく、つまみも大きく */
+.ok-pen-row{display:flex;flex-direction:column;gap:10px;padding:12px 4px;margin:6px 0}
+.ok-pen-label{font-size:15px;font-weight:700}
+.ok-pen-row input[type="range"]{
+  width:100%;min-width:0;height:44px;margin:0;padding:0;border:none;background:transparent;
+  -webkit-appearance:none;appearance:none;touch-action:pan-x;
+}
+.ok-pen-row input[type="range"]::-webkit-slider-runnable-track{height:10px;border-radius:999px;background:var(--line)}
+.ok-pen-row input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:34px;height:34px;border-radius:50%;
+  background:var(--accent);border:3px solid #fff;margin-top:-12px;box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
+.ok-pen-row input[type="range"]::-moz-range-track{height:10px;border-radius:999px;background:var(--line)}
+.ok-pen-row input[type="range"]::-moz-range-thumb{
+  width:34px;height:34px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
 
 /* --- countdown overlay (game start 3,2,1) --- */
 .ok-countdown{
