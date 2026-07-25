@@ -341,10 +341,13 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   cursor:crosshair;
 }
-/* カラーは1行に収める（12色＋消しゴム＝13個） */
-.ok-palette{display:grid;grid-template-columns:repeat(13,1fr);gap:5px}
+/* カラーは7列×2段（13色＋消しゴム＝14個）。1行に詰めるより指で押しやすい。 */
+.ok-palette{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
 .ok-color{aspect-ratio:1;min-height:0;border-radius:8px;border:2px solid var(--line);padding:0}
 .ok-color.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
+/* 白はパネル地とも選択枠(--text)とも近いので、枠を濃くして見分けられるようにする */
+.ok-color[data-c="#ffffff"]{border-color:#6b7688}
+.ok-color[data-c="#ffffff"].sel{outline-color:var(--accent)}
 .ok-eraser{aspect-ratio:1;min-height:0;border-radius:8px;padding:0;background:#fff;color:#111;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
 .ok-eraser.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
 /* スタンプ行（.ok-stamp は結果画面の別用途で使用済みのため .ok-stampbtn を使う） */
@@ -424,6 +427,25 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .ok-pen-row input[type="range"]::-moz-range-track{height:10px;border-radius:999px;background:var(--line)}
 .ok-pen-row input[type="range"]::-moz-range-thumb{
   width:34px;height:34px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
+/* ふとさの実寸プレビュー（白いキャンバスと同じ地色の上に、いまの色と太さの丸を出す） */
+.ok-pen-head{display:flex;align-items:center;gap:12px;min-height:44px}
+.ok-pen-preview{
+  flex:0 0 auto;width:44px;height:44px;border-radius:50%;
+  background:#fff;border:1px solid var(--line);overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+.ok-pen-preview i{
+  display:block;border-radius:50%;background:#111;
+  max-width:100%;max-height:100%;box-shadow:0 0 0 1px rgba(0,0,0,.28);
+}
+/* 描いている最中に出る「これから引かれる太さ」の枠。線と同じ直径なので、
+   白/薄い色でも今どのくらいの太さで描いているか分かる。 */
+.ok-pen-cursor{
+  position:absolute;z-index:6;pointer-events:none;
+  box-sizing:content-box;transform:translate(-50%,-50%);
+  border-radius:50%;border:1px solid rgba(17,17,17,.9);
+  box-shadow:0 0 0 1px rgba(255,255,255,.95), inset 0 0 0 1px rgba(255,255,255,.95);
 }
 
 /* --- countdown overlay (game start 3,2,1) --- */

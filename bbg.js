@@ -18819,15 +18819,50 @@
 
   // ==================== oekaki battle (screens) ====================
 
-  // 12色: 黒/灰/茶/赤/橙/黄/黄緑/緑/水色/青/紫/ピンク（白背景キャンバス前提。消しゴム=白）
+  // 13色: 黒/灰/茶/赤/橙/黄/黄緑/緑/水色/青/紫/ピンク/白（白背景キャンバス前提。消しゴム=白）
+  // 白は「塗った上から細く抜く」用途にも使えるよう、消しゴムの手前に置く。
   var OEKAKI_COLORS = [
     '#111111', '#8a8a8a', '#8b5a2b', '#e5322d',
     '#f5821f', '#f5d10c', '#8cc63f', '#1f9d55',
-    '#4fc3f7', '#2158d2', '#8e44ad', '#f06292'
+    '#4fc3f7', '#2158d2', '#8e44ad', '#f06292',
+    '#ffffff'
   ];
 
   // スタンプ（絵文字）: タップした場所に押せる。ふとさスライダーで大きさが変わる。
-  var OEKAKI_STAMPS = ['⭐', '❤️', '😀', '🐱', '🌸', '🍎', '☀️', '🌈'];
+  // 毎回おなじだと飽きるので、ラウンドごとにこのプールからランダムで選び直す。
+  var OEKAKI_STAMP_POOL = [
+    '⭐', '❤️', '😀', '🐱', '🌸', '🍎', '☀️', '🌈',
+    '🎈', '🐶', '🐰', '🐼', '🐸', '🐤', '🦋', '🐟',
+    '🍰', '🍩', '🍓', '🍌', '🍕', '⚽', '🎵', '✨',
+    '🔥', '⚡', '☁️', '🌙', '🍀', '🌻', '🎀', '👑',
+    '💎', '🚗', '✈️', '🚀', '🏠', '😎', '😂', '👍',
+    '🐻', '🐷', '🦁', '🐵', '🍉', '🍇', '🎃', '⛄'
+  ];
+  var OEKAKI_STAMP_COUNT = 8;
+
+  // プールから重複なしでn個ひろう。
+  function pickOekakiStamps(n) {
+    var pool = OEKAKI_STAMP_POOL.slice();
+    var out = [];
+    var k = Math.min(parseIntSafe(n, 8), pool.length);
+    for (var i = 0; i < k; i++) {
+      var idx = Math.floor(Math.random() * pool.length);
+      out.push(pool.splice(idx, 1)[0]);
+    }
+    return out;
+  }
+
+  // ラウンドが変わったら引き直す（同じラウンド内では並びを固定して押し間違いを防ぐ）。
+  function oekakiStampsFor(ui, roundIndex) {
+    var key = 'r' + String(roundIndex);
+    if (!ui.stamps || !ui.stamps.length || ui.stampsKey !== key) {
+      ui.stamps = pickOekakiStamps(OEKAKI_STAMP_COUNT);
+      ui.stampsKey = key;
+      // 前ラウンドで選んでいたスタンプが今回いない場合はペンに戻す。
+      if (ui.stamp && ui.stamps.indexOf(ui.stamp) < 0) ui.stamp = '';
+    }
+    return ui.stamps;
+  }
 
   function oekakiTopicHtml(room) {
     var topic = String((room && room.round && room.round.topic) || '');
@@ -18865,9 +18900,10 @@
       paletteHtml +=
         '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="けしゴム" title="けしゴム">🧽</button>';
 
+      var stampList = oekakiStampsFor(ui, roundIndex);
       var stampHtml = '';
-      for (var si = 0; si < OEKAKI_STAMPS.length; si++) {
-        var st = OEKAKI_STAMPS[si];
+      for (var si = 0; si < stampList.length; si++) {
+        var st = stampList[si];
         stampHtml +=
           '<button class="ok-stampbtn okStampBtn' +
           (ui.stamp === st ? ' sel' : '') +
@@ -18894,6 +18930,7 @@
           '</div>' +
           '<div class="ok-fs-canvaswrap" id="okCanvasWrap">' +
           '<canvas id="okCanvas" width="640" height="640"></canvas>' +
+          '<div id="okPenCursor" class="ok-pen-cursor" style="display:none" aria-hidden="true"></div>' +
           '<button id="okPaletteBtn" class="ok-fab ok-fab-palette" aria-label="パレット">🎨</button>' +
           '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
           '<div class="ok-palette">' +
@@ -18902,7 +18939,10 @@
           '<div class="ok-stamps">' +
           stampHtml +
           '</div>' +
-          '<div class="ok-pen-row"><span class="muted ok-pen-label">ふとさ</span><input id="okPen" type="range" min="2" max="24" step="2" value="' +
+          '<div class="ok-pen-row">' +
+          '<div class="ok-pen-head"><span class="muted ok-pen-label">ふとさ</span>' +
+          '<span class="ok-pen-preview" aria-hidden="true"><i id="okPenPreviewDot"></i></span></div>' +
+          '<input id="okPen" type="range" min="2" max="24" step="2" value="' +
           String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
           '" /></div>' +
           '<button id="okClearAll" class="danger">ぜんぶ けす</button>' +
@@ -19150,6 +19190,8 @@
       penW: 6,
       eraser: false,
       stamp: '',
+      stamps: null,
+      stampsKey: '',
       everDrew: false,
       renderKey: '',
       timerId: null,
@@ -19458,12 +19500,58 @@
         if (ui.stamp && sv === ui.stamp) sb.classList.add('sel');
         else sb.classList.remove('sel');
       }
+      updatePenPreview();
+    }
+
+    // いま引かれる線の太さ（画面上のCSSピクセル）。消しゴムは3倍（strokeSegと同じ）。
+    function currentPenCssSize() {
+      var w = clamp(parseIntSafe(ui.penW, 6), 2, 24);
+      if (ui.eraser) w = w * 3;
+      return w;
+    }
+
+    // 「ふとさ」スライダーの横に実寸の丸を出す（動かす前に太さが分かるように）。
+    function updatePenPreview() {
+      var dot = document.getElementById('okPenPreviewDot');
+      if (!dot) return;
+      var d = currentPenCssSize();
+      dot.style.width = d + 'px';
+      dot.style.height = d + 'px';
+      dot.style.background = ui.eraser ? '#ffffff' : ui.color;
+    }
+
+    // 描いている最中に、これから引かれる太さの枠を指先（カーソル）に重ねて出す。
+    function movePenCursor(ev) {
+      var el = document.getElementById('okPenCursor');
+      var wrap = document.getElementById('okCanvasWrap');
+      if (!el || !wrap) return;
+      // スタンプはタップした瞬間に押されるので枠は出さない。
+      if (ui.stamp && !ui.eraser) {
+        el.style.display = 'none';
+        return;
+      }
+      var r = wrap.getBoundingClientRect();
+      var d = currentPenCssSize();
+      el.style.width = d + 'px';
+      el.style.height = d + 'px';
+      el.style.left = String(ev.clientX - r.left) + 'px';
+      el.style.top = String(ev.clientY - r.top) + 'px';
+      el.style.display = '';
+    }
+
+    function hidePenCursor() {
+      var el = document.getElementById('okPenCursor');
+      if (el) el.style.display = 'none';
     }
 
     function setToolPanelVisible(show) {
       var p = document.getElementById('okToolPanel');
       if (!p) return;
       p.style.display = show ? '' : 'none';
+      if (show) {
+        updatePenPreview();
+        hidePenCursor();
+      }
     }
 
     // 全画面（Fullscreen API）。QR参加者はSafariで開くため、操作中に
@@ -19724,6 +19812,7 @@
             }
           }
           last = posFromEvent(ev);
+          movePenCursor(ev);
           // スタンプ選択中はタップ位置に1個押す（フリーハンドはしない）。
           if (ui.stamp && !ui.eraser) {
             ui.everDrew = true;
@@ -19740,18 +19829,31 @@
           strokeSeg(last, { x: last.x + 0.01, y: last.y + 0.01 });
         });
         cv.addEventListener('pointermove', function (ev) {
-          if (!drawing) return;
+          if (!drawing) {
+            // マウスは押していなくても太さが分かるように枠を追従させる。
+            if (ev.pointerType === 'mouse') movePenCursor(ev);
+            return;
+          }
           if (ev.preventDefault) ev.preventDefault();
           var p = posFromEvent(ev);
           strokeSeg(last, p);
           last = p;
+          movePenCursor(ev);
         });
         var endStroke = function () {
           drawing = false;
           last = null;
+          hidePenCursor();
+        };
+        // 描いている最中はキャンバス外に出ても枠を消さない（pointerCapture中の
+        // 境界イベントでちらつくため）。指/マウスを離したときだけ消す。
+        var leaveCanvas = function () {
+          if (!drawing) hidePenCursor();
         };
         cv.addEventListener('pointerup', endStroke);
         cv.addEventListener('pointercancel', endStroke);
+        cv.addEventListener('pointerleave', leaveCanvas);
+        cv.addEventListener('pointerout', leaveCanvas);
       }
 
       setupOekakiGlobalHandlers();
@@ -19824,8 +19926,10 @@
         penEl.__ok_bound = true;
         penEl.addEventListener('input', function () {
           ui.penW = clamp(parseIntSafe(penEl.value, 6), 2, 24);
+          updatePenPreview();
         });
       }
+      updatePenPreview();
 
       var clearBtn = document.getElementById('okClearAll');
       if (clearBtn && !clearBtn.__ok_bound) {
