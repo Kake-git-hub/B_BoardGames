@@ -345,9 +345,6 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .ok-palette{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
 .ok-color{aspect-ratio:1;min-height:0;border-radius:8px;border:2px solid var(--line);padding:0}
 .ok-color.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
-/* 白はパネル地とも選択枠(--text)とも近いので、枠を濃くして見分けられるようにする */
-.ok-color[data-c="#ffffff"]{border-color:#6b7688}
-.ok-color[data-c="#ffffff"].sel{outline-color:var(--accent)}
 .ok-eraser{aspect-ratio:1;min-height:0;border-radius:8px;padding:0;background:#fff;color:#111;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
 .ok-eraser.sel{outline:3px solid var(--text);outline-offset:2px;z-index:1}
 /* スタンプ行（.ok-stamp は結果画面の別用途で使用済みのため .ok-stampbtn を使う） */
@@ -364,13 +361,37 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   display:flex;flex-direction:column;
   padding:env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
 }
-.ok-fs-top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;min-height:52px}
-.ok-fs-topic{flex:1;min-width:0;font-weight:900;font-size:clamp(16px,5vw,26px);line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 上の帯: [お題] [道具(中央)] [かんせい＋タイマー]。道具をキャンバスに重ねないので
+   絵を描ける面積が広くなる。1fr auto 1fr なので道具はちょうど中央にそろう。 */
+.ok-fs-top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;padding:6px 10px;min-height:52px}
+/* お題は必ず読めることが最優先。入り切らないときは2行まで折り返す
+   （道具を中央に置くぶん左の幅が減るため、長いお題でも省略しないように） */
+.ok-fs-topic{
+  min-width:0;font-weight:900;font-size:clamp(15px,4.4vw,26px);line-height:1.15;
+  overflow:hidden;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;
+}
 .ok-fs-topic b{color:var(--accent);font-size:1.1em}
+.ok-fs-tools{justify-self:center;display:flex;align-items:center;gap:8px}
+.ok-fs-right{justify-self:end;display:flex;align-items:center;gap:8px;min-width:0}
+.ok-done-btn{
+  flex:0 0 auto;white-space:nowrap;font-weight:900;
+  font-size:clamp(14px,3.6vw,18px);padding:10px 16px;border-radius:999px;
+}
 .ok-fs-btn{
   flex:0 0 auto;width:44px;height:44px;padding:0;border-radius:12px;
   background:var(--card);border:1px solid var(--line);color:var(--text);
   font-size:22px;line-height:1;font-weight:900;
+}
+/* もどす/やりなおす。使えないときは薄く（押しても何も起きないことを見せる） */
+.ok-histbtn{font-size:24px}
+.ok-fs-btn[disabled]{opacity:.32}
+/* 幅のせまい端末（スマホ縦）は、お題がつぶれないよう道具だけ2段目に送る */
+@media (max-width:560px){
+  .ok-fs-top{grid-template-columns:1fr auto;row-gap:4px;padding:4px 8px}
+  .ok-fs-topic{grid-column:1;grid-row:1}
+  .ok-fs-right{grid-column:2;grid-row:1}
+  .ok-fs-tools{grid-column:1 / -1;grid-row:2;justify-self:center}
 }
 .ok-ring{flex:0 0 auto}
 .ok-ring-bg{fill:none;stroke:var(--line);stroke-width:5}
@@ -391,9 +412,6 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   0%,100%{box-shadow:0 0 0 0 rgba(255,90,106,0)}
   50%{box-shadow:0 0 0 6px rgba(255,90,106,.85)}
 }
-.ok-fab{position:absolute;z-index:5;border-radius:999px;box-shadow:0 4px 14px rgba(0,0,0,.35)}
-.ok-fab-palette{top:10px;left:10px;width:54px;height:54px;font-size:28px;line-height:1;padding:0;background:var(--card);border:1px solid var(--line)}
-.ok-fab-done{left:10px;bottom:12px;font-weight:900;font-size:18px;padding:12px 20px}
 .ok-fs-status{
   position:absolute;right:10px;bottom:16px;z-index:4;
   background:rgba(255,255,255,.85);color:#333;

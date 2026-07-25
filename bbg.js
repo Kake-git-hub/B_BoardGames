@@ -18873,13 +18873,13 @@
 
   // ==================== oekaki battle (screens) ====================
 
-  // 13色: 黒/灰/茶/赤/橙/黄/黄緑/緑/水色/青/紫/ピンク/白（白背景キャンバス前提。消しゴム=白）
-  // 白は「塗った上から細く抜く」用途にも使えるよう、消しゴムの手前に置く。
+  // 13色: 黒/灰/茶/赤/橙/うすだいだい/黄/黄緑/緑/水色/青/紫/ピンク
+  // （白背景キャンバス前提。白は消しゴムで代用できるので入れない）
   var OEKAKI_COLORS = [
     '#111111', '#8a8a8a', '#8b5a2b', '#e5322d',
-    '#f5821f', '#f5d10c', '#8cc63f', '#1f9d55',
-    '#4fc3f7', '#2158d2', '#8e44ad', '#f06292',
-    '#ffffff'
+    '#f5821f', '#ffcb9a', '#f5d10c', '#8cc63f',
+    '#1f9d55', '#4fc3f7', '#2158d2', '#8e44ad',
+    '#f06292'
   ];
 
   // スタンプ（絵文字）: タップした場所に押せる。ふとさスライダーで大きさが変わる。
@@ -18896,6 +18896,9 @@
 
   // 回転後にレイアウトが確定するまでの測り直しタイミング（ms）。
   var OK_REFIT_DELAYS = [80, 260, 600, 1100];
+
+  // 「もどす」で戻れる回数（1操作＝キャンバス1枚ぶんの控えなので持ちすぎない）。
+  var OK_UNDO_MAX = 10;
 
   // プールから重複なしでn個ひろう。
   function pickOekakiStamps(n) {
@@ -18979,16 +18982,24 @@
           '<div class="ok-fs-topic">おだい「<b>' +
           escapeHtml(String((room.round && room.round.topic) || '')) +
           '</b>」</div>' +
+          // 道具はキャンバスの上に重ねず、お題と同じ帯の中央にまとめる
+          '<div class="ok-fs-tools">' +
+          '<button id="okPaletteBtn" class="ok-fs-btn" aria-label="パレット" title="パレット">🎨</button>' +
+          '<button id="okUndo" class="ok-fs-btn ok-histbtn" aria-label="もどす" title="もどす" disabled>↩︎</button>' +
+          '<button id="okRedo" class="ok-fs-btn ok-histbtn" aria-label="やりなおす" title="やりなおす" disabled>↪︎</button>' +
+          '</div>' +
+          '<div class="ok-fs-right">' +
           '<button id="okFullscreen" class="ok-fs-btn" aria-label="ぜんがめん" title="ぜんがめん" style="display:none">⛶</button>' +
+          '<button id="okDone" class="primary ok-done-btn">かんせい！</button>' +
           '<svg class="ok-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">' +
           '<circle class="ok-ring-bg" cx="22" cy="22" r="18"></circle>' +
           '<circle class="ok-ring-fg" id="okRingFg" cx="22" cy="22" r="18"></circle>' +
           '</svg>' +
           '</div>' +
+          '</div>' +
           '<div class="ok-fs-canvaswrap" id="okCanvasWrap">' +
           '<canvas id="okCanvas" width="640" height="640"></canvas>' +
           '<div id="okPenCursor" class="ok-pen-cursor" style="display:none" aria-hidden="true"></div>' +
-          '<button id="okPaletteBtn" class="ok-fab ok-fab-palette" aria-label="パレット">🎨</button>' +
           '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
           '<div class="ok-palette">' +
           paletteHtml +
@@ -19004,7 +19015,6 @@
           '" /></div>' +
           '<button id="okClearAll" class="danger">ぜんぶ けす</button>' +
           '</div>' +
-          '<button id="okDone" class="primary ok-fab ok-fab-done">かんせい！</button>' +
           '<div class="ok-fs-status" id="okStatus">ていしゅつ ' +
           String(counts.submitted) +
           '/' +
@@ -19262,6 +19272,8 @@
       resizeTimer: null,
       refitTimers: null,
       resizeObs: null,
+      undoStack: null,
+      redoStack: null,
       fitKey: '',
       artScale: 1,
       fsAutoTried: false
@@ -19605,6 +19617,85 @@
       if (el) el.style.display = 'none';
     }
 
+    // ---- もどす／やりなおす ----
+    // 1操作ぶん（ひとふで・スタンプ1個・ぜんぶけす）ごとにキャンバスをまるごと
+    // 控えておく。線をなぞり直すより単純で、消しゴムやスタンプも同じ扱いにできる。
+    function okSnapshot() {
+      var cv = document.getElementById('okCanvas');
+      if (!cv || !cv.width || !cv.height) return null;
+      try {
+        var c = document.createElement('canvas');
+        c.width = cv.width;
+        c.height = cv.height;
+        c.getContext('2d').drawImage(cv, 0, 0);
+        return c;
+      } catch (eSnap) {
+        return null;
+      }
+    }
+
+    function updateHistoryButtons() {
+      var ub = document.getElementById('okUndo');
+      var rb = document.getElementById('okRedo');
+      if (ub) ub.disabled = !(ui.undoStack && ui.undoStack.length);
+      if (rb) rb.disabled = !(ui.redoStack && ui.redoStack.length);
+    }
+
+    // 描き始める直前に呼ぶ（＝この操作の「前」の状態を積む）。
+    function pushHistory() {
+      var snap = okSnapshot();
+      if (!snap) return;
+      if (!ui.undoStack) ui.undoStack = [];
+      ui.undoStack.push(snap);
+      if (ui.undoStack.length > OK_UNDO_MAX) ui.undoStack.shift();
+      ui.redoStack = []; // 新しく描いたらやりなおしの先は消える
+      updateHistoryButtons();
+    }
+
+    function clearHistory() {
+      ui.undoStack = [];
+      ui.redoStack = [];
+      updateHistoryButtons();
+    }
+
+    function applySnapshot(snap) {
+      var cv = document.getElementById('okCanvas');
+      if (!cv || !snap) return false;
+      // 回転などで大きさが変わった控えは使えない
+      if (snap.width !== cv.width || snap.height !== cv.height) return false;
+      try {
+        var ctx = cv.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.drawImage(snap, 0, 0);
+        return true;
+      } catch (eApply) {
+        return false;
+      }
+    }
+
+    function historyStep(fromStack, toStack) {
+      if (!fromStack || !fromStack.length) return;
+      var cur = okSnapshot();
+      var snap = fromStack.pop();
+      if (applySnapshot(snap)) {
+        if (cur) toStack.push(cur);
+      }
+      updateHistoryButtons();
+    }
+
+    function doUndo() {
+      if (!ui.undoStack || !ui.undoStack.length) return;
+      if (!ui.redoStack) ui.redoStack = [];
+      historyStep(ui.undoStack, ui.redoStack);
+    }
+
+    function doRedo() {
+      if (!ui.redoStack || !ui.redoStack.length) return;
+      if (!ui.undoStack) ui.undoStack = [];
+      historyStep(ui.redoStack, ui.undoStack);
+    }
+
     function setToolPanelVisible(show) {
       var p = document.getElementById('okToolPanel');
       if (!p) return;
@@ -19769,6 +19860,7 @@
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       if (!preserve) ui.artScale = 1;
+      clearHistory(); // 大きさが変わった控えは使えない
 
       if (art && rect) {
         // 縦横比が変わるので、入り切らない分だけ縮小する（歪ませない）。
@@ -19997,6 +20089,7 @@
           }
           last = posFromEvent(ev);
           movePenCursor(ev);
+          pushHistory(); // このひとふで／スタンプ1個ぶんを「もどす」対象にする
           // スタンプ選択中はタップ位置に1個押す（フリーハンドはしない）。
           if (ui.stamp && !ui.eraser) {
             ui.everDrew = true;
@@ -20051,6 +20144,25 @@
           setToolPanelVisible(p.style.display === 'none');
         });
       }
+
+      var undoBtn = document.getElementById('okUndo');
+      if (undoBtn && !undoBtn.__ok_bound) {
+        undoBtn.__ok_bound = true;
+        undoBtn.addEventListener('click', function () {
+          setToolPanelVisible(false);
+          doUndo();
+        });
+      }
+
+      var redoBtn = document.getElementById('okRedo');
+      if (redoBtn && !redoBtn.__ok_bound) {
+        redoBtn.__ok_bound = true;
+        redoBtn.addEventListener('click', function () {
+          setToolPanelVisible(false);
+          doRedo();
+        });
+      }
+      updateHistoryButtons();
 
       var fsBtn = document.getElementById('okFullscreen');
       if (fsBtn && !fsBtn.__ok_bound) {
@@ -20125,6 +20237,7 @@
               var cv2 = document.getElementById('okCanvas');
               var ctx2 = cv2 ? cv2.getContext('2d') : null;
               if (ctx2) {
+                pushHistory(); // まちがえて消しても「もどす」で戻せるように
                 ctx2.fillStyle = '#ffffff';
                 ctx2.fillRect(0, 0, cv2.width, cv2.height);
                 ui.artScale = 1; // まっさらに戻したので回転時の拡縮も初期化
