@@ -42,7 +42,8 @@
 
 ### お題リスト
 
-コード内蔵の配列を3年齢帯×30個以上用意する（実装時に作成）。
+コード内蔵の配列を3年齢帯で用意する（現在: ようじ135 / しょうがくせい143 / おとな125 ＝ 計403個）。
+同じお題ばかり出ないよう数を多めに持ち、プール内・プール間とも重複なしで管理する。
 
 ```js
 var OEKAKI_TOPICS = {
@@ -203,7 +204,11 @@ Content-Type: application/json
 
 キャンバス実装要点:
 
-- 内部解像度は **640×640 固定**、表示は CSS でスケール。座標は `getBoundingClientRect()` で変換（devicePixelRatio 非依存で公平・軽量）。
+- 内部解像度は **長辺640**（表示領域の縦横比に合わせる）、表示は CSS でスケール。座標は `getBoundingClientRect()` で変換（devicePixelRatio 非依存で公平・軽量）。
+- **回転（orientationchange）対応**: 表示領域の縦横比と内部解像度がズレると、CSSで引き伸ばされて「フィットせず拡大されすぎ」た表示になる。iOSは回転直後の `clientWidth/Height` が回転前・途中の値を返すことがあるため、
+  - `ResizeObserver`（＋`resize`/`orientationchange`/`visualViewport.resize`）で変化を検知し、`OK_REFIT_DELAYS` の各タイミングで測り直す
+  - **同じ値が2回続けて取れたときだけ反映**（`okRefitTick`）。途中の中途半端なサイズで作り直さない
+  - 作り直す際は `okContentRect()` で**描かれている範囲だけ**を取り出して置き直す。余白ごと contain すると回転のたびに絵が縮むため。縮小は入り切らない分だけ、逆に回して戻したときは元の大きさまで戻す（`ui.artScale` で管理。描いたときより大きくはしない）
 - Pointer Events（pointerdown/move/up + setPointerCapture）でマウス/タッチ両対応。`touch-action: none` を canvas に指定（既存の `manipulation` では描画中にスクロールが発生する）。
 - 線は `lineCap/lineJoin: 'round'`。undo・全消しは付けない（シンプル方針、消しゴムで代用）。
 - 提出処理: 640→480 に縮小コピー→ `toDataURL('image/jpeg', 0.7)` → `players/<pid>/image` へ `setValue`。**時間切れ時は各端末が自動提出**（interval で `endsAt` 超過検知。二重提出は submittedAt 既存チェックで抑止）。

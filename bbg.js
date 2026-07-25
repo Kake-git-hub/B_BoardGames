@@ -3775,24 +3775,78 @@
   // 全員が同じお題を制限時間内に描き、Gemini APIが採点してランキング発表する。
   // 判定はホスト端末のみが実行する（APIキーもホスト端末のみ必要）。
 
+  // お題は3段階（ようじ/しょうがくせい/おとな）。すべてひらがな・カタカナ表記。
+  // 同じお題が続かないよう oekakiPickTopic で直前のお題は除外している。
   var OEKAKI_TOPICS = {
     kids: [
-      'りんご', 'ばなな', 'いちご', 'ねこ', 'いぬ', 'うさぎ', 'ぞう', 'きりん', 'さかな', 'ちょうちょ',
-      'おはな', 'たいよう', 'つき', 'ほし', 'くるま', 'でんしゃ', 'ひこうき', 'ふうせん', 'アイスクリーム', 'ケーキ',
-      'おにぎり', 'かさ', 'ぼうし', 'いえ', 'き', 'やま', 'にじ', 'ゆきだるま', 'カレーライス', 'とけい',
-      'めがね', 'ロボット'
+      // たべもの
+      'りんご', 'ばなな', 'いちご', 'みかん', 'ぶどう', 'もも', 'すいか', 'さくらんぼ', 'メロン', 'パイナップル',
+      'にんじん', 'トマト', 'きゅうり', 'なす', 'かぼちゃ', 'ピーマン', 'とうもろこし', 'たまねぎ', 'じゃがいも', 'きのこ',
+      'たまご', 'しょくパン', 'メロンパン', 'ドーナツ', 'プリン', 'クッキー', 'キャンディ', 'チョコレート', 'アイスクリーム', 'ケーキ',
+      'おにぎり', 'カレーライス', 'ジュース', 'ぎゅうにゅう',
+      // どうぶつ・むし
+      'ねこ', 'いぬ', 'うさぎ', 'ぞう', 'きりん', 'さかな', 'ちょうちょ', 'ぶた', 'うし', 'ひつじ',
+      'やぎ', 'にわとり', 'ひよこ', 'あひる', 'かえる', 'かたつむり', 'てんとうむし', 'とんぼ', 'はち', 'くま',
+      'さる', 'ねずみ', 'とら', 'しまうま', 'かば', 'いるか', 'くじら', 'かに', 'えび', 'いか',
+      'ひとで', 'ことり',
+      // のりもの
+      'くるま', 'でんしゃ', 'ひこうき', 'バス', 'じてんしゃ', 'トラック', 'タクシー', 'ふね', 'きしゃ',
+      // みのまわり
+      'ふうせん', 'かさ', 'ぼうし', 'いえ', 'とけい', 'めがね', 'ロボット', 'くつ', 'てぶくろ', 'マフラー',
+      'かばん', 'えんぴつ', 'クレヨン', 'はさみ', 'ほん', 'ボール', 'つみき', 'にんぎょう', 'たいこ', 'ピアノ',
+      'ラッパ', 'いす', 'つくえ', 'ベッド', 'まくら', 'コップ', 'おさら', 'スプーン', 'フォーク', 'はブラシ',
+      'タオル', 'かぎ', 'てがみ', 'ポスト', 'しんごう', 'まど', 'ドア', 'はしご', 'バケツ', 'じょうろ',
+      // しぜん
+      'おはな', 'たいよう', 'つき', 'ほし', 'き', 'やま', 'にじ', 'ゆきだるま', 'くも', 'あめ',
+      'かみなり', 'うみ', 'かわ', 'いし', 'はっぱ', 'どんぐり', 'たんぽぽ', 'ひまわり', 'チューリップ', 'さくら'
     ],
     school: [
-      'しょうぼうしゃ', 'パトカー', 'カブトムシ', 'クワガタ', 'ラーメン', 'おすし', 'ハンバーガー', 'サッカーボール', 'バスケットボール', 'きょうりゅう',
-      'ペンギン', 'パンダ', 'コアラ', 'ライオン', 'ワニ', 'サメ', 'タコ', 'カメ', 'ヘリコプター', 'しんかんせん',
-      'ロケット', 'おしろ', 'がっこう', 'ランドセル', 'リコーダー', 'はなび', 'プール', 'にんじゃ', 'おばけ', 'ドラゴン',
-      'まほうつかい', 'すべりだい'
+      // のりもの・はたらくくるま
+      'しょうぼうしゃ', 'パトカー', 'きゅうきゅうしゃ', 'ショベルカー', 'クレーンしゃ', 'ゴミしゅうしゅうしゃ', 'ミキサーしゃ', 'タンクローリー', 'ヘリコプター', 'しんかんせん',
+      'モノレール', 'せんすいかん', 'ヨット', 'ききゅう', 'ロケット', 'スクールバス',
+      // どうぶつ・むし・うみのいきもの
+      'カブトムシ', 'クワガタ', 'セミ', 'アリ', 'カマキリ', 'バッタ', 'ダンゴムシ', 'ペンギン', 'パンダ', 'コアラ',
+      'ライオン', 'ワニ', 'サメ', 'タコ', 'カメ', 'カンガルー', 'コウモリ', 'フクロウ', 'ハリネズミ', 'カメレオン',
+      'イグアナ', 'クラゲ', 'マンボウ', 'エイ', 'シャチ', 'カワウソ', 'アルパカ', 'ラクダ', 'キツネ', 'タヌキ',
+      'リス', 'ハムスター', 'インコ', 'ダチョウ', 'フラミンゴ', 'クジャク', 'ナマケモノ', 'チーター', 'サイ', 'きょうりゅう',
+      // たべもの
+      'ラーメン', 'おすし', 'ハンバーガー', 'やきそば', 'オムライス', 'グラタン', 'ピザ', 'ホットドッグ', 'パフェ', 'かきごおり',
+      'だんご', 'たいやき', 'わたあめ', 'ポップコーン', 'おべんとう', 'サンドイッチ', 'スパゲッティ', 'ぎょうざ', 'からあげ', 'てんぷら',
+      'ホットケーキ', 'たまごやき',
+      // がっこう・ばしょ
+      'がっこう', 'きょうしつ', 'たいいくかん', 'としょかん', 'すいぞくかん', 'どうぶつえん', 'ゆうえんち', 'えいがかん', 'こうえん', 'プール',
+      'おしろ', 'とうだい', 'かざん', 'ランドセル', 'リコーダー', 'すべりだい', 'ブランコ', 'ジャングルジム', 'てつぼう', 'なわとび',
+      // スポーツ・あそび
+      'サッカーボール', 'バスケットボール', 'やきゅう', 'たっきゅう', 'テニス', 'バドミントン', 'けんどう', 'じゅうどう', 'スケートボード', 'スキー',
+      'つなひき', 'リレー', 'キャンプ', 'テント', 'たきび', 'たからばこ', 'かいぞくせん',
+      // ぎょうじ・ものがたり
+      'はなび', 'うんどうかい', 'えんそく', 'たなばた', 'ひなまつり', 'こいのぼり', 'せつぶんのおに', 'サンタクロース', 'トナカイ', 'クリスマスツリー',
+      'ハロウィン', 'にんじゃ', 'おばけ', 'ドラゴン', 'まほうつかい', 'まじょ', 'がいこつ', 'ミイラ', 'きゅうけつき', 'ゆうしゃ',
+      'おうさま', 'おひめさま', 'きし', 'かいじゅう', 'ユニコーン', 'にんぎょ', 'てんし', 'うちゅうじん'
     ],
     adult: [
-      'じゆうのめがみ', 'モナリザ', 'スフィンクス', 'とうきょうタワー', 'ふじさん', 'ふつかよい', 'まんいんでんしゃ', 'おはなみ', 'けっこんしき', 'おんせん',
-      'かいてんずし', 'たこやき', 'おこのみやき', 'ラジオたいそう', 'マラソンたいかい', 'サラリーマン', 'たくはいびん', 'リモートかいぎ', 'じどり', 'ねこカフェ',
-      'かんらんしゃ', 'ジェットコースター', 'バーベキュー', 'つり', 'ゴルフ', 'ボウリング', 'カラオケ', 'はいしゃ', 'びよういん', 'うちゅうひこうし',
-      'すもう', 'ゆきがっせん'
+      // ゆうめいなもの・けんちく
+      'じゆうのめがみ', 'モナリザ', 'スフィンクス', 'とうきょうタワー', 'ふじさん', 'とうきょうスカイツリー', 'きんかくじ', 'ひめじじょう', 'ごじゅうのとう', 'とりい',
+      'ピラミッド', 'ばんりのちょうじょう', 'エッフェルとう', 'ピサのしゃとう', 'コロッセオ', 'タージマハル', 'ならのしか',
+      // しごと・ひと
+      'サラリーマン', 'しょうぼうし', 'けいさつかん', 'かんごし', 'パティシエ', 'びようし', 'パイロット', 'うんてんしゅ', 'カメラマン', 'プログラマー',
+      'せいゆう', 'げいにん', 'アイドル', 'プロレスラー', 'うちゅうひこうし', 'たくはいびん',
+      // あるある・にちじょう
+      'ふつかよい', 'まんいんでんしゃ', 'リモートかいぎ', 'ラジオたいそう', 'ざんぎょう', 'きゅうりょうび', 'おおそうじ', 'ひっこし', 'けんこうしんだん', 'かふんしょう',
+      'ねぼう', 'ちこく', 'しめきり', 'めんせつ', 'ぎっくりごし', 'かたこり', 'ダイエット', 'たからくじ', 'ゴミだし', 'さらあらい',
+      'せんたくもの', 'ぎょうれつ', 'いねむり', 'ジャンケン', 'テレワーク', 'セルフレジ',
+      // おでかけ・たのしみ
+      'おはなみ', 'けっこんしき', 'おんせん', 'かいてんずし', 'バーベキュー', 'つり', 'ゴルフ', 'ボウリング', 'カラオケ', 'すもう',
+      'ゆきがっせん', 'かんらんしゃ', 'ジェットコースター', 'ねこカフェ', 'じどり', 'マラソンたいかい', 'ばんしゃく', 'いざかや', 'サウナ', 'ヨガ',
+      'ジム', 'とざん', 'さんぽ', 'どくしょ', 'ガーデニング', 'スケート', 'ダーツ', 'ビリヤード', 'はいしゃ', 'びよういん',
+      // たべもの・のみもの
+      'たこやき', 'おこのみやき', 'ビール', 'ワイン', 'コーヒー', 'おせちりょうり', 'えきべん',
+      // でんかせいひん・みのまわり
+      'スマートフォン', 'ノートパソコン', 'せんぷうき', 'エアコン', 'せんたくき', 'そうじき', 'でんしレンジ', 'れいぞうこ', 'じはんき', 'エスカレーター',
+      'エレベーター', 'ドライヤー', 'めざましどけい', 'こたつ', 'ふとん',
+      // きせつ・ぎょうじ
+      'はつもうで', 'おおみそか', 'ねんがじょう', 'まめまき', 'ぼんおどり', 'なつまつり', 'やたい', 'きんぎょすくい', 'はなびたいかい', 'もみじがり',
+      'おつきみ', 'ゆきかき', 'つゆ', 'たいふう'
     ]
   };
 
@@ -18840,6 +18894,9 @@
   ];
   var OEKAKI_STAMP_COUNT = 8;
 
+  // 回転後にレイアウトが確定するまでの測り直しタイミング（ms）。
+  var OK_REFIT_DELAYS = [80, 260, 600, 1100];
+
   // プールから重複なしでn個ひろう。
   function pickOekakiStamps(n) {
     var pool = OEKAKI_STAMP_POOL.slice();
@@ -19203,6 +19260,10 @@
       globalHandlersBound: false,
       teardownGlobal: null,
       resizeTimer: null,
+      refitTimers: null,
+      resizeObs: null,
+      fitKey: '',
+      artScale: 1,
       fsAutoTried: false
     };
 
@@ -19629,28 +19690,77 @@
     // キャンバスの内部解像度を表示領域のアスペクト比に合わせる（長辺640）。
     // preserve=true のとき、現在の絵を保持したまま新しいサイズに描き直す
     // （縦横回転時にアスペクト比が変わっても絵を消さない・歪ませない）。
-    function sizeOekakiCanvas(preserve) {
-      var cv = document.getElementById('okCanvas');
+    // 表示領域から内部解像度（長辺640）を求める。表示は常にCSSで領域いっぱいに
+    // 伸ばすので、この比率が実際の表示領域とズレると絵が歪んで見える。
+    function okTargetSize() {
       var wrap = document.getElementById('okCanvasWrap');
-      if (!cv || !wrap) return;
+      if (!wrap) return null;
       var rw = wrap.clientWidth;
       var rh = wrap.clientHeight;
-      if (rw < 2 || rh < 2) return;
+      if (rw < 2 || rh < 2) return null;
       var sc = 640 / Math.max(rw, rh);
-      var nw = Math.max(64, Math.round(rw * sc));
-      var nh = Math.max(64, Math.round(rh * sc));
-      if (cv.width === nw && cv.height === nh) return; // 変化なし
-      var old = null;
-      if (preserve && cv.width > 0 && cv.height > 0) {
-        try {
-          old = document.createElement('canvas');
-          old.width = cv.width;
-          old.height = cv.height;
-          old.getContext('2d').drawImage(cv, 0, 0);
-        } catch (eCopy) {
-          old = null;
+      return { w: Math.max(64, Math.round(rw * sc)), h: Math.max(64, Math.round(rh * sc)) };
+    }
+
+    // 実際に描かれている範囲（白でないピクセル）の外接矩形。まっさらなら null。
+    // 回転のたびに「余白ごと」縮小コピーすると絵がどんどん小さくなるため、
+    // 中身だけを取り出して置き直せるようにする。
+    function okContentRect(src) {
+      var w = src.width;
+      var h = src.height;
+      if (w < 1 || h < 1) return null;
+      var data;
+      try {
+        data = src.getContext('2d').getImageData(0, 0, w, h).data;
+      } catch (eImg) {
+        return { x: 0, y: 0, w: w, h: h }; // 取れない環境では全面を対象にする
+      }
+      var minX = w;
+      var minY = h;
+      var maxX = -1;
+      var maxY = -1;
+      for (var y = 0; y < h; y++) {
+        var base = y * w * 4;
+        for (var x = 0; x < w; x++) {
+          var i = base + x * 4;
+          // 白背景なので、少しでも色がついていれば「描かれている」とみなす
+          if (data[i] > 249 && data[i + 1] > 249 && data[i + 2] > 249) continue;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
         }
       }
+      if (maxX < 0) return null;
+      return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+    }
+
+    function sizeOekakiCanvas(preserve) {
+      var cv = document.getElementById('okCanvas');
+      var t = okTargetSize();
+      if (!cv || !t) return;
+      var nw = t.w;
+      var nh = t.h;
+      if (cv.width === nw && cv.height === nh) return; // 変化なし
+
+      var prevW = cv.width;
+      var prevH = cv.height;
+      var art = null;
+      var rect = null;
+      if (preserve && prevW > 0 && prevH > 0) {
+        try {
+          rect = okContentRect(cv);
+          if (rect) {
+            art = document.createElement('canvas');
+            art.width = rect.w;
+            art.height = rect.h;
+            art.getContext('2d').drawImage(cv, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
+          }
+        } catch (eCopy) {
+          art = null;
+        }
+      }
+
       cv.width = nw; // 幅/高さ変更でキャンバスはクリアされる
       cv.height = nh;
       var ctx = cv.getContext('2d');
@@ -19658,16 +19768,81 @@
       ctx.fillRect(0, 0, nw, nh);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      if (old) {
-        // アスペクト比を保ったまま（contain）中央に描き直す＝歪まない
-        var s = Math.min(nw / old.width, nh / old.height);
-        var dw = old.width * s;
-        var dh = old.height * s;
+      if (!preserve) ui.artScale = 1;
+
+      if (art && rect) {
+        // 縦横比が変わるので、入り切らない分だけ縮小する（歪ませない）。
+        // 逆向きに回して戻したときは元の大きさまで戻す＝回転を繰り返しても
+        // 絵がどんどん小さくならない。描いたときより大きくはしない。
+        var grow = ui.artScale > 0 ? 1 / ui.artScale : 1;
+        var s = Math.min(grow, nw / art.width, nh / art.height);
+        if (!(s > 0)) s = 1;
+        var dw = Math.max(1, art.width * s);
+        var dh = Math.max(1, art.height * s);
+        // 画面の中でどのあたりに描かれていたか（中心の相対位置）は保つ
+        var cx = ((rect.x + rect.w / 2) / prevW) * nw;
+        var cy = ((rect.y + rect.h / 2) / prevH) * nh;
+        var dx = clamp(Math.round(cx - dw / 2), 0, Math.max(0, nw - dw));
+        var dy = clamp(Math.round(cy - dh / 2), 0, Math.max(0, nh - dh));
         try {
-          ctx.drawImage(old, (nw - dw) / 2, (nh - dh) / 2, dw, dh);
+          ctx.drawImage(art, dx, dy, dw, dh);
+          ui.artScale = ui.artScale * s;
         } catch (eDraw) {
           // ignore
         }
+      }
+    }
+
+    // 回転直後は端末によってレイアウトの確定が遅れ、clientWidth/Height が
+    // 回転前の値のままだったり途中の値を返したりする。その値で内部解像度を
+    // 決めるとCSSで引き伸ばされ「画面にフィットせず拡大されすぎ」た状態になる。
+    // そこで、同じ値が2回続けて取れた（＝レイアウトが落ち着いた）ときだけ反映する。
+    function okRefitTick() {
+      var cv = document.getElementById('okCanvas');
+      if (!cv) return;
+      var t = okTargetSize();
+      if (!t) return;
+      var key = String(t.w) + 'x' + String(t.h);
+      if (cv.width === t.w && cv.height === t.h) {
+        ui.fitKey = key;
+        return;
+      }
+      if (ui.fitKey !== key) {
+        ui.fitKey = key;
+        return;
+      }
+      sizeOekakiCanvas(true);
+    }
+
+    function clearRefitTimers() {
+      if (ui.refitTimers) {
+        for (var i = 0; i < ui.refitTimers.length; i++) clearTimeout(ui.refitTimers[i]);
+      }
+      ui.refitTimers = [];
+    }
+
+    // 回転・全画面の切替後、確定するまで何度か測り直す（サイズが合っていれば
+    // 何もしないので、空振りしても害はない）。
+    function scheduleOkRefit() {
+      clearRefitTimers();
+      for (var i = 0; i < OK_REFIT_DELAYS.length; i++) {
+        ui.refitTimers.push(setTimeout(okRefitTick, OK_REFIT_DELAYS[i]));
+      }
+    }
+
+    // 表示領域そのものの変化を拾う（回転イベントより確実で、全画面切替や
+    // iOSのツールバー出入りにも追従する）。
+    function observeOekakiWrap() {
+      var wrap = document.getElementById('okCanvasWrap');
+      if (!wrap || typeof window.ResizeObserver !== 'function') return;
+      try {
+        if (ui.resizeObs) ui.resizeObs.disconnect();
+        ui.resizeObs = new window.ResizeObserver(function () {
+          scheduleOkRefit();
+        });
+        ui.resizeObs.observe(wrap);
+      } catch (eObs) {
+        ui.resizeObs = null;
       }
     }
 
@@ -19679,10 +19854,7 @@
       ui.globalHandlersBound = true;
 
       var onOkResize = function () {
-        if (ui.resizeTimer) clearTimeout(ui.resizeTimer);
-        ui.resizeTimer = setTimeout(function () {
-          if (document.getElementById('okCanvas')) sizeOekakiCanvas(true);
-        }, 150);
+        scheduleOkRefit();
       };
       // iOSのピンチズーム（gesture*）と2本指操作を無効化
       var stopGesture = function (e) {
@@ -19698,14 +19870,14 @@
         } catch (eF) {
           // ignore
         }
-        if (ui.resizeTimer) clearTimeout(ui.resizeTimer);
-        ui.resizeTimer = setTimeout(function () {
-          if (document.getElementById('okCanvas')) sizeOekakiCanvas(true);
-        }, 150);
+        scheduleOkRefit();
       };
 
       window.addEventListener('resize', onOkResize);
       window.addEventListener('orientationchange', onOkResize);
+      // iOS Safari は回転で window.resize が来ない場合があるため visualViewport も見る
+      var vv = window.visualViewport || null;
+      if (vv && vv.addEventListener) vv.addEventListener('resize', onOkResize);
       document.addEventListener('gesturestart', stopGesture, { passive: false });
       document.addEventListener('gesturechange', stopGesture, { passive: false });
       document.addEventListener('gestureend', stopGesture, { passive: false });
@@ -19718,6 +19890,7 @@
         try {
           window.removeEventListener('resize', onOkResize);
           window.removeEventListener('orientationchange', onOkResize);
+          if (vv && vv.removeEventListener) vv.removeEventListener('resize', onOkResize);
           document.removeEventListener('gesturestart', stopGesture, { passive: false });
           document.removeEventListener('gesturechange', stopGesture, { passive: false });
           document.removeEventListener('gestureend', stopGesture, { passive: false });
@@ -19732,6 +19905,15 @@
           clearTimeout(ui.resizeTimer);
           ui.resizeTimer = null;
         }
+        clearRefitTimers();
+        if (ui.resizeObs) {
+          try {
+            ui.resizeObs.disconnect();
+          } catch (eDis) {
+            // ignore
+          }
+          ui.resizeObs = null;
+        }
         ui.globalHandlersBound = false;
         ui.teardownGlobal = null;
       };
@@ -19744,6 +19926,8 @@
 
         // 画面いっぱいのキャンバス（スマホ縦長/タブレット横長どちらも全面）。
         sizeOekakiCanvas(false);
+        observeOekakiWrap();
+        scheduleOkRefit(); // 初期表示直後にレイアウトが動く端末への保険
 
         var ctx = cv.getContext('2d');
         ctx.lineCap = 'round';
@@ -19943,6 +20127,7 @@
               if (ctx2) {
                 ctx2.fillStyle = '#ffffff';
                 ctx2.fillRect(0, 0, cv2.width, cv2.height);
+                ui.artScale = 1; // まっさらに戻したので回転時の拡縮も初期化
               }
             } catch (eClr) {
               // ignore
