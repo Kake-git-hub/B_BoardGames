@@ -10,10 +10,10 @@
     <link rel="icon" type="image/png" href="./assets/icon.png" />
     <link rel="apple-touch-icon" href="./assets/icon.png" />
     <link rel="manifest" href="./manifest.json" />
-    <meta name="theme-color" content="#6c63ff" />
+    <meta name="theme-color" content="#0b0f1a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="stylesheet" href="./bbg.css?v=20260725025926" />
+    <link rel="stylesheet" href="./bbg.css?v=20260726092423" />
   </head>
   <body>
     <main class="app">
@@ -44,17 +44,81 @@
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 
     <!-- Optional: embedded Firebase config (see bbg-config.js) -->
-    <script src="./bbg-config.js?v=20260725025926"></script>
+    <script src="./bbg-config.js?v=20260726092423"></script>
 
-    <script src="./bbg.js?v=20260725025926" defer></script>
+    <script src="./bbg.js?v=20260726092423" defer></script>
 
-    <!-- PWA Service Worker -->
+    <!-- PWA Service Worker (自動アップデート付き) -->
     <script>
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('./sw.js').catch(function(e) {
-          console.warn('SW registration failed:', e);
+      (function () {
+        if (!('serviceWorker' in navigator)) return;
+
+        navigator.serviceWorker
+          .register('./sw.js')
+          .then(function (reg) {
+            // 更新チェック: 起動時に加えて、フォアグラウンド復帰時と30分ごと
+            function check() {
+              try {
+                reg.update();
+              } catch (e) {
+                /* ignore */
+              }
+            }
+            setInterval(check, 30 * 60 * 1000);
+            document.addEventListener('visibilitychange', function () {
+              if (document.visibilityState === 'visible') check();
+            });
+          })
+          .catch(function (e) {
+            console.warn('SW registration failed:', e);
+          });
+
+        // 新しいSWが有効になったら自動リロードして最新版に切り替える。
+        // - 初回インストール時（もともと未制御だったページ）はリロードしない
+        // - ゲームルーム表示中（?room=あり）はリロードしない（描きかけの絵などを守る）
+        var hadController = !!navigator.serviceWorker.controller;
+        var reloaded = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (!hadController) {
+            hadController = true;
+            return;
+          }
+          if (reloaded) return;
+          if (/[?&]room=/.test(location.search)) return;
+          reloaded = true;
+          try {
+            sessionStorage.setItem('bbg_updated_v1', '1');
+          } catch (e) {
+            /* ignore */
+          }
+          location.reload();
         });
-      }
+
+        // リロード後に「更新しました」トーストを表示
+        function showUpdatedToast() {
+          try {
+            if (sessionStorage.getItem('bbg_updated_v1') !== '1') return;
+            sessionStorage.removeItem('bbg_updated_v1');
+            var t = document.createElement('div');
+            t.className = 'bbg-toast';
+            t.textContent = '✨ アプリを さいしんばんに こうしんしました';
+            document.body.appendChild(t);
+            setTimeout(function () {
+              t.classList.add('bbg-toast--hide');
+            }, 3200);
+            setTimeout(function () {
+              if (t.parentNode) t.parentNode.removeChild(t);
+            }, 3600);
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', showUpdatedToast);
+        } else {
+          showUpdatedToast();
+        }
+      })();
     </script>
   </body>
 </html>

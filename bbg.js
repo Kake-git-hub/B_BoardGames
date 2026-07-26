@@ -1030,6 +1030,56 @@
     return id;
   }
 
+  // -------------------- lobby index (home画面の「ひらいているロビー」一覧用) --------------------
+  // DBルールがパス列挙型（lobbies/$id 単位の許可）でも読めるように、
+  // 一覧用の軽量インデックスを lobbies/_index/<id> に保持する（_始まりはcleanup対象外）。
+  var LOBBY_INDEX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // これより古いインデックスは掃除する
+
+  function lobbyIndexPath(lobbyId) {
+    return 'lobbies/_index/' + lobbyId;
+  }
+
+  function updateLobbyIndex(lobbyId, lobby) {
+    try {
+      if (!lobbyId || !lobby) return Promise.resolve();
+      var members = lobby.members || {};
+      var entry = {
+        createdAt: parseIntSafe(lobby.createdAt, 0) || serverNowMs(),
+        updatedAt: serverNowMs(),
+        kind: lobby.currentGame && lobby.currentGame.kind ? String(lobby.currentGame.kind) : '',
+        names: lobbyMemberNamesText(lobby, 8),
+        count: Object.keys(members).length,
+        hostMid: String(lobby.hostMid || ''),
+        mids: Object.keys(members).join(',')
+      };
+      return setValue(lobbyIndexPath(lobbyId), entry).catch(function () {
+        // インデックス更新失敗は本体の動作に影響させない
+      });
+    } catch (e) {
+      return Promise.resolve();
+    }
+  }
+
+  function pruneLobbyIndex(all) {
+    // ついで掃除: 古いインデックスを削除（失敗は無視）。
+    try {
+      if (!all || typeof all !== 'object') return;
+      var now = serverNowMs();
+      for (var id in all) {
+        if (!hasOwn.call(all, id)) continue;
+        var e = all[id] || {};
+        var t = Math.max(parseIntSafe(e.updatedAt, 0), parseIntSafe(e.createdAt, 0));
+        if (t && now - t > LOBBY_INDEX_MAX_AGE_MS) {
+          setValue(lobbyIndexPath(String(id)), null).catch(function () {
+            // ignore
+          });
+        }
+      }
+    } catch (e0) {
+      // ignore
+    }
+  }
+
   function createLobby(lobbyId, hostName, isGmDevice, nonce, joinAsMember) {
     var shouldJoin = joinAsMember == null ? true : !!joinAsMember;
     var nm = String(hostName || '').trim();
@@ -1051,6 +1101,14 @@
       if (shouldJoin) {
         lobby.order = [mid];
         lobby.members[mid] = { name: nm, joinedAt: now, isGmDevice: !!isGmDevice, lastSeenAt: now };
+      }
+      return lobby;
+    }).then(function (lobby) {
+      try {
+        // 自分が作成したロビーのときだけインデックスを書く（衝突時の上書きを避ける）。
+        if (lobby && String(lobby.nonce || '') === String(nonce || '')) updateLobbyIndex(lobbyId, lobby);
+      } catch (eIdx) {
+        // ignore
       }
       return lobby;
     });
@@ -1095,6 +1153,11 @@
       return current;
     }).then(function (lobby) {
       if (!lobby) throw new Error('ロビーが見つかりません');
+      try {
+        updateLobbyIndex(lobbyId, lobby);
+      } catch (eIdx) {
+        // ignore
+      }
       return lobby;
     });
   }
@@ -1118,6 +1181,13 @@
         // ignore
       }
       return next;
+    }).then(function (lobby) {
+      try {
+        if (lobby) updateLobbyIndex(lobbyId, lobby);
+      } catch (eIdx) {
+        // ignore
+      }
+      return lobby;
     });
   }
 
@@ -8541,6 +8611,75 @@
   // -------------------- UI --------------------
   var HEADER_LOBBY_ID = '';
 
+  // -------------------- shared in-app confirm --------------------
+  // ネイティブconfirm()はiOSのstandalone PWAで無反応になるため、アプリ内ダイアログで代替する。
+  // （おえかきバトルの okShowConfirm と同じ見た目。CSSは .ok-confirm を共用）
+  function bbgShowConfirm(message, yesLabel, onYes) {
+    try {
+      var old = document.getElementById('bbgConfirmOverlay');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch (e0) {
+      // ignore
+    }
+    var ov = document.createElement('div');
+    ov.className = 'ok-confirm';
+    ov.id = 'bbgConfirmOverlay';
+    ov.innerHTML =
+      '<div class="ok-confirm-box">' +
+      '<div class="ok-confirm-msg">' +
+      escapeHtml(String(message || '')).replace(/\n/g, '<br />') +
+      '</div>' +
+      '<div class="ok-confirm-btns">' +
+      '<button type="button" class="ghost" id="bbgConfirmNo">やめる</button>' +
+      '<button type="button" class="primary" id="bbgConfirmYes">' +
+      escapeHtml(String(yesLabel || 'はい')) +
+      '</button>' +
+      '</div></div>';
+    document.body.appendChild(ov);
+
+    function close() {
+      try {
+        if (ov.parentNode) ov.parentNode.removeChild(ov);
+      } catch (e1) {
+        // ignore
+      }
+    }
+    var noBtn = ov.querySelector('#bbgConfirmNo');
+    var yesBtn = ov.querySelector('#bbgConfirmYes');
+    if (noBtn) noBtn.addEventListener('click', close);
+    if (yesBtn)
+      yesBtn.addEventListener('click', function () {
+        close();
+        try {
+          if (onYes) onYes();
+        } catch (e2) {
+          // ignore
+        }
+      });
+    ov.addEventListener('click', function (e) {
+      if (e.target === ov) close();
+    });
+  }
+
+  // click系ハンドラ先頭の `if (!confirm(...)) return;` を置き換えるためのゲート。
+  // 未確認ならダイアログを出してfalseを返し、「はい」で同じ要素をもう一度clickして続行させる。
+  function bbgConfirmClick(el, message, yesLabel) {
+    if (el && el.__bbg_confirmed) {
+      el.__bbg_confirmed = false;
+      return true;
+    }
+    bbgShowConfirm(message, yesLabel, function () {
+      if (!el) return;
+      el.__bbg_confirmed = true;
+      try {
+        el.click();
+      } catch (e) {
+        el.__bbg_confirmed = false;
+      }
+    });
+    return false;
+  }
+
   function setHeaderLobbyId(lobbyId) {
     HEADER_LOBBY_ID = String(lobbyId || '').trim();
   }
@@ -8653,7 +8792,7 @@
         var isGameScreen2 = !!(!isLobbyAny2 && hasRoom2);
         if (!(lobby && isGameScreen2 && (isHost2 || isGmDev2))) return;
 
-        if (!confirm('ロビーへ戻ります。\n（進行中の場合はゲームを中断し、全員に反映されます）\nよろしいですか？')) return;
+        if (!bbgConfirmClick(titleEl, 'ロビーへ戻ります。\n進行中のゲームは中断され、全員に反映されます。', 'ロビーへ')) return;
 
         __gmHeaderInFlight = true;
         firebaseReady()
@@ -8792,15 +8931,151 @@
         ver = '';
       }
     }
-    var verHtml = ver ? '<div class="muted" style="text-align:center">Version: ' + escapeHtml(ver) + '</div>' : '';
+    var verHtml = ver ? '<div class="bbg-hero-ver">Version: ' + escapeHtml(ver) + '</div>' : '';
 
     render(
       viewEl,
-      '\n    <div class="stack">\n      ' +
-        (verHtml || '') +
-        '\n      <div class="row">\n        <button id="homeCreateJoin" class="primary">ロビー作成（この端末もゲームに参加）</button>\n      </div>\n      <div class="row">\n        <button id="homeCreateGm" class="primary">ロビー作成（この端末をゲームマスターデバイス）</button>\n      </div>' +
-        '\n    </div>\n  '
+      '\n    <div class="stack">\n' +
+        '      <div class="bbg-hero">\n' +
+        '        <div class="bbg-hero-logo">🎲</div>\n' +
+        '        <div class="bbg-hero-title">B_BoardGames</div>\n' +
+        '        <div class="bbg-hero-sub">あつまって みんなで あそぶ ボードゲーム</div>\n' +
+        '        ' + (verHtml || '') + '\n' +
+        '      </div>\n' +
+        '      <div id="homeLobbies" class="stack"></div>\n' +
+        '      <div class="bbg-sec">あたらしく はじめる</div>\n' +
+        '      <button id="homeCreateJoin" class="bbg-menu-btn">\n' +
+        '        <span class="bbg-menu-icon">🎮</span>\n' +
+        '        <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る</span><span class="bbg-menu-desc">この端末もゲームに参加します</span></span>\n' +
+        '      </button>\n' +
+        '      <button id="homeCreateGm" class="bbg-menu-btn">\n' +
+        '        <span class="bbg-menu-icon">📺</span>\n' +
+        '        <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る（テーブル端末）</span><span class="bbg-menu-desc">盤面表示専用。参加者としては入りません</span></span>\n' +
+        '      </button>\n' +
+        '      <div class="center" style="margin-top:4px">\n' +
+        '        <a class="btn ghost" href="?screen=setup" style="font-size:13px">⚙️ せってい</a>\n' +
+        '      </div>\n' +
+        '    </div>\n  '
     );
+  }
+
+  // -------------------- home: joinable lobby list --------------------
+  // 同じURLを開いた人が、QRなしでも進行中のロビーに参加できるようにする。
+  // データは lobbies/_index/<id>（updateLobbyIndexが保守する軽量インデックス）から読む。
+  var LOBBY_JOINABLE_WINDOW_MS = 12 * 60 * 60 * 1000; // 直近12時間のロビーを表示
+
+  function listJoinableLobbies(indexAll) {
+    var out = [];
+    if (!indexAll || typeof indexAll !== 'object') return out;
+    var now = serverNowMs();
+    for (var id in indexAll) {
+      if (!hasOwn.call(indexAll, id)) continue;
+      var e = indexAll[id];
+      if (!e || typeof e !== 'object') continue;
+      if (!parseIntSafe(e.count, 0)) continue;
+      var last = Math.max(parseIntSafe(e.updatedAt, 0), parseIntSafe(e.createdAt, 0));
+      if (!last || now - last > LOBBY_JOINABLE_WINDOW_MS) continue;
+      out.push({ id: String(id), entry: e, lastActiveAt: last });
+    }
+    out.sort(function (a, b) {
+      return b.lastActiveAt - a.lastActiveAt;
+    });
+    if (out.length > 8) out = out.slice(0, 8);
+    return out;
+  }
+
+  function lobbyMemberNamesText(lobby, maxNames) {
+    var members = (lobby && lobby.members) || {};
+    var order = (lobby && lobby.order) || [];
+    if (!Array.isArray(order)) order = [];
+    var names = [];
+    var seen = {};
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid || seen[mid] || !members[mid]) continue;
+      seen[mid] = true;
+      var nm = String((members[mid] && members[mid].name) || '').trim();
+      if (nm) names.push(nm);
+    }
+    var keys = Object.keys(members);
+    keys.sort();
+    for (var j = 0; j < keys.length; j++) {
+      var k2 = String(keys[j] || '');
+      if (!k2 || seen[k2]) continue;
+      seen[k2] = true;
+      var nm2 = String((members[k2] && members[k2].name) || '').trim();
+      if (nm2) names.push(nm2);
+    }
+    var max = maxNames || 6;
+    if (names.length > max) {
+      var rest = names.length - max;
+      names = names.slice(0, max);
+      return names.join('、') + '　ほか' + rest + '人';
+    }
+    return names.join('、');
+  }
+
+  function renderHomeLobbiesList(all) {
+    var box = document.getElementById('homeLobbies');
+    if (!box) return;
+    var items = listJoinableLobbies(all);
+    if (!items.length) {
+      box.innerHTML = '';
+      return;
+    }
+
+    var html = '<div class="bbg-sec">いま ひらいているロビー</div>';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var entry = it.entry || {};
+      var kind = entry.kind ? String(entry.kind) : '';
+
+      var myMid = '';
+      try {
+        myMid = String(localStorage.getItem('bbg_lobby_member_' + it.id) || '');
+      } catch (eL) {
+        myMid = '';
+      }
+      var mids = String(entry.mids || '').split(',');
+      var isMember = !!(myMid && mids.indexOf(myMid) >= 0);
+      var isMyHost = !!(myMid && String(entry.hostMid || '') === myMid);
+
+      var statusHtml = kind
+        ? '<span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>' +
+          gameKindEmoji(kind) +
+          ' ' +
+          escapeHtml(gameKindLabel(kind)) +
+          ' あそび中</span>'
+        : '<span class="bbg-status bbg-status--wait"><span class="bbg-dot"></span>まちあい中</span>';
+
+      var btnHtml = '';
+      if (isMyHost) {
+        btnHtml = '<button class="primary bbgLobbyEnter" data-lobby="' + escapeHtml(it.id) + '" data-mode="host">ホストでひらく</button>';
+      } else if (isMember) {
+        btnHtml = '<button class="primary bbgLobbyEnter" data-lobby="' + escapeHtml(it.id) + '" data-mode="rejoin">もどる</button>';
+      } else {
+        btnHtml = '<button class="primary bbgLobbyEnter" data-lobby="' + escapeHtml(it.id) + '" data-mode="join">さんかする</button>';
+      }
+
+      var namesText = String(entry.names || '');
+
+      html +=
+        '<div class="bbg-lobby-item" style="animation-delay:' +
+        Math.min(i * 60, 300) +
+        'ms">' +
+        '<div class="bbg-lobby-top">' +
+        '<span class="bbg-lobby-id">ロビー ' +
+        escapeHtml(it.id) +
+        '</span>' +
+        statusHtml +
+        '</div>' +
+        (namesText ? '<div class="bbg-lobby-members">👥 ' + escapeHtml(namesText) + '</div>' : '') +
+        '<div class="row">' +
+        btnHtml +
+        '</div>' +
+        '</div>';
+    }
+    box.innerHTML = html;
   }
 
   function pad4(n) {
@@ -8886,11 +9161,11 @@
     var persistedName = loadPersistedName();
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="big">ロビーに参加</div>\n      <div id="lobbyJoinError" class="form-error" role="alert"></div>\n\n      <div class="field">\n        <label>ロビーID</label>\n        <input id="lobbyId" placeholder="例: ABCD1234" value="' +
+      '\n    <div class="stack">\n      <div class="bbg-wait-hero" style="padding:6px 0 0">\n        <div class="bbg-wait-emoji">👋</div>\n        <div class="bbg-wait-title">ロビーに参加</div>\n        <div class="muted" style="font-size:13px">名前を入れて「参加する」を押してください</div>\n      </div>\n      <div id="lobbyJoinError" class="form-error" role="alert"></div>\n\n      <div class="card">\n        <div class="stack">\n          <div class="field">\n            <label>ロビーID</label>\n            <input id="lobbyId" placeholder="例: 1234" value="' +
         escapeHtml(lobbyId || '') +
-        '" />\n      </div>\n\n      <div class="field">\n        <label>あなたの名前（表示用）</label>\n        <input id="lobbyJoinName" placeholder="例: たろう" value="' +
+        '" />\n          </div>\n\n          <div class="field">\n            <label>あなたの名前（表示用）</label>\n            <input id="lobbyJoinName" placeholder="例: たろう" value="' +
         escapeHtml(persistedName || '') +
-        '" />\n      </div>\n\n      <div class="row">\n        <button id="lobbyJoinBtn" class="primary">参加</button>\n      </div>\n    </div>\n  '
+        '" />\n          </div>\n\n          <button id="lobbyJoinBtn" class="primary bbg-start-btn">参加する</button>\n        </div>\n      </div>\n    </div>\n  '
     );
   }
 
@@ -8902,6 +9177,25 @@
     if (!lobbyId) throw new Error('ロビーIDを入力してください。');
     if (!name) throw new Error('名前を入力してください。');
     return { lobbyId: lobbyId, name: name };
+  }
+
+  // ゲーム種別ごとの表示メタ情報（ラベル/絵文字/最少人数）。UI表示専用。
+  var GAME_KIND_META = {
+    wordwolf: { label: 'ワードウルフ', emoji: '🐺', min: 3 },
+    loveletter: { label: 'ラブレター', emoji: '💌', min: 2 },
+    codenames: { label: 'コードネーム', emoji: '🕵️', min: 4 },
+    hannin: { label: '犯人は踊る', emoji: '🃏', min: 3 },
+    oekaki: { label: 'おえかきバトル', emoji: '🎨', min: 1 }
+  };
+
+  function gameKindLabel(kind) {
+    var m = GAME_KIND_META[String(kind || '')];
+    return m ? m.label : String(kind || '');
+  }
+
+  function gameKindEmoji(kind) {
+    var m = GAME_KIND_META[String(kind || '')];
+    return m ? m.emoji : '🎲';
   }
 
   function lobbyMembersSummaryHtml(lobby) {
@@ -8916,9 +9210,16 @@
         var m = members[mid] || {};
         var nm = String(m.name || '').trim();
         if (!nm) nm = '（無名）';
-        out += '<div class="kv"><span class="muted">' + (i + 1) + '</span><b>' + escapeHtml(nm) + '</b></div>';
+        out +=
+          '<div class="bbg-chip" style="animation-delay:' +
+          Math.min(i * 40, 400) +
+          'ms"><span class="bbg-chip-num">' +
+          (i + 1) +
+          '</span><span>' +
+          escapeHtml(nm) +
+          '</span></div>';
       }
-      if (out) return out;
+      if (out) return '<div class="bbg-chips">' + out + '</div>';
       var keys = Object.keys(members);
       if (!keys.length) return '<div class="muted">まだ参加者がいません。</div>';
       return '<div class="muted">参加者を読み込み中...</div>';
@@ -8978,7 +9279,7 @@
       loveletterSetupHtml =
         '<hr />' +
         '<div class="stack">' +
-        '<div class="muted">順番決め（ラブレター）</div>' +
+        '<div class="bbg-sec">💌 順番決め（ラブレター）</div>' +
         listHtml +
         '<div class="row">' +
         '<button id="lobbyShuffle" class="ghost">シャッフル</button>' +
@@ -9021,7 +9322,7 @@
       hanninSetupHtml =
         '<hr />' +
         '<div class="stack">' +
-        '<div class="muted">順番決め（犯人は踊る）</div>' +
+        '<div class="bbg-sec">🃏 順番決め（犯人は踊る）</div>' +
         listHtmlH +
         '<div class="row">' +
         '<button id="lobbyShuffle" class="ghost">シャッフル</button>' +
@@ -9085,7 +9386,7 @@
       codenamesSetupHtml =
         '<hr />' +
         '<div class="stack">' +
-        '<div class="muted">役職決め（コードネーム）</div>' +
+        '<div class="bbg-sec">🕵️ 役職決め（コードネーム）</div>' +
         rows +
         '<div class="row">' +
         '<button id="cnAssignShuffle" class="ghost">シャッフル</button>' +
@@ -9115,7 +9416,7 @@
       oekakiSetupHtml =
         '<hr />' +
         '<div class="stack">' +
-        '<div class="muted">せってい（おえかきバトル）</div>' +
+        '<div class="bbg-sec">🎨 せってい（おえかきバトル）</div>' +
         '<div class="field">' +
         '<label>せいげんじかん</label>' +
         '<select id="okDrawSecs">' +
@@ -9166,35 +9467,69 @@
       escapeHtml(myName || loadPersistedName() || '') +
       '" style="flex:1" />\n          <button id="lobbyUpdateMyName" class="ghost">変更</button>\n        </div>\n        <div class="muted">※ 参加者一覧に反映されます。</div>\n      </div>';
 
+    var memberCount = Object.keys(members).length;
+
+    var currentStatusHtml = currentLabel
+      ? '<div><span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>いま ' +
+        gameKindEmoji(currentLabel) +
+        ' ' +
+        escapeHtml(gameKindLabel(currentLabel)) +
+        ' をあそび中</span></div>'
+      : '';
+
+    var gameKinds = ['wordwolf', 'codenames', 'loveletter', 'hannin', 'oekaki'];
+    var gameGridHtml = '';
+    for (var gi = 0; gi < gameKinds.length; gi++) {
+      var gk = gameKinds[gi];
+      var gm = GAME_KIND_META[gk] || {};
+      var isSel = selectedKind === gk;
+      gameGridHtml +=
+        '<button type="button" class="bbg-game-card bbgGameKindBtn" data-kind="' +
+        escapeHtml(gk) +
+        '" aria-pressed="' +
+        (isSel ? 'true' : 'false') +
+        '"' +
+        (gi === gameKinds.length - 1 ? ' style="grid-column:1/-1"' : '') +
+        '>' +
+        '<span class="bbg-game-emoji">' +
+        (gm.emoji || '🎲') +
+        '</span>' +
+        '<span class="bbg-game-name">' +
+        escapeHtml(gm.label || gk) +
+        '</span>' +
+        '<span class="bbg-game-min">' +
+        String(gm.min || 1) +
+        '人〜</span>' +
+        '</button>';
+    }
+
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="big">ロビー</div>\n      <div class="kv"><span class="muted">ロビーID</span><b>' +
+      '\n    <div class="stack">\n      <div class="bbg-title-row">\n        <div class="big">ロビー</div>\n        <span class="bbg-code">' +
         escapeHtml(lobbyId) +
-        '</b></div>\n\n      <div class="card" style="padding:12px">\n        <div class="muted">参加用QR（参加者は読み取って名前登録）</div>\n        <div class="row" style="align-items:flex-start;gap:12px">\n          <div class="center" id="qrWrap" style="min-width:168px">\n            <canvas id="qr" width="160" height="160"></canvas>\n          </div>\n          <div class="stack" style="flex:1;min-width:0">\n            <div class="field" style="margin:0">\n              <label>参加URL（スマホ以外はこちら）</label>\n              <div class="code" id="joinUrlText">' +
+        '</span>\n      </div>\n      ' +
+        currentStatusHtml +
+        '\n\n      <div class="card bbg-qr-card">\n        <div class="muted" style="font-size:12px">QRを読み取るか、同じアプリ・URLをひらいて「さんかする」でも参加できます</div>\n        <div class="center" id="qrWrap" style="min-width:168px">\n          <canvas id="qr" width="160" height="160"></canvas>\n        </div>\n        <div class="muted center" id="qrError"></div>\n        <div class="field" style="margin:0;align-self:stretch;text-align:left">\n          <label>参加URL（スマホ以外はこちら）</label>\n          <div class="code" id="joinUrlText">' +
         escapeHtml(joinUrl || '') +
-        '</div>\n              <div class="row">\n                <button id="copyJoinUrl" class="ghost">コピー</button>\n              </div>\n              <div class="muted" id="copyStatus"></div>\n            </div>\n          </div>\n        </div>\n        <div class="muted center" id="qrError"></div>\n      </div>\n\n      <div class="stack">\n        <div class="muted">参加者</div>\n        ' +
+        '</div>\n          <div class="row">\n            <button id="copyJoinUrl" class="ghost">コピー</button>\n          </div>\n          <div class="muted" id="copyStatus"></div>\n        </div>\n      </div>\n\n      <div class="bbg-sec">参加者<span class="badge">' +
+        memberCount +
+        '人</span></div>\n      ' +
         lobbyMembersSummaryHtml(lobby) +
-        '\n      </div>\n\n      ' +
+        '\n      ' +
         (tableGmNoteHtml || '') +
-        (isTableGmDevice ? '' : '\n\n      ' + gmNameCardHtml) +
-        '\n\n      <hr />\n\n      <div class="field">\n        <label>ゲーム選択</label>\n        <select id="lobbyGameKind">\n          <option value="wordwolf" ' +
-        (selectedKind === 'wordwolf' ? 'selected' : '') +
-        '>ワードウルフ修正済み</option>\n          <option value="loveletter" ' +
-        (selectedKind === 'loveletter' ? 'selected' : '') +
-        '>ラブレター</option>\n          <option value="codenames" ' +
-        (selectedKind === 'codenames' ? 'selected' : '') +
-        '>コードネーム</option>\n          <option value="hannin" ' +
-        (selectedKind === 'hannin' ? 'selected' : '') +
-        '>犯人は踊る</option>\n          <option value="oekaki" ' +
-        (selectedKind === 'oekaki' ? 'selected' : '') +
-        '>おえかきバトル</option>\n        </select>\n        <div class="muted">現在: ' +
-        escapeHtml(currentLabel || '未開始') +
-        '</div>\n      </div>' +
+        (isTableGmDevice ? '' : '\n      ' + gmNameCardHtml) +
+        '\n\n      <div class="bbg-sec">ゲームをえらぶ</div>\n      <input type="hidden" id="lobbyGameKind" value="' +
+        escapeHtml(selectedKind) +
+        '" />\n      <div class="bbg-game-grid">' +
+        gameGridHtml +
+        '</div>' +
         loveletterSetupHtml +
         hanninSetupHtml +
         codenamesSetupHtml +
         oekakiSetupHtml +
-        '\n\n      <hr />\n\n      <div class="row">\n        <button id="lobbyStartGame" class="primary">ゲーム開始</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n    </div>\n  '
+        '\n\n      <div class="row" style="margin-top:4px">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
+        escapeHtml(gameKindLabel(selectedKind)) +
+        '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n    </div>\n  '
     );
   }
 
@@ -9206,16 +9541,24 @@
     var roomId = currentGame && currentGame.roomId ? String(currentGame.roomId) : '';
     var canGo = !!(label && roomId);
 
+    var waitHeroHtml = canGo
+      ? '<div class="bbg-wait-hero">\n          <div class="bbg-wait-emoji">' +
+        gameKindEmoji(label) +
+        '</div>\n          <div class="bbg-wait-title">' +
+        escapeHtml(gameKindLabel(label)) +
+        ' がはじまっています！</div>\n          <span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>あそび中</span>\n        </div>'
+      : '<div class="bbg-wait-hero">\n          <div class="bbg-wait-emoji">🎲</div>\n          <div class="bbg-wait-title">ホストの スタートを まっています<span class="bbg-wait-dots"><span>.</span><span>.</span><span>.</span></span></div>\n          <div class="muted" style="font-size:13px">ゲームがはじまると じどうで がめんが かわります</div>\n        </div>';
+
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="big">ロビー</div>\n      <div class="kv"><span class="muted">ロビーID</span><b>' +
+      '\n    <div class="stack">\n      <div class="bbg-title-row">\n        <div class="big">ロビー</div>\n        <span class="bbg-code">' +
         escapeHtml(lobbyId) +
-        '</b></div>\n\n      <div class="stack">\n        <div class="muted">参加者</div>\n        ' +
+        '</span>\n      </div>\n\n      ' +
+        waitHeroHtml +
+        '\n\n      <div class="bbg-sec">参加者</div>\n      ' +
         lobbyMembersSummaryHtml(lobby) +
-        '\n      </div>\n\n      <hr />\n\n      <div class="kv"><span class="muted">開始状況</span><b>' +
-        escapeHtml(canGo ? '開始済み' : '待機中') +
-        '</b></div>\n      <div class="muted">ホストがゲームを開始すると自動で画面が移動します。</div>\n\n      <div id="lobbyPlayerError" class="form-error" role="alert"></div>\n\n      <div class="row">' +
-        (canGo ? '<button id="lobbyGoGame" class="primary">ゲームへ</button>' : '') +
+        '\n\n      <div id="lobbyPlayerError" class="form-error" role="alert"></div>\n\n      <div class="row">' +
+        (canGo ? '<button id="lobbyGoGame" class="primary" style="flex:1">▶ ゲームへ</button>' : '') +
         '<a class="btn ghost" href="./">ホーム</a>\n      </div>\n    </div>\n  '
     );
   }
@@ -10374,13 +10717,13 @@
     // (Finished always reveals.)
     var shouldRevealBothWords = phase === 'judge' || phase === 'finished';
 
-    var singleWordHtml = '<div class="big">' + escapeHtml(word || '（未配布）') + '</div>';
+    var singleWordHtml = '<div class="ww-word">' + escapeHtml(word || '（未配布）') + '</div>';
     var bothWordsHtml =
       '<div class="inline-row" style="gap:12px;align-items:flex-start">' +
-      '<div style="flex:1;min-width:0"><div class="muted">多数側</div><div class="big">' +
+      '<div style="flex:1;min-width:0"><div class="ww-word-label">多数側</div><div class="ww-word ww-word--small">' +
       escapeHtml(majorityWord || '（未配布）') +
       '</div></div>' +
-      '<div style="flex:1;min-width:0"><div class="muted">少数側</div><div class="big">' +
+      '<div style="flex:1;min-width:0"><div class="ww-word-label">少数側</div><div class="ww-word ww-word--small">' +
       escapeHtml(minorityWord || '（未配布）') +
       '</div></div>' +
       '</div>';
@@ -10766,7 +11109,7 @@
         escapeHtml(selfName) +
         '</div>' +
         headerRightHtml +
-        '</div>\n\n      <div class="card" style="padding:12px">\n        <div class="muted">あなたのワード</div>\n        ' +
+        '</div>\n\n      <div class="ww-word-card">\n        <div class="ww-word-label">あなたのワード</div>\n        ' +
         wordHtml +
         '\n      </div>\n\n      ' +
         (timerCardHtml || '') +
@@ -11086,6 +11429,88 @@
     var btnJoin = document.getElementById('homeCreateJoin');
     var btnGm = document.getElementById('homeCreateGm');
 
+    var unsubLobbies = null;
+
+    function stopLobbiesWatch() {
+      try {
+        if (unsubLobbies) {
+          unsubLobbies();
+          unsubLobbies = null;
+        }
+      } catch (eU) {
+        unsubLobbies = null;
+      }
+    }
+
+    // 進行中ロビーの一覧をライブ表示（QRなしで後から参加できる入口）。
+    var prunedOnce = false;
+    firebaseReady()
+      .then(function () {
+        return onValue('lobbies/_index', function (all) {
+          try {
+            renderHomeLobbiesList(all);
+          } catch (eR) {
+            // ignore
+          }
+          if (!prunedOnce) {
+            prunedOnce = true;
+            try {
+              pruneLobbyIndex(all);
+            } catch (eP) {
+              // ignore
+            }
+          }
+        });
+      })
+      .then(function (u) {
+        unsubLobbies = u;
+      })
+      .catch(function () {
+        // Firebase未設定などは無視（一覧非表示のまま）
+      });
+
+    var lobbiesBox = document.getElementById('homeLobbies');
+    if (lobbiesBox && !lobbiesBox.__home_bound) {
+      lobbiesBox.__home_bound = true;
+      lobbiesBox.addEventListener('click', function (ev) {
+        var t = ev && ev.target ? ev.target : null;
+        while (t && t !== lobbiesBox && !(t.getAttribute && t.getAttribute('data-lobby'))) {
+          t = t.parentNode;
+        }
+        if (!t || t === lobbiesBox) return;
+        var lobbyId2 = String(t.getAttribute('data-lobby') || '');
+        var mode = String(t.getAttribute('data-mode') || 'join');
+        if (!lobbyId2) return;
+
+        stopLobbiesWatch();
+
+        var q2 = {};
+        var v2 = getCacheBusterParam();
+        if (v2) q2.v = v2;
+        q2.lobby = lobbyId2;
+
+        if (mode === 'host') {
+          // このロビーの作成者だった端末: ホスト画面で再開する。
+          try {
+            setActiveLobby('', false);
+          } catch (eH0) {
+            // ignore
+          }
+          q2.screen = 'lobby_host';
+        } else if (mode === 'rejoin') {
+          // すでにメンバー登録済みの端末: 名前入力なしで待機画面へ（進行中なら自動でゲームへ）。
+          setActiveLobby(lobbyId2, true);
+          q2.screen = 'lobby_player';
+        } else {
+          // 新規参加: QRを読み取ったときと同じ導線。
+          q2.screen = 'lobby_join';
+        }
+
+        setQuery(q2);
+        route();
+      });
+    }
+
     function disableHomeButtons(disabled) {
       try {
         if (btnJoin) btnJoin.disabled = !!disabled;
@@ -11097,6 +11522,7 @@
 
     function startCreate(isGmDevice, joinAsMember, tableGmDevice) {
       disableHomeButtons(true);
+      stopLobbiesWatch();
 
       // If this device was previously a restricted participant, clear it before creating a new lobby.
       // (Otherwise the host can be forced back to a waiting screen.)
@@ -11146,6 +11572,10 @@
         startCreate(true, false, true);
       });
     }
+
+    window.addEventListener('popstate', function () {
+      stopLobbiesWatch();
+    });
   }
 
   // Love Letter: debug table simulation (no Firebase)
@@ -12688,11 +13118,18 @@
         });
       }
 
-      var kindEl = document.getElementById('lobbyGameKind');
-      if (kindEl && !kindEl.__lobby_bound) {
-        kindEl.__lobby_bound = true;
-        kindEl.addEventListener('change', function () {
-          ui.selectedKind = String(kindEl.value || 'wordwolf');
+      var kindBtns = document.querySelectorAll('.bbgGameKindBtn');
+      for (var kb = 0; kb < kindBtns.length; kb++) {
+        var kindBtn = kindBtns[kb];
+        if (!kindBtn || kindBtn.__lobby_bound) continue;
+        kindBtn.__lobby_bound = true;
+        kindBtn.addEventListener('click', function (evK) {
+          var el = evK && evK.currentTarget ? evK.currentTarget : null;
+          var k = el ? String(el.getAttribute('data-kind') || '') : '';
+          if (!k) return;
+          ui.selectedKind = k;
+          var hid = document.getElementById('lobbyGameKind');
+          if (hid) hid.value = k;
           renderWithLobby(ui.lastLobby);
         });
       }
@@ -12883,16 +13320,7 @@
 
             if (n0 < min) {
               clearInlineError('lobbyHostError');
-              var gameLabel =
-                kind === 'loveletter'
-                  ? 'ラブレター'
-                  : kind === 'codenames'
-                    ? 'コードネーム'
-                    : kind === 'hannin'
-                      ? '犯人は踊る'
-                      : kind === 'oekaki'
-                        ? 'おえかきバトル'
-                        : 'ワードウルフ修正済み';
+              var gameLabel = gameKindLabel(kind) || 'ゲーム';
               setInlineError('lobbyHostError', '参加者が足りません（' + gameLabel + 'は' + String(min) + '人以上必要です）');
               return;
             }
@@ -13324,7 +13752,26 @@
       .then(function () {
         return subscribeLobby(lobbyId, function (lobby) {
           if (!lobby) {
-            renderError(viewEl, 'ロビーが見つかりません');
+            // ロビーが消えている（自動削除など）: 参加状態を解除してホームへ戻す。
+            // 制限端末のままだとホームに戻れず行き止まりになるため。
+            try {
+              if (unsub) {
+                unsub();
+                unsub = null;
+              }
+            } catch (eGone0) {
+              // ignore
+            }
+            try {
+              setActiveLobby('', false);
+            } catch (eGone1) {
+              // ignore
+            }
+            var qGone = {};
+            var vGone = getCacheBusterParam();
+            if (vGone) qGone.v = vGone;
+            setQuery(qGone);
+            route();
             return;
           }
 
@@ -16565,7 +17012,7 @@
       if (backBtn && !backBtn.__ll_bound) {
         backBtn.__ll_bound = true;
         backBtn.addEventListener('click', function () {
-          if (!confirm('【注意】ゲームを中断してロビーに戻します。\nこの操作は全員の画面に反映されます。\nよろしいですか？')) return;
+          if (!bbgConfirmClick(backBtn, 'ゲームを中断して\nぜんいんロビーに戻ります。', 'ロビーに戻る')) return;
           var qx = parseQuery();
           var lobbyId = qx && qx.lobby ? String(qx.lobby) : '';
           if (!lobbyId) {
@@ -16608,7 +17055,7 @@
       if (abortBtn && !abortBtn.__ll_bound) {
         abortBtn.__ll_bound = true;
         abortBtn.addEventListener('click', function () {
-          if (!confirm('【注意】ゲームを中断してロビーに戻します。\nこの操作は全員の画面に反映されます。\nよろしいですか？')) return;
+          if (!bbgConfirmClick(abortBtn, 'ゲームを中断して\nぜんいんロビーに戻ります。', 'ロビーに戻る')) return;
           var qx = parseQuery();
           var lobbyId = qx && qx.lobby ? String(qx.lobby) : '';
           if (!lobbyId) {
@@ -18446,7 +18893,7 @@
           if (abortBtn && !abortBtn.__hn_bound) {
             abortBtn.__hn_bound = true;
             abortBtn.addEventListener('click', function () {
-              if (!confirm('【注意】ゲームを中断してロビーに戻します。\nこの操作は全員の画面に反映されます。\nよろしいですか？')) return;
+              if (!bbgConfirmClick(abortBtn, 'ゲームを中断して\nぜんいんロビーに戻ります。', 'ロビーに戻る')) return;
               if (!lobbyId) return;
               abortBtn.disabled = true;
               firebaseReady()
@@ -18810,7 +19257,7 @@
           if (abortBtn && !abortBtn.__cn_bound) {
             abortBtn.__cn_bound = true;
             abortBtn.addEventListener('click', function () {
-              if (!confirm('【注意】ゲームを中断してロビーに戻します。\nこの操作は全員の画面に反映されます。\nよろしいですか？')) return;
+              if (!bbgConfirmClick(abortBtn, 'ゲームを中断して\nぜんいんロビーに戻ります。', 'ロビーに戻る')) return;
               if (!lobbyId) return;
               abortBtn.disabled = true;
               firebaseReady()
@@ -19276,7 +19723,8 @@
       redoStack: null,
       fitKey: '',
       artScale: 1,
-      fsAutoTried: false
+      fsAutoTried: false,
+      autoJoinInFlight: false
     };
 
     function redirectToLobby() {
@@ -20361,6 +20809,28 @@
             renderError(viewEl, '部屋が見つかりません');
             return;
           }
+
+          // 途中参加: ルーム未登録のプレイヤーは自動で登録する。
+          // 描画中なら残り時間で描け、判定中/結果なら次のラウンドから参加できる。
+          var playersMap = room.players || {};
+          if (playerId && !isTableGmDevice && !playersMap[playerId] && !ui.autoJoinInFlight) {
+            ui.autoJoinInFlight = true;
+            var namePromise = lobbyId
+              ? getValueOnce(lobbyPath(lobbyId) + '/members/' + playerId + '/name').catch(function () {
+                  return '';
+                })
+              : Promise.resolve('');
+            namePromise
+              .then(function (nm) {
+                var nm2 = String(nm || '').trim() || loadPersistedName() || 'ゲスト';
+                return joinPlayerInOekakiRoom(roomId, playerId, nm2, false);
+              })
+              .catch(function () {
+                // 失敗時は次のスナップショットで再試行する。
+                ui.autoJoinInFlight = false;
+              });
+          }
+
           renderNow(room);
           try {
             maybeStartJudging(room);
@@ -21434,7 +21904,7 @@
           if (backBtn && !backBtn.__cn_bound) {
             backBtn.__cn_bound = true;
             backBtn.addEventListener('click', function () {
-              if (!confirm('【注意】ゲームを中断してロビーに戻します。\nこの操作は全員の画面に反映されます。\nよろしいですか？')) return;
+              if (!bbgConfirmClick(backBtn, 'ゲームを中断して\nぜんいんロビーに戻ります。', 'ロビーに戻る')) return;
               var qx = parseQuery();
               var lobbyId = qx && qx.lobby ? String(qx.lobby) : '';
               if (!lobbyId) {

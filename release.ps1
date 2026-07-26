@@ -45,6 +45,17 @@ function Replace-AssetV([string]$path) {
 
 Replace-AssetV "index.html"
 
+# Stamp the Service Worker version (changing sw.js content triggers the
+# browser's SW update flow -> clients auto-reload to the new version).
+function Replace-SwVersion([string]$path) {
+  $p = Join-Path $root $path
+  $s = Get-Content -Raw -Encoding UTF8 $p
+  $s = [regex]::Replace($s, "(const SW_VERSION = ')[^']*(')", ('${1}' + $assetV + '${2}'))
+  Set-Content -Encoding UTF8 -NoNewline -Path $p -Value $s
+}
+
+Replace-SwVersion "sw.js"
+
 function Ensure-Remote([string]$name, [string]$urlIfMissing) {
   $existing = git remote 2>$null | Where-Object { $_ -eq $name }
   if ($existing) { return }
