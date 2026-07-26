@@ -746,3 +746,47 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   .ok-judge-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
   .ok-judge-img{max-height:34vh;width:auto;max-width:100%}
 }
+
+/* ==================== おえかきバトル（リレーモード） ==================== */
+/* 描画まわりは .ok-* を共用。ここはリレー固有の画面（挑戦状/結果/共有）だけ。 */
+
+.okr-hero{
+  text-align:center;padding:14px 10px 6px;
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+}
+.okr-hero-emoji{font-size:44px;line-height:1;animation:okPop .5s cubic-bezier(.2,1.6,.4,1) both}
+.okr-hero-title{font-size:22px;font-weight:900;letter-spacing:.3px}
+.okr-hero-sub{font-size:13px;color:var(--muted)}
+
+.okr-flow{padding:12px;display:flex;flex-direction:column;gap:8px}
+.okr-flow-step{display:flex;align-items:center;gap:10px;font-size:13.5px;line-height:1.4}
+.okr-flow-no{
+  flex:0 0 auto;width:22px;height:22px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:linear-gradient(180deg,var(--accent),var(--accent2));
+  color:#fff;font-weight:900;font-size:12px;
+}
+
+.okr-warn{padding:12px;font-size:13px;color:var(--warn);border-color:var(--warn)}
+.okr-callout{padding:12px;font-size:14px;font-weight:800;border-color:var(--accent);color:var(--accent)}
+
+/* AIの煽り実況 */
+.okr-verdict{
+  border:1px solid var(--accent);border-radius:12px;padding:12px 14px;
+  background:linear-gradient(180deg,rgba(91,157,255,.16),rgba(139,123,255,.10));
+  font-size:15px;font-weight:800;line-height:1.5;text-align:center;
+}
+
+.okr-card{position:relative}
+.okr-win{border-color:var(--ok);box-shadow:0 0 0 2px rgba(53,208,127,.45)}
+.okr-lose{border-color:var(--danger);box-shadow:0 0 0 2px rgba(255,90,106,.35)}
+.okr-badge{font-size:12px;font-weight:900;padding:4px 8px;border-radius:999px;white-space:nowrap}
+.okr-badge-win{background:var(--ok);color:#06210f}
+.okr-badge-lose{background:var(--danger);color:#2a0409}
+.okr-you{
+  margin-left:6px;font-size:11px;font-weight:800;color:var(--muted);
+  border:1px solid var(--line2);border-radius:999px;padding:1px 6px;vertical-align:middle;
+}
+.okr-comment{font-size:13.5px;line-height:1.6}
+.okr-win .okr-comment{color:var(--ok)}
+.okr-comment-lose{color:var(--danger)}
