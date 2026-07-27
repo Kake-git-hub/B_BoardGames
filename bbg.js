@@ -1202,6 +1202,70 @@
     });
   }
 
+  // -------------------- lobby: 退出 / 解散 --------------------
+  // ロビーに入ると出口が無く行き止まりになっていたため、明示的な退出手段を用意する。
+  // - 参加者: 「ロビーを出る」= 自分をメンバーから外す（leaveLobbyMember）
+  // - ホスト: 「ロビーを解散する」= ロビーごと削除して全員をホームへ（deleteLobby）
+
+  // ロビー本体と一覧インデックスをまとめて削除する。
+  // 参加者端末は subscribeLobby が null を受け取り、自動でホームへ戻る。
+  function deleteLobby(lobbyId) {
+    var id = String(lobbyId || '').trim();
+    if (!id) return Promise.reject(new Error('ロビーIDが不正です'));
+    return setValue(lobbyPath(id), null).then(function () {
+      return setValue(lobbyIndexPath(id), null).catch(function () {
+        // インデックスの削除失敗は致命的ではない（7日で自動的に掃除される）
+      });
+    });
+  }
+
+  // メンバー一覧と順番から自分を外す。
+  // - 誰もいなくなったらロビーごと削除する（ホーム一覧に空のロビーを残さない）
+  // - ホストが抜けた場合は残っている先頭のメンバーをホストに繰り上げる
+  //   （hostMid が居ないメンバーを指したままだと、誰もホスト画面を開けなくなるため）
+  function leaveLobbyMember(lobbyId, memberId) {
+    var id = String(lobbyId || '').trim();
+    var mid = String(memberId || '').trim();
+    if (!id || !mid) return Promise.reject(new Error('退出に失敗しました（ID不正）'));
+
+    var becameEmpty = false;
+    return runTxn(lobbyPath(id), function (lobby) {
+      if (!lobby) return lobby;
+
+      var members = assign({}, lobby.members || {});
+      delete members[mid];
+
+      var order = Array.isArray(lobby.order) ? lobby.order : [];
+      var nextOrder = [];
+      for (var i = 0; i < order.length; i++) {
+        var oid = String(order[i] || '');
+        if (!oid || oid === mid) continue;
+        if (!members[oid]) continue;
+        nextOrder.push(oid);
+      }
+
+      var remaining = Object.keys(members);
+      if (!remaining.length) {
+        becameEmpty = true;
+        return lobby; // 実体の削除はトランザクションの外で行う
+      }
+
+      var next = assign({}, lobby, { members: members, order: nextOrder });
+      if (String(lobby.hostMid || '') === mid) {
+        next.hostMid = String(nextOrder[0] || remaining[0] || '');
+      }
+      return next;
+    }).then(function (lobby) {
+      if (becameEmpty) return deleteLobby(id);
+      try {
+        if (lobby) updateLobbyIndex(id, lobby);
+      } catch (eIdx) {
+        // ignore
+      }
+      return lobby;
+    });
+  }
+
   function setLobbyLoveLetterExtraCards(lobbyId, extraCards) {
     var nextExtras = [];
     try {
@@ -4586,13 +4650,25 @@
     return parseIntSafe(p.endsAt, 0);
   }
 
-  // いま誰の番か。'a' → 'b' → 'judging' → 'result' の順に進む。
+  // このラウンドの先攻スロット。第1戦はホスト(a)、再戦は申し込んだ側が先攻。
+  // （first が無い古い部屋は 'a' 先攻として扱う）
+  function okrFirstSlot(room) {
+    return room && room.round && room.round.first === 'b' ? 'b' : 'a';
+  }
+
+  function okrSecondSlot(room) {
+    return okrOtherSlot(okrFirstSlot(room));
+  }
+
+  // いま誰の番か。先攻 → 後攻 → 'judging' → 'result' の順に進む。
   function okrStage(room) {
     var phase = String((room && room.phase) || '');
     if (phase === 'result') return 'result';
     if (phase === 'judging') return 'judging';
-    if (!okrHasSubmitted(room, 'a')) return 'a';
-    if (!okrHasSubmitted(room, 'b')) return 'b';
+    var first = okrFirstSlot(room);
+    var second = okrOtherSlot(first);
+    if (!okrHasSubmitted(room, first)) return first;
+    if (!okrHasSubmitted(room, second)) return second;
     return 'judging';
   }
 
@@ -4610,7 +4686,8 @@
       },
       round: {
         index: 1,
-        topic: String(topic || '')
+        topic: String(topic || ''),
+        first: 'a'
       },
       players: {
         a: { name: String(hostName || '').trim() || 'ホスト', joinedAt: serverNowMs(), isHost: true }
@@ -4701,7 +4778,9 @@
   }
 
   // 再戦。直前の結果は prevResult に退避して、相手が結果を見られる状態を保ったまま次戦を用意する。
-  // 設定を決めるのは申し込んだ側（bySlot）だが、先に描くのは常にホスト(a)。
+  // 設定を決めるのも先に描くのも「申し込んだ側」（bySlot）。
+  // 申し込んだ側が描き終わってから、前回の結果と今回の挑戦状をまとめて相手に渡す流れになる
+  // （= A→B→B→A のように、採点した側がそのまま次の先攻になる）。
   function okrRematch(roomId, settings, topic, bySlot) {
     var s = normalizeOekakiLobbySettings(settings);
     var by = bySlot === 'b' ? 'b' : 'a';
@@ -4740,7 +4819,8 @@
         },
         round: {
           index: okrRoundIndex(room) + 1,
-          topic: String(topic || '')
+          topic: String(topic || ''),
+          first: by
         },
         players: players,
         prevResult: prev,
@@ -9026,6 +9106,26 @@
 
   // -------------------- shared in-app confirm --------------------
   // ネイティブconfirm()はiOSのstandalone PWAで無反応になるため、アプリ内ダイアログで代替する。
+  // ロビーを抜けてホーム画面へ戻す共通処理。
+  // 端末の「参加中ロビー」を解除しないと routeHome() がロビーへ戻し続け、行き止まりになる。
+  function leaveLobbyAndGoHome(unsubFn) {
+    try {
+      if (unsubFn) unsubFn();
+    } catch (e0) {
+      // ignore
+    }
+    try {
+      setActiveLobby('', false);
+    } catch (e1) {
+      // ignore
+    }
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    setQuery(q);
+    route();
+  }
+
   // （おえかきバトルの okShowConfirm と同じ見た目。CSSは .ok-confirm を共用）
   function bbgShowConfirm(message, yesLabel, onYes) {
     try {
@@ -9947,7 +10047,15 @@
         oekakiSetupHtml +
         '\n\n      <div class="row" style="margin-top:4px">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
         escapeHtml(gameKindLabel(selectedKind)) +
-        '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n    </div>\n  '
+        '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n' +
+        // ロビーの出口。これが無いとホスト端末はブラウザバック以外で抜けられない。
+        '\n      <hr />\n      <div class="bbg-sec">ロビーをとじる</div>\n' +
+        '      <div class="row">\n' +
+        '        <button id="lobbyHostGoHome" class="ghost" style="flex:1">🏠 ホームへ</button>\n' +
+        '        <button id="lobbyDissolve" class="danger" style="flex:1">🗑 ロビーを解散</button>\n' +
+        '      </div>\n' +
+        '      <div class="muted">「ホームへ」はロビーを残したまま抜けます（ホーム画面の一覧から「ホストでひらく」で戻れます）。「解散」はロビーを消して、参加者全員をホーム画面に戻します。</div>\n' +
+        '    </div>\n  '
     );
   }
 
@@ -9977,7 +10085,17 @@
         lobbyMembersSummaryHtml(lobby) +
         '\n\n      <div id="lobbyPlayerError" class="form-error" role="alert"></div>\n\n      <div class="row">' +
         (canGo ? '<button id="lobbyGoGame" class="primary" style="flex:1">▶ ゲームへ</button>' : '') +
-        '<a class="btn ghost" href="./">ホーム</a>\n      </div>\n    </div>\n  '
+        // 制限端末（QR参加）では routeHome() がロビーへ戻すので、押しても何も起きない
+        // 「ホーム」は出さない。抜けたいときは下の「ロビーを出る」を使ってもらう。
+        (shouldShowBackNav() ? '<a class="btn ghost" href="./">ホーム</a>' : '') +
+        '\n      </div>\n' +
+        // QR参加端末はホームへ戻れない設定（誤操作防止）なので、
+        // 明示的な「出る」だけは必ず押せるようにしておく（<a>だとstripBackNavLinksで消される）。
+        '\n      <hr />\n      <div class="row">\n' +
+        '        <button id="lobbyLeave" class="danger" style="flex:1">🚪 ロビーを出る</button>\n' +
+        '      </div>\n' +
+        '      <div class="muted">参加者一覧からあなたが消えて、ホーム画面に戻ります。同じロビーには何度でも入り直せます。</div>\n' +
+        '    </div>\n  '
     );
   }
 
@@ -13118,7 +13236,7 @@
     } catch (e0) {
       isTableGmDevice = false;
     }
-    var ui = { selectedKind: '', lastLobby: null };
+    var ui = { selectedKind: '', lastLobby: null, leaving: false };
     var joinUrl = makeLobbyJoinUrl(lobbyId);
 
     function drawQr(size) {
@@ -13491,6 +13609,43 @@
     function bindHostButtons(lobby) {
       function currentLobby() {
         return ui && ui.lastLobby ? ui.lastLobby : lobby;
+      }
+
+      // ロビーの出口（ホスト画面にはこれまで抜ける導線が無かった）。
+      var goHomeBtn = document.getElementById('lobbyHostGoHome');
+      if (goHomeBtn && !goHomeBtn.__lobby_bound) {
+        goHomeBtn.__lobby_bound = true;
+        goHomeBtn.addEventListener('click', function () {
+          ui.leaving = true;
+          leaveLobbyAndGoHome(unsub);
+          unsub = null;
+        });
+      }
+
+      var dissolveBtn = document.getElementById('lobbyDissolve');
+      if (dissolveBtn && !dissolveBtn.__lobby_bound) {
+        dissolveBtn.__lobby_bound = true;
+        dissolveBtn.addEventListener('click', function () {
+          bbgShowConfirm(
+            'このロビーを解散しますか？\n参加者は全員ホーム画面に戻されます。\nこの操作は取り消せません。',
+            '解散する',
+            function () {
+              dissolveBtn.disabled = true;
+              clearInlineError('lobbyHostError');
+              ui.leaving = true;
+              deleteLobby(lobbyId)
+                .then(function () {
+                  leaveLobbyAndGoHome(unsub);
+                  unsub = null;
+                })
+                .catch(function (e) {
+                  ui.leaving = false;
+                  dissolveBtn.disabled = false;
+                  setInlineError('lobbyHostError', (e && e.message) || '解散に失敗しました');
+                });
+            }
+          );
+        });
       }
 
       var copyBtn = document.getElementById('copyJoinUrl');
@@ -14070,8 +14225,13 @@
     firebaseReady()
       .then(function () {
         return subscribeLobby(lobbyId, function (lobby) {
+          // 退出/解散の処理中は、遅れて届くスナップショットで描き直さない。
+          if (ui.leaving) return;
           if (!lobby) {
-            renderError(viewEl, 'ロビーが見つかりません');
+            // 他端末が解散した／自動削除された場合も行き止まりにしない。
+            ui.leaving = true;
+            leaveLobbyAndGoHome(unsub);
+            unsub = null;
             return;
           }
 
@@ -14111,6 +14271,8 @@
   function routeLobbyPlayer(lobbyId) {
     var unsub = null;
     var mid = getOrCreateLobbyMemberId(lobbyId);
+    // 退出処理を始めたら、遅れて届くスナップショットでロビー画面を描き直さない。
+    var leaving = false;
 
     function goToCurrentGame(lobby) {
       var cg = (lobby && lobby.currentGame) || null;
@@ -14181,27 +14343,13 @@
     firebaseReady()
       .then(function () {
         return subscribeLobby(lobbyId, function (lobby) {
+          if (leaving) return;
           if (!lobby) {
-            // ロビーが消えている（自動削除など）: 参加状態を解除してホームへ戻す。
+            // ロビーが消えている（ホストが解散した／自動削除など）: 参加状態を解除してホームへ。
             // 制限端末のままだとホームに戻れず行き止まりになるため。
-            try {
-              if (unsub) {
-                unsub();
-                unsub = null;
-              }
-            } catch (eGone0) {
-              // ignore
-            }
-            try {
-              setActiveLobby('', false);
-            } catch (eGone1) {
-              // ignore
-            }
-            var qGone = {};
-            var vGone = getCacheBusterParam();
-            if (vGone) qGone.v = vGone;
-            setQuery(qGone);
-            route();
+            leaving = true;
+            leaveLobbyAndGoHome(unsub);
+            unsub = null;
             return;
           }
 
@@ -14217,6 +14365,28 @@
               if (!goToCurrentGame(lobby)) {
                 setInlineError('lobbyPlayerError', 'まだ開始されていません');
               }
+            });
+          }
+
+          var leaveBtn = document.getElementById('lobbyLeave');
+          if (leaveBtn && !leaveBtn.__lobby_bound) {
+            leaveBtn.__lobby_bound = true;
+            leaveBtn.addEventListener('click', function () {
+              bbgShowConfirm('このロビーを出ますか？\n参加者一覧から あなたが いなくなります。', '出る', function () {
+                leaveBtn.disabled = true;
+                clearInlineError('lobbyPlayerError');
+                leaving = true;
+                leaveLobbyMember(lobbyId, mid)
+                  .then(function () {
+                    leaveLobbyAndGoHome(unsub);
+                    unsub = null;
+                  })
+                  .catch(function (e) {
+                    leaving = false;
+                    leaveBtn.disabled = false;
+                    setInlineError('lobbyPlayerError', (e && e.message) || '退出に失敗しました');
+                  });
+              });
             });
           }
         });
@@ -21642,33 +21812,37 @@
     return '<div class="okr-verdict ok-in">📣 ' + escapeHtml(v) + '</div>';
   }
 
-  function okrShareBoxHtml(roomId, buttonLabel, note) {
-    var url = okrShareUrl(roomId);
+  function okrShareUrlBoxHtml(roomId) {
     return (
-      '<button id="okrShareBtn" class="primary bbg-start-btn">🔗 ' + escapeHtml(String(buttonLabel || 'リンクを送る')) + '</button>' +
-      '<div class="muted center" id="okrShareStatus"></div>' +
-      (note ? '<div class="muted center">' + escapeHtml(String(note)) + '</div>' : '') +
       '<div class="field" style="margin:0"><label>共有リンク（コピーして貼り付けてもOK）</label>' +
       '<div class="code" id="okrShareUrlText">' +
-      escapeHtml(url) +
+      escapeHtml(okrShareUrl(roomId)) +
       '</div></div>'
     );
   }
 
+  function okrShareBoxHtml(roomId, buttonLabel, note) {
+    return (
+      '<button id="okrShareBtn" class="primary bbg-start-btn">🔗 ' + escapeHtml(String(buttonLabel || 'リンクを送る')) + '</button>' +
+      '<div class="muted center" id="okrShareStatus"></div>' +
+      (note ? '<div class="muted center">' + escapeHtml(String(note)) + '</div>' : '') +
+      okrShareUrlBoxHtml(roomId)
+    );
+  }
+
+  // 再戦の設定フォーム。申し込んだ本人が先に描くので、その順序をはっきり書いておく。
   function okrRematchSectionHtml(room, mySlot) {
     var s = normalizeOekakiLobbySettings(room && room.settings);
-    var firstDrawerNote =
-      mySlot === 'a'
-        ? '申し込むと、あなたが先に描いて相手にリンクを渡します。'
-        : '申し込むと、' + okrName(room, 'a') + ' さんが先に描きます。設定を決めるのはあなたです。';
+    var otherName = okrName(room, okrOtherSlot(mySlot));
     return (
-      '<hr />' +
-      '<div class="bbg-sec">🔥 再戦を申し込む</div>' +
-      '<div class="muted">' +
-      escapeHtml(firstDrawerNote) +
-      '</div>' +
+      '<div class="card okr-rematch"><div class="stack">' +
+      '<div class="bbg-sec">🔥 再戦の設定</div>' +
+      '<div class="muted">申し込むと、まず<b>あなたが</b>この設定で描きます。描き終わってから、前回の結果と今回の挑戦状をまとめて ' +
+      escapeHtml(otherName) +
+      ' さんに送ります。</div>' +
       okrSettingsFieldsHtml(s) +
-      '<button id="okrRematchBtn" class="primary">この設定で再戦を申し込む</button>'
+      '<button id="okrRematchBtn" class="primary bbg-start-btn">この設定で描きはじめる</button>' +
+      '</div></div>'
     );
   }
 
@@ -21808,7 +21982,11 @@
         var by = String(room.rematchBy || 'b');
         rematchNote =
           '<div class="card okr-callout">🔥 ' +
-          escapeHtml(by === slot ? 'あなたが申し込んだ再戦です。' : okrName(room, okrOtherSlot(slot)) + ' さんから再戦を申し込まれています！') +
+          escapeHtml(
+            by === slot
+              ? 'あなたが申し込んだ再戦です。まずあなたが描いて、結果と一緒に送ります。'
+              : okrName(room, okrOtherSlot(slot)) + ' さんから再戦を申し込まれています！'
+          ) +
           '</div>';
       }
 
@@ -21858,26 +22036,46 @@
       if (mineSubmitted) {
         // 自分の番が終わった直後。相手にリンクを渡すのがここでの唯一の仕事。
         var seated = !!okrPlayer(room, other);
+        // 再戦を申し込んだ側は自分が先に描くので、前回の結果もここで一緒に送ることになる。
+        var prevSend = room.prevResult;
+        var sendsPrev = !!(prevSend && roundIndex > 1);
+        var prevSendHtml = sendsPrev
+          ? '<div class="bbg-sec">いっしょに送る前回（第' +
+            String(parseIntSafe(prevSend.round, roundIndex - 1)) +
+            '戦）の結果</div>' +
+            okrVerdictHtml(prevSend) +
+            okrResultCardsHtml(room, prevSend, slot, false) +
+            '<hr />'
+          : '';
+
         render(
           viewEl,
-          '<div class="stack center">' +
+          '<div class="stack">' +
+            prevSendHtml +
+            '<div class="stack center">' +
             '<div><span class="ok-stamp">かんせい！</span></div>' +
             myImg +
             '<div class="muted">' +
-            (seated ? 'つぎは <b>' + escapeHtml(otherName) + '</b> さんの番です。リンクを渡してください。' : 'リンクを送って、対戦相手をよびましょう。') +
+            (!seated
+              ? 'リンクを送って、対戦相手をよびましょう。'
+              : sendsPrev
+                ? '前回の結果と、今回の挑戦状をまとめて <b>' + escapeHtml(otherName) + '</b> さんに送りましょう。'
+                : 'つぎは <b>' + escapeHtml(otherName) + '</b> さんの番です。リンクを渡してください。') +
             '</div>' +
             okrShareBoxHtml(
               roomId,
-              seated ? otherName + ' に挑戦状を送る' : 'リンクを送って対戦相手をよぶ',
+              !seated ? 'リンクを送って対戦相手をよぶ' : sendsPrev ? otherName + ' に結果と挑戦状を送る' : otherName + ' に挑戦状を送る',
               '相手が描き終わるとAIが採点し、結果のリンクが返ってきます。'
             ) +
             '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+            '</div>' +
             '</div>'
         );
         return;
       }
 
-      // 相手が先に描く番（再戦を申し込んだ直後など）。
+      // 自分は後攻で、先攻がまだ描き終わっていない。基本は「相手の番を待つ」だけ。
+      // （先攻は描き終わってからリンクを送るので、ここに来るのは古いリンクを先に開いた場合）
       var prevR = room.prevResult;
       var prevBlock =
         prevR && roundIndex > 1
@@ -21888,26 +22086,16 @@
             okrResultCardsHtml(room, prevR, slot, false) +
             '<hr />'
           : '';
-      var iAskedRematch = roundIndex > 1 && String(room.rematchBy || '') === slot;
 
       render(
         viewEl,
         '<div class="stack">' +
           prevBlock +
           '<div class="center stack">' +
-          '<div class="big">' +
-          (iAskedRematch ? '🔥 再戦を申し込みました' : '⏳ 相手の番です') +
-          '</div>' +
+          '<div class="big">⏳ 相手の番です</div>' +
           '<div class="muted">' +
-          escapeHtml(
-            iAskedRematch
-              ? otherName + ' さんが先に描きます。結果と再戦の申し込みをまとめてリンクで送ってください。'
-              : otherName + ' さんが描き終わるのを待っています。'
-          ) +
+          escapeHtml(otherName + ' さんが描き終わるのを待っています。描き終わると、あなたの番のリンクが届きます。') +
           '</div>' +
-          (iAskedRematch
-            ? okrShareBoxHtml(roomId, otherName + ' に結果と再戦を送る', '相手が描き終わったら、またこのリンクが返ってきます。')
-            : '') +
           '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
           '</div>' +
           '</div>'
@@ -21941,8 +22129,16 @@
           okrVerdictHtml(result) +
           okrResultCardsHtml(room, result, slot, true) +
           '<hr />' +
-          okrShareBoxHtml(roomId, otherName + ' に結果を送る', '相手の端末でも同じ結果が見られます。') +
-          okrRematchSectionHtml(room, slot) +
+          '<div class="muted center">' +
+          escapeHtml(otherName + ' さんに結果を届けましょう。ついでに再戦を挑むこともできます。') +
+          '</div>' +
+          '<div class="row">' +
+          '<button id="okrShareBtn" class="ghost" style="flex:1">🔗 結果だけを共有する</button>' +
+          '<button id="okrRematchToggle" class="primary" style="flex:1">🔥 結果共有＋再戦を申し込む</button>' +
+          '</div>' +
+          '<div class="muted center" id="okrShareStatus"></div>' +
+          (ui && ui.rematchOpen ? okrRematchSectionHtml(room, slot) : '') +
+          okrShareUrlBoxHtml(roomId) +
           '<div id="okrError" class="form-error" role="alert"></div>' +
           '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
           '</div>'
@@ -21963,7 +22159,8 @@
       drawingRound: 0,
       judgeInFlight: false,
       judgeToken: '',
-      joinInFlight: false
+      joinInFlight: false,
+      rematchOpen: false
     });
 
     var draw = createOekakiDrawEngine(ui, {
@@ -22013,11 +22210,13 @@
       return [
         view,
         roundIndex,
+        okrFirstSlot(room),
         okrHasSubmitted(room, 'a') ? 1 : 0,
         okrHasSubmitted(room, 'b') ? 1 : 0,
         okrPlayer(room, 'b') ? 1 : 0,
         parseIntSafe(r.judgedAt, 0),
-        r.error ? 1 : 0
+        r.error ? 1 : 0,
+        ui.rematchOpen ? 1 : 0
       ].join('|');
     }
 
@@ -22138,6 +22337,14 @@
       if (!slot) return; // 観戦端末は採点しない（他人のAPIキー枠を使わない）
       if (room.phase === 'drawing') {
         if (!okrHasSubmitted(room, 'a') || !okrHasSubmitted(room, 'b')) return;
+        // 採点は後攻（結果を最初に見て、相手へ共有する側）の端末で行う。
+        // 先攻の端末がたまたま開いたままでも、共有より先に結果が出てしまわないよう少し待つ。
+        var second = okrSecondSlot(room);
+        if (slot !== second) {
+          var sp = okrPlayer(room, second);
+          var t0 = parseIntSafe(sp && sp.submittedAt, 0);
+          if (!t0 || serverNowMs() - t0 < OKR_JUDGE_TAKEOVER_MS) return;
+        }
         startJudging('drawing');
         return;
       }
@@ -22291,6 +22498,16 @@
         });
       }
 
+      var rematchToggle = document.getElementById('okrRematchToggle');
+      if (rematchToggle && !rematchToggle.__okr_bound) {
+        rematchToggle.__okr_bound = true;
+        rematchToggle.addEventListener('click', function () {
+          ui.rematchOpen = !ui.rematchOpen;
+          ui.renderKey = '';
+          if (lastRoom) renderNow(lastRoom);
+        });
+      }
+
       var rematchBtn = document.getElementById('okrRematchBtn');
       if (rematchBtn && !rematchBtn.__okr_bound) {
         rematchBtn.__okr_bound = true;
@@ -22308,6 +22525,7 @@
           okrRematch(roomId, settings, topic, slot)
             .then(function () {
               okrSaveSettings(settings);
+              ui.rematchOpen = false; // 次の画面（自分の描く番）へ進む
             })
             .catch(function (e) {
               rematchBtn.disabled = false;
