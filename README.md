@@ -277,7 +277,31 @@ UI
 }
 ```
 
-※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。リレーモードも同様に `oekakiRelayRooms` の追記が必要です。
+※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。
+
+#### ⚠ リレーモードを使う前に（既存プロジェクトでの1回だけの作業）
+
+おえかきバトル リレーモードは新しいパス `oekakiRelayRooms` を使います。**このルールを足していないと「この設定ではじめる」で PERMISSION_DENIED になり、部屋が作れません**（既存ゲームには影響しません）。
+
+DBルールはアプリのソースではなく Firebase Console 側の設定なので、リリース（GitHub Pagesへの反映）とは別に手作業での追記が必要です。
+
+1. Firebase Console → 対象プロジェクト → **Realtime Database → ルール**
+2. `"rules"` の中に次の1行を**追記**する（既存のルールは消さずに、行を足すだけ）
+
+   ```json
+   "oekakiRelayRooms": { ".read": true, ".write": true }
+   ```
+
+   例（既存が `oekakiRooms` で終わっている場合、末尾のカンマを付け忘れないこと）:
+
+   ```json
+   "oekakiRooms": { ".read": true, ".write": true },
+   "oekakiRelayRooms": { ".read": true, ".write": true }
+   ```
+
+3. **公開（Publish）** を押す。反映は即時で、アプリ側の再デプロイは不要
+
+確認方法: ホーム画面 →「おえかきバトル（リレー）」→ 名前を入れて「この設定ではじめる」で、エラーにならず描画画面の手前（「はじめる」ボタン）まで進めばOKです。
 
 ※ 現在の本番ルールは「`lobbies/$id` 単位の許可」になっており、`lobbies` や `rooms` などの**トップレベル一括読み取りは拒否**されます。このため `cleanupOldRooms()`（7日超の部屋の自動削除）は毎回 permission_denied で空振りしています。自動削除を効かせたい場合は、上記のようにトップレベルに `.read` を付ける（＋`.indexOn: ["createdAt"]` 推奨）ようConsoleでルールを変更してください。ホームのロビー一覧は `lobbies/_index` を使うため、**ルール変更なしでも動作します**。
 
