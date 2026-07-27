@@ -790,3 +790,4 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .okr-comment{font-size:13.5px;line-height:1.6}
 .okr-win .okr-comment{color:var(--ok)}
 .okr-comment-lose{color:var(--danger)}
+.okr-rematch{border-color:var(--accent);padding:12px}
