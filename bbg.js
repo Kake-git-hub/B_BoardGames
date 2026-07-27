@@ -21919,33 +21919,17 @@
       return;
     }
 
-    if (view === 'viewer') {
-      var viewerBody =
-        room.phase === 'result'
-          ? okrVerdictHtml(room.result) + okrResultCardsHtml(room, room.result, '', false)
-          : '<div class="muted center">対戦中です。結果が出るまでお待ちください。</div>';
-      render(
-        viewEl,
-        '<div class="stack">' +
-          '<div class="big center">おえかきバトル（リレー）</div>' +
-          '<div class="card okr-warn">この勝負はすでに2人でうまっています。この端末は観戦モードです。</div>' +
-          viewerBody +
-          '<hr />' +
-          // 別のブラウザ（LINE内ブラウザ↔Safari など）で開き直すと席の記録が消える。
-          // 本人が続きを遊べるように、どちらの席かを選び直せるようにしておく。
-          '<div class="muted center">この端末が対戦者本人のものなら、席を選び直してください。</div>' +
-          '<div class="row">' +
-          '<button id="okrClaimA" class="ghost">' +
-          escapeHtml(okrName(room, 'a')) +
-          ' として続ける</button>' +
-          '<button id="okrClaimB" class="ghost">' +
-          escapeHtml(okrName(room, 'b')) +
-          ' として続ける</button>' +
-          '</div>' +
-          '<div class="center"><a class="btn ghost" href="?screen=oekaki_relay_create">自分でバトルを始める</a></div>' +
-          '</div>'
-      );
-      return;
+    // 席を自動で割り当てたときだけ出す控えめな注意書き。
+    // ふつうは正しく当たるが、万一取り違えたときに入れ替えられるようにしておく。
+    var seatNoteHtml = '';
+    if (ui && ui.autoAssigned && okrPlayer(room, other)) {
+      seatNoteHtml =
+        '<div class="okr-seat-note muted center">この端末は <b>' +
+        escapeHtml(okrName(room, slot)) +
+        '</b> として続けています。' +
+        '<button id="okrSwapSeat" class="ghost okr-seat-swap">' +
+        escapeHtml(otherName) +
+        ' に切り替える</button></div>';
     }
 
     if (view === 'draw') {
@@ -21964,9 +21948,12 @@
     if (view === 'ready' || view === 'timeup') {
       // 自分が設定した自由記入お題は本人には見えているので隠さない。
       var knowsTopic = settings.topicMode === 'custom' && String((room.settings && room.settings.setBy) || 'a') === slot;
+      // 前回の結果は「受け取った側」にだけ見せる。再戦を申し込んだ本人は
+      // 直前の結果画面で見たばかりなので、ここで繰り返さない。
       var prev = room.prevResult;
+      var iAskedRematch = String(room.rematchBy || '') === slot;
       var prevHtml = '';
-      if (prev && !okrHasSubmitted(room, slot) && roundIndex > 1) {
+      if (prev && !iAskedRematch && !okrHasSubmitted(room, slot) && roundIndex > 1) {
         prevHtml =
           '<div class="bbg-sec">前回（第' +
           String(parseIntSafe(prev.round, roundIndex - 1)) +
@@ -22020,6 +22007,7 @@
           '</button>' +
           '</div></div>' +
           '<div id="okrError" class="form-error" role="alert"></div>' +
+          seatNoteHtml +
           '</div>'
       );
       return;
@@ -22035,24 +22023,14 @@
 
       if (mineSubmitted) {
         // 自分の番が終わった直後。相手にリンクを渡すのがここでの唯一の仕事。
+        // 前回の勝敗は結果画面で見たばかりなので、ここでは繰り返さない
+        // （リンクには前回の結果も含まれることだけ文章で伝える）。
         var seated = !!okrPlayer(room, other);
-        // 再戦を申し込んだ側は自分が先に描くので、前回の結果もここで一緒に送ることになる。
-        var prevSend = room.prevResult;
-        var sendsPrev = !!(prevSend && roundIndex > 1);
-        var prevSendHtml = sendsPrev
-          ? '<div class="bbg-sec">いっしょに送る前回（第' +
-            String(parseIntSafe(prevSend.round, roundIndex - 1)) +
-            '戦）の結果</div>' +
-            okrVerdictHtml(prevSend) +
-            okrResultCardsHtml(room, prevSend, slot, false) +
-            '<hr />'
-          : '';
+        var sendsPrev = !!(room.prevResult && roundIndex > 1);
 
         render(
           viewEl,
-          '<div class="stack">' +
-            prevSendHtml +
-            '<div class="stack center">' +
+          '<div class="stack center">' +
             '<div><span class="ok-stamp">かんせい！</span></div>' +
             myImg +
             '<div class="muted">' +
@@ -22068,7 +22046,7 @@
               '相手が描き終わるとAIが採点し、結果のリンクが返ってきます。'
             ) +
             '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
-            '</div>' +
+            seatNoteHtml +
             '</div>'
         );
         return;
@@ -22097,6 +22075,7 @@
           escapeHtml(otherName + ' さんが描き終わるのを待っています。描き終わると、あなたの番のリンクが届きます。') +
           '</div>' +
           '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+          seatNoteHtml +
           '</div>' +
           '</div>'
       );
@@ -22141,6 +22120,7 @@
           okrShareUrlBoxHtml(roomId) +
           '<div id="okrError" class="form-error" role="alert"></div>' +
           '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+          seatNoteHtml +
           '</div>'
       );
       return;
@@ -22160,7 +22140,8 @@
       judgeInFlight: false,
       judgeToken: '',
       joinInFlight: false,
-      rematchOpen: false
+      rematchOpen: false,
+      autoAssigned: false
     });
 
     var draw = createOekakiDrawEngine(ui, {
@@ -22187,8 +22168,19 @@
       var stage = okrStage(room);
 
       if (!slot) {
-        // まだ席が決まっていない端末。b が空いていれば参加画面、埋まっていれば観戦。
-        return okrPlayer(room, 'b') ? 'viewer' : 'join';
+        // まだ2人目がいない = これは「挑戦を受ける」ためのリンク。名前を登録してもらう。
+        if (!okrPlayer(room, 'b')) return 'join';
+
+        // 2席とも埋まっている場合、このリンクは「あなたの番が来たから」渡されたもの。
+        // 遊ぶのは2人だけなので、どちらの席かを選ばせずに自動で割り当てる。
+        // （LINE内ブラウザとSafariのように、部屋を作ったのと別のブラウザで開くと
+        //   端末に残した席の記録が読めず、以前はここで行き止まりになっていた）
+        // 割り当て先は「いま番が回っているスロット」。結果待ちの状態なら、
+        // 結果リンクを受け取るのは先攻（採点した側が相手に送る）なので first。
+        var auto = stage === 'a' || stage === 'b' ? stage : okrFirstSlot(room);
+        slot = auto;
+        okrSaveSlot(roomId, auto);
+        ui.autoAssigned = true; // 取り違えたとき用に、席を入れ替える導線を出す
       }
 
       if (ui.drawingRound === roundIndex && stage === slot && !okrHasSubmitted(room, slot)) return 'draw';
@@ -22216,7 +22208,8 @@
         okrPlayer(room, 'b') ? 1 : 0,
         parseIntSafe(r.judgedAt, 0),
         r.error ? 1 : 0,
-        ui.rematchOpen ? 1 : 0
+        ui.rematchOpen ? 1 : 0,
+        slot
       ].join('|');
     }
 
@@ -22402,7 +22395,19 @@
         });
       }
       bindClaimSeat('okrClaimA', 'a');
-      bindClaimSeat('okrClaimB', 'b');
+
+      // 自動で割り当てた席が違っていたときの入れ替え。
+      var swapBtn = document.getElementById('okrSwapSeat');
+      if (swapBtn && !swapBtn.__okr_bound) {
+        swapBtn.__okr_bound = true;
+        swapBtn.addEventListener('click', function () {
+          slot = okrOtherSlot(slot);
+          okrSaveSlot(roomId, slot);
+          ui.drawingRound = 0;
+          ui.renderKey = '';
+          if (lastRoom) renderNow(lastRoom);
+        });
+      }
 
       if (view === 'join') {
         var joinBtn = document.getElementById('okrJoinBtn');
