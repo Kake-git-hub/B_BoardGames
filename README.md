@@ -286,20 +286,32 @@ UI
 DBルールはアプリのソースではなく Firebase Console 側の設定なので、リリース（GitHub Pagesへの反映）とは別に手作業での追記が必要です。
 
 1. Firebase Console → 対象プロジェクト → **Realtime Database → ルール**
-2. `"rules"` の中に次の1行を**追記**する（既存のルールは消さずに、行を足すだけ）
-
-   ```json
-   "oekakiRelayRooms": { ".read": true, ".write": true }
-   ```
-
-   例（既存が `oekakiRooms` で終わっている場合、末尾のカンマを付け忘れないこと）:
-
-   ```json
-   "oekakiRooms": { ".read": true, ".write": true },
-   "oekakiRelayRooms": { ".read": true, ".write": true }
-   ```
-
+2. **`"rules"` の中（`oekakiRooms` などと同じ階層）に** `oekakiRelayRooms` を追記する。既存のルールは消さない
+   - ⚠ よくある失敗: 一番外側の `}` の**後ろ**に足してしまうと「JSONとして壊れている」として公開できません。必ず `"rules": { ... }` の**内側**に入れること
+   - ⚠ 書き方は**既存のルールと同じ形式に合わせる**こと（下記2パターン）
 3. **公開（Publish）** を押す。反映は即時で、アプリ側の再デプロイは不要
+
+**パターンA: 既存が `$roomId` ワイルドカード形式の場合**（本番はこちら）
+
+```json
+"oekakiRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+"oekakiRelayRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+```
+
+**パターンB: 既存がトップレベル許可のフラット形式の場合**
+
+```json
+"oekakiRooms": { ".read": true, ".write": true },
+"oekakiRelayRooms": { ".read": true, ".write": true }
+```
+
+いずれの場合も、直前の行の末尾に**カンマ**が要る点に注意してください。リレーモードがアクセスするのは `oekakiRelayRooms/<部屋ID>` とその配下だけなので、パターンAのワイルドカードで過不足なく動きます。
 
 確認方法: ホーム画面 →「おえかきバトル（リレー）」→ 名前を入れて「この設定ではじめる」で、エラーにならず描画画面の手前（「はじめる」ボタン）まで進めばOKです。
 
