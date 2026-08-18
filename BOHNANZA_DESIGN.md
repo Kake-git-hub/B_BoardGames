@@ -162,6 +162,30 @@
 | 18 | 古いモーダル残留対策: スナップショット毎に選択状態/モーダルの整合を検査して破棄（hannin `dropStaleModals` 7231 と同じ） | 新設コード内 |
 | 19 | Firebase Console: RTDB ルールに `bohnanzaRooms` 追記（**リポジトリ外・ユーザー手作業**） | README 7.3 に手順追記 |
 
+## 4) デモ自動プレイモード（demo_bohnanza）
+
+既存デモ基盤（demoNewState / demoEnsureRoom / demoTick / demoPlan* / demoAttachView / demoEnsureBar / demoInstallHomeEntry）に `bz` を追加する。ラブレター/犯人は踊ると同じ方針: **専用パスは作らず本番の bohnanzaRooms と本番用トランザクション関数をそのまま呼ぶ**。1タブがボット4体を代理操作し、視点切替（テーブル/各ボット）は `?player=<botId>` の通常識別フローを流用する。
+
+### ボット思考（demoPlanBohnanza）
+
+- plan は既存の `{key, min, max, label, run}` 形式。key が変わらない間は min〜max ms のランダム遅延後に run。
+- **plant（手番ボット）**: 先頭カードの植え先を「同種畑 → 空き畑 → （どちらも無ければ）最有価値の畑を収穫してから植える」で決定。植えたあと40%で2枚目も同じ判定（無理なら見送り）。その後 bzRevealTwo。
+- **trade（手番ボット主導）**: めくれ札はそれぞれ「同種畑/空き畑を持つ他ボットへ 60% / 自分へ 40%」で配布。25%の確率で手札1枚の譲渡も行う（手番→他 or 他→手番、受け手の畑に合う豆を優先）。各ボットは自分の pending があれば随時植える。配布と植えが済んだら bzEndTrade。
+- **plantAll**: pending を持つ各ボットが plant と同じ植え先判定で処理（必要なら収穫してから）。
+- **随時収穫**: いずれかのボットの畑が「いま収穫すると2金以上」なら、tick ごとに低確率で収穫。
+- **3つめの畑**: coins>=3 かつ畑2つのとき30%で購入。
+- **result**: 8〜10秒表示したのち demoRestart（新しい部屋で最初から）。
+- **スタック検知**: 既存の仕組みに乗せる（同一 plan.key 12秒で bzHostForce を代理実行、25秒で demoRestart）。
+
+### 統合ポイント
+
+1. `demoPlanBohnanza(s, room)` 新設 + demoTick のゲーム分岐に追加
+2. `demoEnsureRoom` に bz 分岐（createBohnanzaRoom を lobbyId 無しで呼ぶ。ボット名は既存デモの命名に合わせる）
+3. `demoAttachView` に bz 分岐（table → routeBohnanzaTable(roomId, true) / botN → routeBohnanzaPlayer + ?player=）
+4. `routeDemoBohnanza` + route() に `demo_bohnanza` 登録 + 制限端末 allowed に追加
+5. `demoInstallHomeEntry` にホームボタン「🤖 デモ: ボーナンザ」追加
+6. 結果画面はロビー無しでも成立すること（lobbyId 無し時は「ロビーへもどる」を出さない既存挙動でOK。再戦はデモバーの🔄）
+
 ### 実装規約（コードベース準拠）
 
 - `var` / 関数宣言 / 文字列連結テンプレート / `escapeHtml()` 必須（名前等の補間箇所すべて）

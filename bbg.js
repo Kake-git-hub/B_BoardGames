@@ -25340,7 +25340,7 @@
 
   function demoIsDemoScreen(screen) {
     var sc = String(screen || '');
-    return sc === 'demo_loveletter' || sc === 'demo_hannin';
+    return sc === 'demo_loveletter' || sc === 'demo_hannin' || sc === 'demo_bohnanza';
   }
 
   function demoMakeRoomId() {
@@ -25366,7 +25366,10 @@
   }
 
   function demoGameLabel(game) {
-    return String(game || '') === 'll' ? 'ラブレター' : '犯人は踊る';
+    var g = String(game || '');
+    if (g === 'll') return 'ラブレター';
+    if (g === 'bz') return 'ボーナンザ';
+    return '犯人は踊る';
   }
 
   function demoRandBetween(min, max) {
@@ -25537,12 +25540,12 @@
     var q = {};
     var v = getCacheBusterParam();
     if (v) q.v = v;
-    q.screen = s.game === 'll' ? 'demo_loveletter' : 'demo_hannin';
+    q.screen = s.game === 'll' ? 'demo_loveletter' : s.game === 'bz' ? 'demo_bohnanza' : 'demo_hannin';
     q.room = String(s.roomId || '');
     q.view = String(s.view || 'bot1');
     var idx = demoViewIndex(s.view);
-    // 犯人は踊るの routeHanninPlayer は ?player= から自分のIDを読む。
-    if (s.game === 'hn' && idx >= 0) q.player = String(s.botIds[idx] || '');
+    // 犯人は踊る／ボーナンザの routeXxxPlayer は ?player= から自分のIDを読む。
+    if ((s.game === 'hn' || s.game === 'bz') && idx >= 0) q.player = String(s.botIds[idx] || '');
     if (Number(s.speed) !== 1) q.sp = String(s.speed);
     if (s.paused) q.pz = '1';
     return q;
@@ -25576,7 +25579,20 @@
     });
   }
 
+  // ボーナンザはロビーが無く、createBohnanzaRoom がメンバー一覧を受け取って配札まで済ませる。
+  // （参加フェーズも開始関数も無いので demoJoinBotsSeq は通らない）
+  function demoCreateBohnanza(s) {
+    var members = [];
+    for (var i = 0; i < s.botIds.length; i++) {
+      var mid = String(s.botIds[i] || '');
+      if (!mid) continue;
+      members.push({ mid: mid, name: demoBotName(i) });
+    }
+    return createBohnanzaRoom(s.roomId, '', members);
+  }
+
   function demoCreateAndStart(s) {
+    if (s.game === 'bz') return demoCreateBohnanza(s);
     var settings = { order: s.botIds.slice() };
     var create = s.game === 'll' ? createLoveLetterRoom(s.roomId, settings) : createHanninRoom(s.roomId, settings);
     return create
@@ -25597,7 +25613,7 @@
   }
 
   function demoEnsureRoom(s) {
-    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : hanninRoomPath(s.roomId);
+    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : s.game === 'bz' ? bzRoomPath(s.roomId) : hanninRoomPath(s.roomId);
     return getValueOnce(path).then(function (room) {
       if (room) return null; // リロード等で既にあるルームはそのまま使う
       return demoCreateAndStart(s);
@@ -25606,7 +25622,7 @@
 
   function demoSubscribe(s) {
     var myGen = s.gen;
-    var sub = s.game === 'll' ? subscribeLoveLetterRoom : subscribeHanninRoom;
+    var sub = s.game === 'll' ? subscribeLoveLetterRoom : s.game === 'bz' ? subscribeBohnanzaRoom : subscribeHanninRoom;
     return sub(s.roomId, function (room) {
       if (!s || s.stopped || s.gen !== myGen) return;
       if (demoState !== s) return;
@@ -25640,12 +25656,16 @@
       if (idx < 0) {
         // テーブル視点（routeXxxTable は isHost ガードがあるので true を渡す）
         if (s.game === 'll') routeLoveLetterTable(s.roomId, true);
+        else if (s.game === 'bz') routeBohnanzaTable(s.roomId, true);
         else routeHanninTable(s.roomId, true);
       } else {
         var pid = String(s.botIds[idx] || '');
         if (s.game === 'll') {
           setLoveLetterPlayerId(s.roomId, pid);
           routeLoveLetterPlayer(s.roomId, false);
+        } else if (s.game === 'bz') {
+          // routeBohnanzaPlayer は ?player= を見る（demoReplaceUrl で入れてある）
+          routeBohnanzaPlayer(s.roomId, false);
         } else {
           // routeHanninPlayer は ?player= を見る（demoReplaceUrl で入れてある）
           routeHanninPlayer(s.roomId, false);
@@ -25806,6 +25826,7 @@
   function demoIsFinished(s, room) {
     try {
       if (s.game === 'll') return String((room && room.phase) || '') === 'finished';
+      if (s.game === 'bz') return String((room && room.phase) || '') === 'result';
       var st = room && room.state ? room.state : null;
       return !!(st && st.result && st.result.decidedAt);
     } catch (e) {
@@ -25867,7 +25888,7 @@
 
     var plan = null;
     try {
-      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : demoPlanHannin(s, room);
+      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : s.game === 'bz' ? demoPlanBohnanza(s, room) : demoPlanHannin(s, room);
     } catch (ePlan) {
       plan = null;
     }
@@ -25905,12 +25926,15 @@
       demoRestart(s);
       return;
     }
-    if (stuckMs > 12000 && s.forcedKey !== s.actKey && String(s.actKey || '').indexOf('_wf|') > 0) {
+    // 犯人は踊る/ラブレターは「確認待ち(_wf|)」だけが代理対象。
+    // ボーナンザは待機という概念が無く、どのフェーズでも bzHostForce が代理で先へ進められる。
+    var canForce = s.game === 'bz' ? String(s.actKey || '').indexOf('bz_') === 0 : String(s.actKey || '').indexOf('_wf|') > 0;
+    if (stuckMs > 12000 && s.forcedKey !== s.actKey && canForce) {
       s.forcedKey = s.actKey;
       demoLog('待機が解除されないので代理で進めます: ' + String(s.actKey || ''), null);
       var fp = null;
       try {
-        fp = s.game === 'll' ? forceAdvanceLoveLetter(s.roomId) : forceAdvanceHannin(s.roomId);
+        fp = s.game === 'll' ? forceAdvanceLoveLetter(s.roomId) : s.game === 'bz' ? bzHostForce(s.roomId) : forceAdvanceHannin(s.roomId);
       } catch (eF) {
         fp = null;
       }
@@ -26383,6 +26407,391 @@
     };
   }
 
+  // -------------------- demo: ボーナンザの判断 --------------------
+  // 大事な約束: plan.key が同じあいだだけ「同じ判断」として実行を待つ仕組みなので、
+  // ボットの「ゆらぎ」は Math.random ではなく盤面から作る（毎tickで判断が変わると永久に実行されない）。
+  // 盤面が動けば key も必ず変わるように、key には手札枚数や pending 数など「動いたら変わる値」を入れる。
+  function demoBzHash(text) {
+    var str = String(text || '');
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) {
+      h = (h ^ str.charCodeAt(i)) >>> 0;
+      // FNV素数(16777619)の掛け算をシフトで書く（32bitのまま計算するため）
+      h = (h + ((h << 1) >>> 0) + ((h << 4) >>> 0) + ((h << 7) >>> 0) + ((h << 8) >>> 0) + ((h << 24) >>> 0)) >>> 0;
+    }
+    return h >>> 0;
+  }
+
+  // 0〜99。同じ部屋・同じ盤面なら毎回おなじ答えになる。
+  function demoBzRoll(s, tag) {
+    return demoBzHash(String((s && s.roomId) || '') + '|' + String(tag || '')) % 100;
+  }
+
+  function demoBzOrder(room) {
+    return Array.isArray(room && room.order) ? room.order : [];
+  }
+
+  // 全員の手札合計。手札のやり取りが起きたら必ず変わるので key と抽選の種に使う。
+  function demoBzHandTotal(room) {
+    var order = demoBzOrder(room);
+    var total = 0;
+    for (var i = 0; i < order.length; i++) total += bzPlayerOf(room, order[i]).hand.length;
+    return total;
+  }
+
+  function demoBzPendSig(room) {
+    var order = demoBzOrder(room);
+    var parts = [];
+    for (var i = 0; i < order.length; i++) parts.push(String(bzPlayerOf(room, order[i]).pending.length));
+    return parts.join(',');
+  }
+
+  function demoBzFaceUpSig(room) {
+    var fu = bzNormFaceUp(room && room.faceUp);
+    var parts = [];
+    for (var i = 0; i < fu.length; i++) parts.push(String(fu[i].bean || '') + ':' + String(fu[i].takenBy || ''));
+    return parts.join(',');
+  }
+
+  // その豆をあげたときの相手のうれしさ。2=同種の畑がある / 1=空き畑がある / 0=どちらも無い
+  function demoBzFieldScore(room, mid, bean) {
+    var fields = bzPlayerOf(room, mid).fields;
+    var b = String(bean || '');
+    var score = 0;
+    for (var i = 0; i < fields.length; i++) {
+      if (fields[i].count > 0 && String(fields[i].bean || '') === b) return 2;
+      if (fields[i].count === 0) score = 1;
+    }
+    return score;
+  }
+
+  // 植え先を決める: 同種の畑 → 空き畑 → 「いちばん高く売れる畑を収穫してから」その畑へ。
+  function demoBzPickPlant(room, mid, bean) {
+    var fields = bzPlayerOf(room, mid).fields;
+    var b = String(bean || '');
+    var i;
+    for (i = 0; i < fields.length; i++) {
+      if (fields[i].count > 0 && String(fields[i].bean || '') === b) return { fieldIdx: i, harvestIdx: -1 };
+    }
+    for (i = 0; i < fields.length; i++) {
+      if (fields[i].count === 0) return { fieldIdx: i, harvestIdx: -1 };
+    }
+    var bestIdx = -1;
+    var bestVal = -1;
+    for (i = 0; i < fields.length; i++) {
+      if (!bzCanHarvest(fields, i)) continue;
+      var val = bzCoinsFor(fields[i].bean, fields[i].count) * 100 + fields[i].count;
+      if (val > bestVal) {
+        bestVal = val;
+        bestIdx = i;
+      }
+    }
+    // 全部うまっていて収穫もできない形は理論上できないが、
+    // 念のため0番を狙う（弾かれてもキーは変わらないので、12秒後に bzHostForce が代理で進める）。
+    if (bestIdx < 0) return { fieldIdx: 0, harvestIdx: 0 };
+    return { fieldIdx: bestIdx, harvestIdx: bestIdx };
+  }
+
+  // 収穫が必要なときは「収穫→植える」を本番の関数2つでつなぐ（新しい書き込み口は作らない）。
+  function demoBzPlantHandRun(s, mid, pick) {
+    return function () {
+      if (pick.harvestIdx >= 0) {
+        return bzHarvest(s.roomId, mid, pick.harvestIdx).then(function () {
+          return bzPlantFromHand(s.roomId, mid, pick.fieldIdx);
+        });
+      }
+      return bzPlantFromHand(s.roomId, mid, pick.fieldIdx);
+    };
+  }
+
+  function demoBzPlantPendingRun(s, mid, pendIdx, pick) {
+    return function () {
+      if (pick.harvestIdx >= 0) {
+        return bzHarvest(s.roomId, mid, pick.harvestIdx).then(function () {
+          return bzPlantPending(s.roomId, mid, pendIdx, pick.fieldIdx);
+        });
+      }
+      return bzPlantPending(s.roomId, mid, pendIdx, pick.fieldIdx);
+    };
+  }
+
+  function demoBzHarvestRun(s, mid, fieldIdx) {
+    return function () {
+      return bzHarvest(s.roomId, mid, fieldIdx);
+    };
+  }
+
+  function demoBzRevealRun(s, mid) {
+    return function () {
+      return bzRevealTwo(s.roomId, mid);
+    };
+  }
+
+  function demoBzGiveFaceUpRun(s, actorMid, faceUpIdx, toMid) {
+    return function () {
+      return bzGiveFaceUp(s.roomId, actorMid, faceUpIdx, toMid);
+    };
+  }
+
+  function demoBzGiveHandRun(s, fromMid, handIdx, toMid) {
+    return function () {
+      return bzGiveFromHand(s.roomId, fromMid, handIdx, toMid);
+    };
+  }
+
+  function demoBzEndTradeRun(s, mid) {
+    return function () {
+      return bzEndTrade(s.roomId, mid);
+    };
+  }
+
+  function demoBzBuyFieldRun(s, mid) {
+    return function () {
+      return bzBuyThirdField(s.roomId, mid);
+    };
+  }
+
+  // 随時収穫: 「いま収穫すると2きん以上」の畑を、低確率で1つだけ選ぶ。
+  function demoBzPickHarvest(s, room, phase, turnCount) {
+    var order = demoBzOrder(room);
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var fields = bzPlayerOf(room, mid).fields;
+      for (var f = 0; f < fields.length; f++) {
+        var cnt = fields[f].count;
+        if (cnt < 1) continue;
+        if (bzCoinsFor(fields[f].bean, cnt) < 2) continue;
+        if (!bzCanHarvest(fields, f)) continue;
+        var tag = 'harv|' + String(turnCount) + '|' + phase + '|' + mid + '|' + String(f) + '|' + String(cnt);
+        if (demoBzRoll(s, tag) >= 30) continue;
+        return { mid: mid, fieldIdx: f, bean: String(fields[f].bean || ''), count: cnt };
+      }
+    }
+    return null;
+  }
+
+  // 3つめの畑（4〜5人プレイ・3きん）を30%で買う。
+  function demoBzPickBuyField(s, room, turnCount) {
+    var order = demoBzOrder(room);
+    if (order.length < 4) return null;
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var p = bzPlayerOf(room, mid);
+      if (p.fields.length !== 2) continue;
+      if (p.coins < 3) continue;
+      if (demoBzRoll(s, 'buy3|' + mid + '|' + String(p.coins) + '|' + String(turnCount)) >= 30) continue;
+      return { mid: mid, coins: p.coins };
+    }
+    return null;
+  }
+
+  // めくれ札のもらい手。60%で他のボット（畑が合う人を優先）、40%で手番プレイヤー自身。
+  function demoBzPickReceiver(s, room, turnMid, bean, turnCount, faceUpIdx) {
+    var tag = String(turnCount) + '|' + String(faceUpIdx) + '|' + String(bean || '');
+    if (demoBzRoll(s, 'fu|' + tag) >= 60) return turnMid;
+    var order = demoBzOrder(room);
+    var best = [];
+    var bestScore = -1;
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid || mid === turnMid) continue;
+      var sc = demoBzFieldScore(room, mid, bean);
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = [mid];
+      } else if (sc === bestScore) {
+        best.push(mid);
+      }
+    }
+    if (!best.length) return turnMid;
+    return best[demoBzHash(String(s.roomId || '') + '|fuTo|' + tag) % best.length];
+  }
+
+  // pending（うえる待ち）を持っている人を order 順に1人だけ返す。
+  function demoBzPickPending(room) {
+    var order = demoBzOrder(room);
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var p = bzPlayerOf(room, mid);
+      if (!p.pending.length) continue;
+      var bean = String(p.pending[0].bean || '');
+      return { mid: mid, pendIdx: 0, bean: bean, pick: demoBzPickPlant(room, mid, bean) };
+    }
+    return null;
+  }
+
+  // 相手の畑にいちばん合う手札を1枚えらぶ。
+  function demoBzBestHandCard(room, fromMid, toMid) {
+    var hand = bzPlayerOf(room, fromMid).hand;
+    var bestIdx = -1;
+    var bestScore = -1;
+    for (var i = 0; i < hand.length; i++) {
+      var sc = demoBzFieldScore(room, toMid, hand[i]);
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) return null;
+    return { idx: bestIdx, bean: String(hand[bestIdx] || ''), score: bestScore };
+  }
+
+  // 25%で手札1枚の譲渡（手番→他 / 他→手番 を半々）。
+  // 抽選の種に手札合計を入れてあるので、1枚わたるたびに引き直しになり、いつまでも配り続けない。
+  function demoBzPickHandGive(s, room, turnMid, turnCount) {
+    var total = demoBzHandTotal(room);
+    var seed = String(turnCount) + '|' + String(total);
+    if (demoBzRoll(s, 'hg|' + seed) >= 25) return null;
+
+    var order = demoBzOrder(room);
+    var others = [];
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid || mid === turnMid) continue;
+      others.push(mid);
+    }
+    if (!others.length) return null;
+
+    var toTurn = demoBzRoll(s, 'hgdir|' + seed) < 50;
+    var best = null;
+    for (var j = 0; j < others.length; j++) {
+      var from = toTurn ? others[j] : turnMid;
+      var to = toTurn ? turnMid : others[j];
+      var cand = demoBzBestHandCard(room, from, to);
+      if (!cand) continue;
+      if (!best || cand.score > best.score) best = { from: from, to: to, handIdx: cand.idx, bean: cand.bean, score: cand.score };
+    }
+    if (!best) return null;
+    return { from: best.from, to: best.to, handIdx: best.handIdx, bean: best.bean, total: total };
+  }
+
+  function demoPlanBohnanza(s, room) {
+    var phase = String((room && room.phase) || '');
+    if (!phase || phase === 'result') return null; // 決着は demoTick 側（demoIsFinished）が受け持つ
+    var order = demoBzOrder(room);
+    if (!order.length) return null;
+    var turnMid = bzTurnMid(room);
+    if (!turnMid) return null;
+    var turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
+
+    // 随時: よく育った畑をたまに収穫する（フェーズを問わない）
+    var hv = demoBzPickHarvest(s, room, phase, turnCount);
+    if (hv) {
+      return {
+        key: 'bz_harv|' + hv.mid + '|' + String(hv.fieldIdx) + '|' + hv.bean + '|' + String(hv.count),
+        min: 600,
+        max: 1200,
+        label: bzName(room, hv.mid) + ' が ' + bzBeanName(hv.bean) + ' を しゅうかく',
+        run: demoBzHarvestRun(s, hv.mid, hv.fieldIdx)
+      };
+    }
+
+    // 随時: 3つめの畑を買う
+    var buy = demoBzPickBuyField(s, room, turnCount);
+    if (buy) {
+      return {
+        key: 'bz_buy3|' + buy.mid + '|' + String(buy.coins),
+        min: 600,
+        max: 1200,
+        label: bzName(room, buy.mid) + ' が 3つめの畑を かいます',
+        run: demoBzBuyFieldRun(s, buy.mid)
+      };
+    }
+
+    if (phase === 'plant') {
+      var tp = bzPlayerOf(room, turnMid);
+      var planted = parseIntSafe(room && room.plantedThisTurn, 0) || 0;
+      var wantPlant = false;
+      if (tp.hand.length > 0 && planted < 2) {
+        // 1枚目は必ずうえる（めくる前提条件）。2枚目は40%。
+        wantPlant = planted < 1 ? true : demoBzRoll(s, 'plant2|' + turnMid + '|' + String(turnCount)) < 40;
+      }
+      if (wantPlant) {
+        var bean = tp.hand[0]; // bzPlantFromHand は必ず手札の先頭をうえる
+        var pick = demoBzPickPlant(room, turnMid, bean);
+        return {
+          key: 'bz_plant|' + turnMid + '|' + String(turnCount) + '|' + String(planted) + '|' + String(tp.hand.length),
+          min: 700,
+          max: 1500,
+          label: bzName(room, turnMid) + ' が ' + bzBeanName(bean) + ' を うえます',
+          run: demoBzPlantHandRun(s, turnMid, pick)
+        };
+      }
+      // うえ終わったので2まいめくる。
+      // （もし条件を満たさず弾かれ続けても key は動かないので、12秒後に bzHostForce が代理でうえて めくる）
+      return {
+        key: 'bz_reveal|' + turnMid + '|' + String(turnCount) + '|' + String(planted),
+        min: 800,
+        max: 1600,
+        label: bzName(room, turnMid) + ' が 2まい めくります',
+        run: demoBzRevealRun(s, turnMid)
+      };
+    }
+
+    if (phase === 'trade') {
+      var fu = bzNormFaceUp(room && room.faceUp);
+      var fuSig = demoBzFaceUpSig(room);
+      for (var i = 0; i < fu.length; i++) {
+        if (String(fu[i].takenBy || '')) continue;
+        var toMid = demoBzPickReceiver(s, room, turnMid, fu[i].bean, turnCount, i);
+        return {
+          key: 'bz_give|' + turnMid + '|' + String(turnCount) + '|' + fuSig,
+          min: 700,
+          max: 1500,
+          label: bzBeanName(fu[i].bean) + ' を ' + bzName(room, toMid) + ' へ',
+          run: demoBzGiveFaceUpRun(s, turnMid, i, toMid)
+        };
+      }
+
+      var pd = demoBzPickPending(room);
+      if (pd) {
+        return {
+          key: 'bz_pend|trade|' + String(turnCount) + '|' + pd.mid + '|' + demoBzPendSig(room),
+          min: 600,
+          max: 1400,
+          label: bzName(room, pd.mid) + ' が ' + bzBeanName(pd.bean) + ' を うえます',
+          run: demoBzPlantPendingRun(s, pd.mid, pd.pendIdx, pd.pick)
+        };
+      }
+
+      var hg = demoBzPickHandGive(s, room, turnMid, turnCount);
+      if (hg) {
+        return {
+          key: 'bz_hand|' + String(turnCount) + '|' + String(hg.total) + '|' + hg.from + '|' + hg.to + '|' + String(hg.handIdx),
+          min: 700,
+          max: 1500,
+          label: bzName(room, hg.from) + ' が ' + bzBeanName(hg.bean) + ' を ' + bzName(room, hg.to) + ' へ',
+          run: demoBzGiveHandRun(s, hg.from, hg.handIdx, hg.to)
+        };
+      }
+
+      return {
+        key: 'bz_end|' + turnMid + '|' + String(turnCount),
+        min: 800,
+        max: 1600,
+        label: bzName(room, turnMid) + ' が こうかんを おわります',
+        run: demoBzEndTradeRun(s, turnMid)
+      };
+    }
+
+    if (phase === 'plantAll') {
+      var pd2 = demoBzPickPending(room);
+      if (!pd2) return null; // 全員うえ終わっていれば本番側が自動で次の手番へ進む
+      return {
+        key: 'bz_pend|plantAll|' + String(turnCount) + '|' + pd2.mid + '|' + demoBzPendSig(room),
+        min: 600,
+        max: 1400,
+        label: bzName(room, pd2.mid) + ' が ' + bzBeanName(pd2.bean) + ' を うえます',
+        run: demoBzPlantPendingRun(s, pd2.mid, pd2.pendIdx, pd2.pick)
+      };
+    }
+
+    return null;
+  }
+
   // -------------------- demo: ルーティング --------------------
   function routeDemoLoveLetter() {
     return routeDemoGame('ll');
@@ -26390,6 +26799,10 @@
 
   function routeDemoHannin() {
     return routeDemoGame('hn');
+  }
+
+  function routeDemoBohnanza() {
+    return routeDemoGame('bz');
   }
 
   function routeDemoGame(game) {
@@ -26445,7 +26858,8 @@
       box.className = 'bbg-demo-entry';
       box.innerHTML =
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">🤖 デモ: ラブレター</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>';
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">🤖 デモ: ボーナンザ</a>';
       host.appendChild(box);
     } catch (e) {
       // ignore
@@ -27617,7 +28031,8 @@
         oekaki_relay: 1,
         // デモ（自動プレイ）は見るだけの画面。ロビーに参加済みの端末でも開けるようにする。
         demo_loveletter: 1,
-        demo_hannin: 1
+        demo_hannin: 1,
+        demo_bohnanza: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
@@ -27702,6 +28117,7 @@
     // 開発者用の自動プレイデモ（restricted端末のallowedには入れない）
     if (screen === 'demo_loveletter') return routeDemoLoveLetter();
     if (screen === 'demo_hannin') return routeDemoHannin();
+    if (screen === 'demo_bohnanza') return routeDemoBohnanza();
 
     if (screen === 'codenames_rejoin') {
       if (!roomId) return routeHome();
