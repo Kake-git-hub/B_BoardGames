@@ -322,6 +322,327 @@
     setQuery(q);
   }
 
+  // -------------------- 共通演出（効果音 / バイブ / オーバーレイ / トースト） --------------------
+  // 外部アセットは追加せず、WebAudioで効果音を合成する。
+  // iOS Safari は最初のユーザー操作まで AudioContext が suspended のままなので、
+  // 初回の pointerdown 等で resume する。
+  var BBG_SOUND_LS_KEY = 'bbgSoundOn';
+
+  var bbgFx = (function () {
+    var ctx = null;
+    var unlocked = false;
+    var soundOn = null; // null = 未読込
+
+    function loadOn() {
+      if (soundOn !== null) return soundOn;
+      var raw = null;
+      try {
+        raw = localStorage.getItem(BBG_SOUND_LS_KEY);
+      } catch (e) {
+        raw = null;
+      }
+      // 既定はON（'0' のときだけOFF）
+      soundOn = String(raw == null ? '1' : raw) !== '0';
+      return soundOn;
+    }
+
+    function getCtx() {
+      if (ctx) return ctx;
+      try {
+        var Ctor = window.AudioContext || window.webkitAudioContext;
+        if (!Ctor) return null;
+        ctx = new Ctor();
+      } catch (e) {
+        ctx = null;
+      }
+      return ctx;
+    }
+
+    function resume() {
+      try {
+        var c = getCtx();
+        if (c && c.state === 'suspended' && c.resume) c.resume();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function unlock() {
+      if (unlocked) return;
+      unlocked = true;
+      resume();
+    }
+
+    try {
+      // once/capture のオプションに未対応なブラウザでも unlocked フラグで多重実行を防ぐ。
+      document.addEventListener('pointerdown', unlock, { once: true, capture: true });
+      document.addEventListener('touchstart', unlock, { once: true, capture: true });
+      document.addEventListener('click', unlock, { once: true, capture: true });
+    } catch (e) {
+      try {
+        document.addEventListener('pointerdown', unlock, true);
+      } catch (e2) {
+        // ignore
+      }
+    }
+
+    // 単音。delayMs で並べるとメロディになる。
+    function tone(freq, ms, type, gain, delayMs) {
+      if (!loadOn()) return;
+      var c = getCtx();
+      if (!c) return;
+      resume();
+      try {
+        var wait = Number(delayMs);
+        if (isNaN(wait) || wait < 0) wait = 0;
+        var dur = Number(ms);
+        if (isNaN(dur) || dur < 20) dur = 90;
+        var g0 = Number(gain);
+        if (isNaN(g0) || g0 <= 0) g0 = 0.12;
+        var hz = Number(freq);
+        if (isNaN(hz) || hz < 40) hz = 440;
+
+        var t0 = c.currentTime + wait / 1000;
+        var t1 = t0 + dur / 1000;
+        var osc = c.createOscillator();
+        var g = c.createGain();
+        osc.type = String(type || 'sine');
+        osc.frequency.setValueAtTime(hz, t0);
+        // クリックノイズを避けるため立ち上がり/減衰をつける
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(g0, t0 + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.0001, t1);
+        osc.connect(g);
+        g.connect(c.destination);
+        osc.start(t0);
+        osc.stop(t1 + 0.03);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // バイブは音のON/OFFとは独立（未対応端末では何も起きない）
+    function vibe(pattern) {
+      try {
+        if (navigator && navigator.vibrate) navigator.vibrate(pattern);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    return {
+      // 自分の番の開始
+      turn: function () {
+        tone(660, 90, 'sine', 0.12, 0);
+        tone(880, 90, 'sine', 0.12, 90);
+        vibe([80, 40, 80]);
+      },
+      // カード選択などの軽いタップ音
+      tap: function () {
+        tone(440, 40, 'sine', 0.06, 0);
+      },
+      // カード使用の確定
+      play: function () {
+        tone(523, 70, 'sine', 0.12, 0);
+        tone(784, 70, 'sine', 0.12, 70);
+      },
+      // 公開・めくり（ためのある2音）
+      reveal: function () {
+        tone(392, 120, 'sine', 0.12, 0);
+        tone(523, 120, 'sine', 0.12, 120);
+      },
+      // 的中・成功
+      hit: function () {
+        tone(523, 110, 'sine', 0.12, 0);
+        tone(659, 110, 'sine', 0.12, 110);
+        tone(784, 110, 'sine', 0.12, 220);
+        vibe(120);
+      },
+      // はずれ
+      miss: function () {
+        tone(220, 130, 'square', 0.07, 0);
+        tone(180, 130, 'square', 0.07, 130);
+      },
+      // 勝利
+      win: function () {
+        tone(523, 130, 'sine', 0.12, 0);
+        tone(659, 130, 'sine', 0.12, 130);
+        tone(784, 130, 'sine', 0.12, 260);
+        tone(1047, 130, 'sine', 0.12, 390);
+        vibe([100, 60, 100, 60, 180]);
+      },
+      // 敗北
+      lose: function () {
+        tone(330, 220, 'sine', 0.12, 0);
+        tone(247, 220, 'sine', 0.12, 220);
+      },
+      // 汎用通知（モーダル出現など）
+      notify: function () {
+        tone(587, 90, 'sine', 0.12, 0);
+      },
+      // 任意の単音（個別演出用のエスケープハッチ）
+      tone: function (freq, ms, type, gain, delayMs) {
+        tone(freq, ms, type, gain, delayMs);
+      },
+      vibrate: function (pattern) {
+        vibe(pattern);
+      },
+      isOn: function () {
+        return loadOn();
+      },
+      setOn: function (on) {
+        soundOn = !!on;
+        try {
+          localStorage.setItem(BBG_SOUND_LS_KEY, soundOn ? '1' : '0');
+        } catch (e) {
+          // ignore
+        }
+        if (soundOn) resume();
+        return soundOn;
+      }
+    };
+  })();
+
+  // 効果音トグル（HTML文字列 + バインド）。route系のバインド部から bindBbgFxToggle() を呼ぶ。
+  function bbgFxToggleHtml() {
+    var on = true;
+    try {
+      on = bbgFx.isOn();
+    } catch (e) {
+      on = true;
+    }
+    return (
+      '<button type="button" class="bbg-fx-toggle" id="bbgFxToggle" aria-label="効果音" title="効果音">' +
+      (on ? '🔊' : '🔇') +
+      '</button>'
+    );
+  }
+
+  function bindBbgFxToggle() {
+    try {
+      var b = document.getElementById('bbgFxToggle');
+      if (!b || b.__bbgfx_bound) return;
+      b.__bbgfx_bound = true;
+      b.addEventListener('click', function (ev) {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        var next = true;
+        try {
+          next = !bbgFx.isOn();
+          bbgFx.setOn(next);
+        } catch (e2) {
+          return;
+        }
+        // 全再描画はせずボタンの見た目だけ差し替える
+        try {
+          b.textContent = next ? '🔊' : '🔇';
+        } catch (e3) {
+          // ignore
+        }
+        if (next) {
+          try {
+            bbgFx.tap();
+          } catch (e4) {
+            // ignore
+          }
+        }
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // ターン開始オーバーレイ（約1.2秒で自動消滅・タップは奪わない）
+  var _bbgTurnOverlayTimer = null;
+
+  function bbgShowTurnOverlay(label) {
+    var txt = String(label == null || label === '' ? 'あなたの番！' : label);
+    try {
+      if (_bbgTurnOverlayTimer) {
+        clearTimeout(_bbgTurnOverlayTimer);
+        _bbgTurnOverlayTimer = null;
+      }
+      // 多重呼び出し時は既存を消してから出し直す
+      var olds = document.querySelectorAll('.bbg-turn-overlay');
+      for (var i = 0; i < olds.length; i++) {
+        if (olds[i] && olds[i].parentNode) olds[i].parentNode.removeChild(olds[i]);
+      }
+      var el = document.createElement('div');
+      el.className = 'bbg-turn-overlay';
+      el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = '<b>' + escapeHtml(txt) + '</b>';
+      document.body.appendChild(el);
+      _bbgTurnOverlayTimer = setTimeout(function () {
+        _bbgTurnOverlayTimer = null;
+        try {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } catch (e2) {
+          // ignore
+        }
+      }, 1200);
+    } catch (e) {
+      // ignore
+    }
+    try {
+      bbgFx.turn();
+    } catch (e3) {
+      // ignore
+    }
+  }
+
+  // 汎用トースト（index.html の更新トーストと同じ .bbg-toast を流用）
+  var _bbgToastEl = null;
+  var _bbgToastHideTimer = null;
+  var _bbgToastRemoveTimer = null;
+
+  function bbgShowToast(text) {
+    var t = String(text == null ? '' : text);
+    if (!t) return;
+    try {
+      if (_bbgToastHideTimer) {
+        clearTimeout(_bbgToastHideTimer);
+        _bbgToastHideTimer = null;
+      }
+      if (_bbgToastRemoveTimer) {
+        clearTimeout(_bbgToastRemoveTimer);
+        _bbgToastRemoveTimer = null;
+      }
+      // 連続呼び出しは前のを消してから
+      if (_bbgToastEl && _bbgToastEl.parentNode) _bbgToastEl.parentNode.removeChild(_bbgToastEl);
+      _bbgToastEl = null;
+
+      var el = document.createElement('div');
+      el.className = 'bbg-toast bbg-toast--wrap';
+      el.textContent = t;
+      document.body.appendChild(el);
+      _bbgToastEl = el;
+
+      _bbgToastHideTimer = setTimeout(function () {
+        _bbgToastHideTimer = null;
+        try {
+          el.className = 'bbg-toast bbg-toast--wrap bbg-toast--hide';
+        } catch (e2) {
+          // ignore
+        }
+      }, 2200);
+      _bbgToastRemoveTimer = setTimeout(function () {
+        _bbgToastRemoveTimer = null;
+        try {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } catch (e3) {
+          // ignore
+        }
+        if (_bbgToastEl === el) _bbgToastEl = null;
+      }, 2600);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 待機ドット（待ちモーダル等で共用）
+  function bbgWaitDotsHtml() {
+    return '<span class="bbg-wait-dots"><span>●</span><span>●</span><span>●</span></span>';
+  }
+
   // -------------------- topics --------------------
   var TOPIC_CATEGORIES = [
     {
@@ -4490,18 +4811,18 @@
   // -------------------- hannin (犯人は踊る) --------------------
   // NOTE: This is UI metadata (labels/icons). Game rules/effects are implemented separately.
   var HANNIN_CARD_DEFS = {
-    culprit: { name: '犯人', desc: '', icon: './assets/hannin/犯人.png' },
-    detective: { name: '探偵', desc: '', icon: './assets/hannin/探偵.png' },
-    dog: { name: 'いぬ', desc: '', icon: './assets/hannin/いぬ.png' },
-    boy: { name: '少年', desc: '', icon: './assets/hannin/少年.png' },
-    witness: { name: '目撃者', desc: '', icon: './assets/hannin/目撃者.png' },
-    alibi: { name: 'アリバイ', desc: '', icon: './assets/hannin/アリバイ.png' },
-    info: { name: '情報操作', desc: '', icon: './assets/hannin/情報操作.png' },
-    deal: { name: '取引', desc: '', icon: './assets/hannin/取引.png' },
-    first: { name: '第一発見者', desc: '', icon: './assets/hannin/第一発見者.png' },
-    rumor: { name: 'うわさ', desc: '', icon: './assets/hannin/うわさ.png' },
-    plot: { name: 'たくらみ', desc: '', icon: './assets/hannin/たくらみ.png' },
-    citizen: { name: '一般人', desc: '', icon: './assets/hannin/一般人.png' }
+    culprit: { name: '犯人', desc: 'これが最後の1枚のときだけ出せます。出せたら犯人側の勝ちです。', icon: './assets/hannin/犯人.png' },
+    detective: { name: '探偵', desc: '2周目から使えます。1人を指名し、犯人カードを持っていたら市民側の勝ち。アリバイを持つ相手にはききません。', icon: './assets/hannin/探偵.png' },
+    dog: { name: 'いぬ', desc: '1人を選び、その手札から1枚めくります。犯人カードなら市民側の勝ちです。', icon: './assets/hannin/いぬ.png' },
+    boy: { name: '少年', desc: '犯人カードを持っている人を、自分だけこっそり確認できます。', icon: './assets/hannin/少年.png' },
+    witness: { name: '目撃者', desc: '1人を選び、その人の手札をすべて自分だけ見られます。', icon: './assets/hannin/目撃者.png' },
+    alibi: { name: 'アリバイ', desc: '持っているだけで探偵の指名から守られます。出しても何も起きません。', icon: './assets/hannin/アリバイ.png' },
+    info: { name: '情報操作', desc: '全員が同時に、手札から1枚を左どなりへ渡します。', icon: './assets/hannin/情報操作.png' },
+    deal: { name: '取引', desc: '相手を1人選び、おたがいに手札を1枚ずつ交換します。', icon: './assets/hannin/取引.png' },
+    first: { name: '第一発見者', desc: 'ゲーム最初のカード。これを出した人から事件が始まります。', icon: './assets/hannin/第一発見者.png' },
+    rumor: { name: 'うわさ', desc: '全員が同時に、右どなりの手札から1枚を引きます。', icon: './assets/hannin/うわさ.png' },
+    plot: { name: 'たくらみ', desc: '犯人の味方になります。犯人側が勝てばいっしょに勝ちです。', icon: './assets/hannin/たくらみ.png' },
+    citizen: { name: '一般人', desc: '何も起きません。', icon: './assets/hannin/一般人.png' }
   };
 
   function hnCardImgHtml(cardId) {
@@ -4537,6 +4858,235 @@
     var icon = def && def.icon ? String(def.icon) : '';
     if (!icon) return '';
     return '<img class="ll-grave-icon" draggable="false" alt="' + escapeHtml(def.name || id) + '" src="' + escapeHtml(icon) + '" />';
+  }
+
+  // カード定義の取得（未知IDでも壊れないようにフォールバックを返す）
+  function hnCardDef(cardId) {
+    var id = String(cardId || '');
+    return HANNIN_CARD_DEFS[id] || { name: id || '-', desc: '', icon: '' };
+  }
+
+  // 裏面→表面のフリップ表示（犯人は踊る用）。wrapCls にはサイズ用クラスを渡す。
+  function hnFlipCardHtml(cardId, wrapCls) {
+    return (
+      '<div class="' + escapeHtml(String(wrapCls || '')) + ' bbg-flip">' +
+      '<div class="bbg-flip-inner">' +
+      '<div class="bbg-flip-face bbg-flip-back">' + hnCardBackImgHtml() + '</div>' +
+      '<div class="bbg-flip-face bbg-flip-front">' + hnCardImgHtml(cardId) + '</div>' +
+      '</div>' +
+      '</div>'
+    );
+  }
+
+  // 同時選択(情報操作/うわさ/取引)の進捗。対象者と未選択者を数える。
+  // サーバ側の「全員そろったか」判定(submitHannin*Choice)と同じ条件で数える。
+  function hnPendingProgress(room) {
+    var out = { type: '', total: 0, done: 0, waitingIds: [], waitingNames: [] };
+    try {
+      var st = room && room.state ? room.state : null;
+      var pending = st && st.pending ? st.pending : null;
+      if (!pending || !pending.type) return out;
+      var type = String(pending.type || '');
+      out.type = type;
+
+      var order = st && Array.isArray(st.order) ? st.order : [];
+      var hands = (st && st.hands) || {};
+      var choices = pending.choices && typeof pending.choices === 'object' ? pending.choices : {};
+
+      function handLen(pid) {
+        var h = hands && Array.isArray(hands[pid]) ? hands[pid] : [];
+        return h.length || 0;
+      }
+
+      function rightWithCards(fromPid) {
+        var startIdx = order.indexOf(String(fromPid || ''));
+        if (startIdx < 0) return '';
+        for (var s = 1; s < order.length; s++) {
+          var cand = String(order[(startIdx + s) % order.length] || '');
+          if (!cand) continue;
+          if (handLen(cand) > 0) return cand;
+        }
+        return '';
+      }
+
+      var targets = [];
+      if (type === 'deal') {
+        var ad = String(pending.actorId || '');
+        var td = String(pending.targetPid || '');
+        if (ad) targets.push(ad);
+        if (td && td !== ad) targets.push(td);
+      } else if (type === 'info') {
+        for (var i = 0; i < order.length; i++) {
+          var pi = String(order[i] || '');
+          if (!pi) continue;
+          if (handLen(pi) <= 0) continue;
+          targets.push(pi);
+        }
+      } else if (type === 'rumor') {
+        for (var j = 0; j < order.length; j++) {
+          var pj = String(order[j] || '');
+          if (!pj) continue;
+          if (handLen(pj) <= 0) continue;
+          var rp = rightWithCards(pj);
+          if (!rp || handLen(rp) <= 0) continue;
+          targets.push(pj);
+        }
+      }
+
+      out.total = targets.length;
+      for (var k = 0; k < targets.length; k++) {
+        var tp = targets[k];
+        if (choices[tp] !== undefined) out.done += 1;
+        else {
+          out.waitingIds.push(tp);
+          out.waitingNames.push(hnPlayerName(room, tp));
+        }
+      }
+    } catch (e) {
+      return out;
+    }
+    return out;
+  }
+
+  function hnPendingProgressHtml(room) {
+    try {
+      var pr = hnPendingProgress(room);
+      if (!pr.type || !pr.total) return '';
+      var waiting = pr.waitingNames.length ? '待っている人：' + pr.waitingNames.join('、') : '全員そろいました';
+      return (
+        '<div class="hn-progress">' +
+        '<div class="hn-progress-count">えらんだ人 ' + escapeHtml(String(pr.done)) + '/' + escapeHtml(String(pr.total)) + '</div>' +
+        '<div class="hn-progress-wait muted">' + escapeHtml(waiting) + bbgWaitDotsHtml() + '</div>' +
+        '</div>'
+      );
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // 決着の段階演出（プレイヤー画面・テーブル画面で共用）。
+  // addTimer(fn, ms) には各route側のタイマー管理ヘルパーを渡す（購読解除時にまとめてclearできるように）。
+  // playerId が空文字のときはテーブル端末とみなし、常に勝利ファンファーレを鳴らす。
+  function hnShowResultCine(room, playerId, addTimer) {
+    try {
+      var st = room && room.state ? room.state : null;
+      var r = st && st.result ? st.result : null;
+      if (!r || !r.decidedAt) return;
+
+      var old = document.getElementById('hnCine');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+
+      var culpritId = String(r.culpritId || '');
+      var culpritName = culpritId ? hnPlayerName(room, culpritId) : '';
+      var side = String(r.side || '');
+      var sideLabel = side === 'culprit' ? '犯人側の勝利！' : side === 'citizen' ? '一般人側の勝利！' : '決着';
+      var winners = Array.isArray(r.winners) ? r.winners : [];
+      var iWin = false;
+      var isTable = !String(playerId || '');
+      for (var wi = 0; wi < winners.length; wi++) {
+        if (String(winners[wi] || '') === String(playerId || '')) iWin = true;
+      }
+
+      var el = document.createElement('div');
+      el.className = 'bbg-cine';
+      el.id = 'hnCine';
+      el.innerHTML =
+        '<div class="bbg-cine-text" id="hnCineText">犯人は…</div>' +
+        '<div id="hnCineCard"></div>' +
+        '<div class="bbg-cine-sub" id="hnCineSub"></div>' +
+        '<button type="button" class="ghost bbg-cine-skip" id="hnCineSkip">スキップ</button>';
+      document.body.appendChild(el);
+
+      function removeCine() {
+        try {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } catch (e2) {
+          // ignore
+        }
+      }
+
+      try {
+        var skipBtn = el.querySelector('#hnCineSkip');
+        if (skipBtn) {
+          skipBtn.addEventListener('click', function (ev) {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            removeCine();
+          });
+        }
+      } catch (eSkip) {
+        // ignore
+      }
+
+      function later(fn, ms) {
+        if (typeof addTimer === 'function') addTimer(fn, ms);
+        else setTimeout(fn, ms);
+      }
+
+      // (2) 犯人カードをめくって「◯◯でした！」
+      later(function () {
+        if (!el.parentNode) return;
+        try {
+          var cardBox = el.querySelector('#hnCineCard');
+          if (cardBox) cardBox.innerHTML = hnFlipCardHtml('culprit', 'bbg-cine-card');
+          var txt = el.querySelector('#hnCineText');
+          if (txt) txt.textContent = culpritName ? culpritName + ' でした！' : '犯人が分かりました';
+        } catch (e3) {
+          // ignore
+        }
+        try {
+          bbgFx.reveal();
+        } catch (e4) {
+          // ignore
+        }
+        later(function () {
+          try {
+            if (side === 'citizen') bbgFx.hit();
+            else bbgFx.notify();
+          } catch (e5) {
+            // ignore
+          }
+        }, 700);
+      }, 900);
+
+      // (3) 勝敗の表示
+      later(function () {
+        if (!el.parentNode) return;
+        try {
+          var txt2 = el.querySelector('#hnCineText');
+          if (txt2) txt2.textContent = sideLabel;
+          var sub = el.querySelector('#hnCineSub');
+          if (sub) sub.textContent = culpritName ? '犯人：' + culpritName : '';
+        } catch (e6) {
+          // ignore
+        }
+        try {
+          if (isTable || iWin) bbgFx.win();
+          else bbgFx.lose();
+        } catch (e7) {
+          // ignore
+        }
+      }, 1800);
+
+      later(function () {
+        removeCine();
+      }, 3000);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 決着演出を出すべきか（購読初回・復帰直後は出さない）。
+  function hnShouldPlayResultCine(room) {
+    try {
+      var st = room && room.state ? room.state : null;
+      var r = st && st.result ? st.result : null;
+      var at = r ? parseIntSafe(r.decidedAt, 0) : 0;
+      if (!at) return false;
+      // 15秒以上前に決まっていたらリロード復帰とみなしてスキップする。
+      return serverNowMs() - at <= 15000;
+    } catch (e) {
+      return false;
+    }
   }
 
   function llCardRankStr(cardId) {
@@ -5124,16 +5674,24 @@
 
     var contentHtml = '';
 
-    // "墓地" - show the latest globally discarded card icon (one icon only).
+    // 「墓地」— 直近3枚を横並びで表示する（右端が最新・古いものは半透明）。
     var pilesHtml = '';
     try {
       var grave = st && Array.isArray(st.graveyard) ? st.graveyard : [];
-      var latest = grave && grave.length ? String(grave[grave.length - 1] || '') : '';
-      var icons = latest ? hnGraveIconHtml(latest) : '';
+      var recent = grave.length > 3 ? grave.slice(grave.length - 3) : grave.slice();
+      var icons = '';
+      for (var gi0 = 0; gi0 < recent.length; gi0++) {
+        var isNewest0 = gi0 === recent.length - 1;
+        icons +=
+          '<span class="hn-grave-item' + (isNewest0 ? '' : ' hn-grave-item--old') + '">' +
+          hnGraveIconHtml(String(recent[gi0] || '')) +
+          '</span>';
+      }
       pilesHtml =
         '<div class="ll-piles-box">' +
-        '<div class="ll-piles-text">墓地</div>' +
+        '<div class="ll-piles-text">墓地 ' + escapeHtml(String(grave.length || 0)) + '</div>' +
         '<div class="hn-grave-icons">' + icons + '</div>' +
+        bbgFxToggleHtml() +
         '</div>';
     } catch (ePile) {
       pilesHtml = '';
@@ -5159,19 +5717,30 @@
 
         if (cType === 'play') {
           var cCardId = String(c.cardId || '');
-          var cDef = HANNIN_CARD_DEFS[cCardId] || { name: cCardId || '-', desc: '' };
-          cTitle = String(cDef.name || cCardId) + ' を使用';
+          var cDef = hnCardDef(cCardId);
+          cTitle = String(cDef.name || cCardId) + ' を出す';
+          okLabel = 'このカードを出す';
           cBody = '<div class="ll-action-card">' + hnCardImgHtml(cCardId) + '</div>';
-          if (cDef.desc) cBody += '<div class="muted">' + escapeHtml(String(cDef.desc || '')) + '</div>';
+          if (cDef.desc) cBody += '<div class="hn-card-info-desc muted center">' + escapeHtml(String(cDef.desc || '')) + '</div>';
         } else if (cType === 'info') {
+          var iDef = hnCardDef(String(c.cardId || ''));
           cTitle = '情報操作：このカードを渡す';
-          cBody = '<div class="ll-action-card">' + hnCardImgHtml(String(c.cardId || '')) + '</div>';
+          cBody =
+            '<div class="ll-action-card">' + hnCardImgHtml(String(c.cardId || '')) + '</div>' +
+            '<div class="hn-card-info-name center">' + escapeHtml(String(iDef.name || '')) + '</div>' +
+            (iDef.desc ? '<div class="hn-card-info-desc muted center">' + escapeHtml(String(iDef.desc || '')) + '</div>' : '');
         } else if (cType === 'rumor') {
           cTitle = 'うわさ：このカードを引く';
-          cBody = '<div class="ll-action-card">' + hnCardBackImgHtml() + '</div>';
+          cBody =
+            '<div class="ll-action-card">' + hnCardBackImgHtml() + '</div>' +
+            '<div class="hn-card-info-desc muted center">なにが出るかは引くまで分かりません。</div>';
         } else if (cType === 'deal') {
+          var dDef = hnCardDef(String(c.cardId || ''));
           cTitle = '取引：このカードを出す';
-          cBody = '<div class="ll-action-card">' + hnCardImgHtml(String(c.cardId || '')) + '</div>';
+          cBody =
+            '<div class="ll-action-card">' + hnCardImgHtml(String(c.cardId || '')) + '</div>' +
+            '<div class="hn-card-info-name center">' + escapeHtml(String(dDef.name || '')) + '</div>' +
+            (dDef.desc ? '<div class="hn-card-info-desc muted center">' + escapeHtml(String(dDef.desc || '')) + '</div>' : '');
         } else if (cType === 'notice') {
           cTitle = String(c.title || '注意');
           cBody = '<div class="muted center">' + escapeHtml(String(c.message || '')) + '</div>';
@@ -5242,8 +5811,9 @@
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
           '<div class="big ll-modal-title">少年</div>' +
-          '<div class="muted center">' +
-          escapeHtml(cname ? ('犯人を持っているのは「' + cname + '」です') : '犯人カードの所持者が見つかりません') +
+          '<div class="muted center">犯人カードを持っているのは…</div>' +
+          '<div class="hn-boy-name bbg-pop hn-pop-delay center">' +
+          escapeHtml(cname ? cname : '（見つかりません）') +
           '</div>' +
           '<div class="row ll-modal-actions" style="justify-content:center">' +
           '<button class="primary" id="hnPrivateOk">OK</button>' +
@@ -5272,8 +5842,11 @@
         var wcards = Array.isArray(pmsg.cards) ? pmsg.cards.slice() : [];
         var wrow = '';
         for (var wi = 0; wi < wcards.length; wi++) {
-          wrow += '<div class="hn-rumor-card">' + hnCardImgHtml(String(wcards[wi] || '')) + '</div>';
+          // 1枚ずつ少しずつ遅らせてポップさせる（4枚目以降は遅延なし）。
+          var wdelay = wi === 1 ? ' bbg-delay1' : wi === 2 ? ' bbg-delay2' : wi >= 3 ? ' bbg-delay3' : '';
+          wrow += '<div class="hn-rumor-card bbg-pop' + wdelay + '">' + hnCardImgHtml(String(wcards[wi] || '')) + '</div>';
         }
+        if (!wrow) wrow = '<div class="muted center">（手札なし）</div>';
         privateHtml =
           '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
           '<div class="ll-overlay-backdrop"></div>' +
@@ -5293,18 +5866,23 @@
         var msg2 = String(pmsg.message || '');
         var actorPid2 = String(pmsg.actorPid || '');
         var isActorNotice = !!(playerId && actorPid2 && String(playerId) === String(actorPid2));
+        var tgtPid2 = String(pmsg.targetPid || '');
+        var tgtName2 = tgtPid2 ? hnPlayerName(room, tgtPid2) : '';
+        var noticeIcon2 = title2 === '探偵' ? 'detective' : title2 === 'いぬ' ? 'dog' : '';
         privateHtml =
           '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
           '<div class="big ll-modal-title">' + escapeHtml(title2) + '</div>' +
+          (noticeIcon2 ? '<div class="ll-action-card">' + hnCardImgHtml(noticeIcon2) + '</div>' : '') +
+          (tgtName2 ? '<div class="hn-card-info-name center">' + escapeHtml(tgtName2) + '</div>' : '') +
           '<div class="muted center">' + escapeHtml(msg2) + '</div>' +
-          (isActorNotice
-            ? '<div class="row ll-modal-actions" style="justify-content:center">' +
-              '<button class="primary" id="hnPrivateOk">OK</button>' +
-              '</div>'
-            : '') +
+          '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--miss bbg-stamp--delay">はずれ</span></div>' +
+          // OKは全員に出す（本人以外のOKは自分の表示を消すだけで進行には影響しない）。
+          '<div class="row ll-modal-actions" style="justify-content:center">' +
+          '<button class="primary" id="hnPrivateOk">' + (isActorNotice ? 'OK（次へ進む）' : 'OK') + '</button>' +
+          '</div>' +
           '</div>' +
           '</div>' +
           '</div>';
@@ -5470,9 +6048,17 @@
       }
 
       if (already) {
-        contentHtml = '<div class="muted center">情報操作：決定済み（他の人を待っています）</div>';
+        contentHtml =
+          '<div class="stack" style="gap:12px">' +
+          '<div class="muted center">情報操作：決定済み（他の人を待っています）</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       } else if (!myHand.length) {
-        contentHtml = '<div class="muted center">情報操作：手札がありません</div>';
+        contentHtml =
+          '<div class="stack" style="gap:12px">' +
+          '<div class="muted center">情報操作：手札がありません</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       } else {
         var selInfo = parseIntSafe(ui.hnInfoSelectedIndex, -1);
         var outInfo = '';
@@ -5489,21 +6075,34 @@
 
         contentHtml =
           '<div class="stack" style="gap:12px">' +
-          '<div class="muted center">情報操作：左隣に渡すカードを選ぶ</div>' +
+          '<div class="muted center">情報操作：左どなりに渡すカードを選ぶ</div>' +
           '<div class="hn-rumor-row">' +
           outInfo +
           '</div>' +
-          '<div class="muted center hn-hint">タップで選択（決定/キャンセル）</div>' +
+          '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+          hnPendingProgressHtml(room) +
           '</div>';
       }
     } else if (pending && pending.type === 'rumor') {
       var selRumor = parseIntSafe(ui.hnRumorSelectedIndex, -1);
       if (alreadyChosenRumor) {
-        contentHtml = '<div class="muted center">うわさ：引くカードを選択済みです（他の人を待っています）</div>';
+        contentHtml =
+          '<div class="stack" style="gap:12px">' +
+          '<div class="muted center">うわさ：引くカードを選択済みです（他の人を待っています）</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       } else if (!myHand.length) {
-        contentHtml = '<div class="muted center">うわさ：手札がありません</div>';
+        contentHtml =
+          '<div class="stack" style="gap:12px">' +
+          '<div class="muted center">うわさ：手札がありません</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       } else if (!rightCount) {
-        contentHtml = '<div class="muted center">うわさ：右隣の手札がありません</div>';
+        contentHtml =
+          '<div class="stack" style="gap:12px">' +
+          '<div class="muted center">うわさ：右どなりの手札がありません</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       } else {
         var confirmedRumorIdx = -1;
         try {
@@ -5527,13 +6126,14 @@
         }
         contentHtml =
           '<div class="stack" style="gap:12px">' +
-          '<div class="muted center">うわさ：右隣の手札 ' +
+          '<div class="muted center">うわさ：右どなりの手札 ' +
           escapeHtml(String(rightCount)) +
           ' 枚から1枚選ぶ</div>' +
           '<div class="hn-rumor-row">' +
           facedownHtml +
           '</div>' +
-          '<div class="muted center hn-hint">タップで選択（決定/キャンセル）</div>' +
+          '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+          hnPendingProgressHtml(room) +
           '</div>';
       }
     } else if (pending && pending.type === 'deal') {
@@ -5558,9 +6158,17 @@
 
       if (isDealActor || isDealTarget) {
         if (alreadyChosenDeal) {
-          contentHtml = '<div class="muted center">取引：決定済み（相手を待っています）</div>';
+          contentHtml =
+            '<div class="stack" style="gap:12px">' +
+            '<div class="muted center">取引：決定済み（相手を待っています）</div>' +
+            hnPendingProgressHtml(room) +
+            '</div>';
         } else if (!myHand.length) {
-          contentHtml = '<div class="muted center">取引：手札がありません</div>';
+          contentHtml =
+            '<div class="stack" style="gap:12px">' +
+            '<div class="muted center">取引：手札がありません</div>' +
+            hnPendingProgressHtml(room) +
+            '</div>';
         } else {
           var outDeal2 = '';
           for (var di2 = 0; di2 < myHand.length; di2++) {
@@ -5584,72 +6192,148 @@
             '<div class="hn-rumor-row">' +
             outDeal2 +
             '</div>' +
-            '<div class="muted center hn-hint">タップで選択（決定/キャンセル）</div>' +
+            '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+            hnPendingProgressHtml(room) +
             '</div>';
         }
       } else {
         contentHtml =
+          '<div class="stack" style="gap:12px">' +
           '<div class="muted center">取引：' +
           escapeHtml(hnPlayerName(room, dealActor)) +
           ' と ' +
           escapeHtml(hnPlayerName(room, dealTarget)) +
-          ' が選択中です</div>';
+          ' が選択中です</div>' +
+          hnPendingProgressHtml(room) +
+          '</div>';
       }
     } else {
-      // Normal play: show stacked hand; tap swaps/front, long-press plays.
+      // 通常時：横ファン(扇)配置。タップで選択 → 下のボタンで使用する。
       if (!myHand.length) {
-        contentHtml = '<div class="muted">（手札なし）</div>';
+        contentHtml = '<div class="muted center">（手札なし）</div>';
       } else {
-        var frontIdx = parseIntSafe(ui.hnHandFrontIndex, 0);
-        if (frontIdx < 0 || frontIdx >= myHand.length) frontIdx = 0;
-
-        // Compute an approximate pixel step as cardHeight/6.
-        // Reduce overlap by 20% (decrease offset).
-        var stepPx = 72;
+        // カード幅・重なり幅を画面幅から求める（n枚がコンテナ幅に収まるようにする）。
+        var vw0 = 420;
         try {
-          var vw = (typeof window !== 'undefined' && window && window.innerWidth) ? window.innerWidth : 420;
-          var cardW = Math.min(340, Math.floor(vw * 0.9));
-          var cardH = cardW * (4 / 3);
-          stepPx = Math.max(10, Math.round((cardH / 6) * 0.8));
-        } catch (eStep) {
-          stepPx = 72;
+          if (typeof window !== 'undefined' && window && window.innerWidth) vw0 = window.innerWidth;
+        } catch (eVw) {
+          vw0 = 420;
         }
+        var nCards = myHand.length;
+        var contW = Math.min(340, Math.max(200, Math.floor(vw0 * 0.9)));
+        var cardW = Math.max(70, Math.min(150, Math.floor(contW * 0.46)));
+        var cardH = Math.round((cardW * 4) / 3);
+        var offsetPx = 0;
+        if (nCards > 1) {
+          offsetPx = Math.min(Math.round(cardW * 0.62), Math.floor((contW - cardW) / (nCards - 1)));
+          if (offsetPx < 12) offsetPx = 12;
+        }
+        var wrapW = cardW + offsetPx * (nCards - 1);
+        var wrapH = cardH + 18;
 
-        var dispOrder = [];
-        dispOrder.push(frontIdx);
-        for (var ii = 0; ii < myHand.length; ii++) {
-          if (ii === frontIdx) continue;
-          dispOrder.push(ii);
-        }
+        // 選択インデックス（範囲外はリセット）。
+        var selIdx0 = parseIntSafe(ui.hnSelIndex, -1);
+        if (selIdx0 < 0 || selIdx0 >= nCards) selIdx0 = -1;
+
+        // 新しく受け取ったカードのNEWバッジ（出現アニメは変化した描画のときだけ）。
+        var newIdx0 = parseIntSafe(ui.hnNewCardIndex, -1);
+        if (newIdx0 < 0 || newIdx0 >= nCards) newIdx0 = -1;
+        var animNew0 = !!(newIdx0 >= 0 && ui.hnNewCardAnimPending);
+        if (animNew0) ui.hnNewCardAnimPending = false;
 
         var cardsHtml = '';
-        for (var pos = 0; pos < dispOrder.length; pos++) {
-          var idx = dispOrder[pos];
-          var cid = String(myHand[idx] || '');
-          // Back cards shift upward by ~cardHeight/6 each.
-          var y = -(pos * stepPx);
+        for (var ci0 = 0; ci0 < nCards; ci0++) {
+          var cid0 = String(myHand[ci0] || '');
+          var isSel0 = selIdx0 === ci0;
           cardsHtml +=
-            '<div class="hn-card hnPCard" data-hn-idx="' +
-            escapeHtml(String(idx)) +
-            '" style="z-index:' +
-            escapeHtml(String(100 - pos)) +
-            ';transform:translate(0,' +
-            escapeHtml(String(y)) +
-            'px) scale(.90)">' +
-            hnCardImgHtml(cid) +
+            '<div class="hn-card hn-card--fan hnPCard' +
+            (isSel0 ? ' hn-card--sel' : '') +
+            (ci0 === newIdx0 && animNew0 ? ' bbg-slidein' : '') +
+            '" data-hn-idx="' +
+            escapeHtml(String(ci0)) +
+            '" style="left:' +
+            escapeHtml(String(ci0 * offsetPx)) +
+            'px;width:' +
+            escapeHtml(String(cardW)) +
+            'px;height:' +
+            escapeHtml(String(cardH)) +
+            'px;z-index:' +
+            escapeHtml(String(isSel0 ? 200 : 100 + ci0)) +
+            '">' +
+            hnCardImgHtml(cid0) +
+            (ci0 === newIdx0 ? '<span class="hn-card-new">NEW</span>' : '') +
             '</div>';
         }
 
+        // 選択中カードの名前と効果テキスト（自分の番でなくても見られる）。
+        var selCard0 = selIdx0 >= 0 ? String(myHand[selIdx0] || '') : '';
+        var infoHtml0 = '';
+        if (selCard0) {
+          var sDef0 = hnCardDef(selCard0);
+          infoHtml0 =
+            '<div class="hn-card-info">' +
+            '<div class="hn-card-info-name">' + escapeHtml(String(sDef0.name || '-')) + '</div>' +
+            '<div class="hn-card-info-desc muted">' + escapeHtml(String(sDef0.desc || '')) + '</div>' +
+            '</div>';
+        } else {
+          infoHtml0 =
+            '<div class="hn-card-info">' +
+            '<div class="hn-card-info-empty muted">カードをタップすると、なにが起きるか見られます</div>' +
+            '</div>';
+        }
+
+        // 使用ボタン（自分の番のみ）。出せない理由は注記で伝える。
+        var useHtml0 = '';
+        var blockedByWait0 = !!(st && st.waitFor && st.waitFor.type);
+        var decided0 = !!(st && st.result && st.result.decidedAt);
+        if (canOperate && isMyTurn && phase === 'playing' && !blockedByWait0 && !decided0) {
+          var useLabel0 = 'このカードを出す';
+          var useDisabled0 = false;
+          var useNote0 = '';
+          var detectiveLocked0 = false;
+          try {
+            var tc0 = parseIntSafe(st.turnCount, 0);
+            var ord0 = Array.isArray(st && st.order) ? st.order : [];
+            detectiveLocked0 = !!(ord0.length && tc0 < ord0.length);
+          } catch (eDL0) {
+            detectiveLocked0 = false;
+          }
+          if (!selCard0) {
+            useDisabled0 = true;
+            useLabel0 = 'カードをえらんでください';
+          } else if (!st.started && selCard0 !== 'first') {
+            useDisabled0 = true;
+            useNote0 = '最初は第一発見者から始まります';
+          } else if (selCard0 === 'detective' && st.started && detectiveLocked0) {
+            useDisabled0 = true;
+            useNote0 = '探偵は2周目から使えます';
+          } else if (selCard0 === 'culprit' && nCards > 1) {
+            useDisabled0 = true;
+            useNote0 = '犯人は最後の1枚のときだけ出せます';
+          }
+          useHtml0 =
+            '<button type="button" id="hnUseBtn" class="primary bbg-start-btn"' +
+            (useDisabled0 ? ' disabled' : '') +
+            '>' +
+            escapeHtml(useLabel0) +
+            '</button>' +
+            (useNote0 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote0) + '</div>' : '');
+        }
+
         contentHtml =
-          '<div class="hn-hand-wrap" style="margin-top:12px;padding-top:' +
-          escapeHtml(String(Math.max(0, (dispOrder.length - 1) * stepPx))) +
+          '<div class="hn-hand-wrap ll-hand-wrap">' +
+          '<div class="hn-hand hn-hand--fan" id="hnHand" style="width:' +
+          escapeHtml(String(wrapW)) +
+          'px;height:' +
+          escapeHtml(String(wrapH)) +
           'px">' +
-          '<div class="hn-hand" id="hnHand">' +
           cardsHtml +
           '</div>' +
-          (isMyTurn
-            ? '<div class="muted center hn-hint">タップで入れ替え / 長押しで使用</div>'
-            : '<div class="muted center hn-hint">あなたの手札</div>') +
+          infoHtml0 +
+          useHtml0 +
+          '<div class="muted center hn-hint">' +
+          escapeHtml(isMyTurn ? 'カードをタップして選び、ボタンで出します' : 'あなたの手札（タップで効果を確認できます）') +
+          '</div>' +
           '</div>';
       }
     }
@@ -5739,6 +6423,24 @@
       resultHtml = '';
     }
 
+    // ゲーム開始前の案内バナー（第一発見者は誰かを名前では出さない）。
+    var startBannerHtml = '';
+    try {
+      var decidedB = !!(st && st.result && st.result.decidedAt);
+      if (phase === 'playing' && st && !st.started && !decidedB) {
+        startBannerHtml =
+          '<div class="hn-banner bbg-banner-in">' +
+          escapeHtml(
+            isMyTurn
+              ? 'あなたが「第一発見者」です。カードを出してゲームを始めましょう'
+              : '第一発見者がカードを出すのを待っています'
+          ) +
+          '</div>';
+      }
+    } catch (eSB) {
+      startBannerHtml = '';
+    }
+
     // "Next" after game end: show for GM device and GM participant.
     var nextHtml = '';
     try {
@@ -5770,6 +6472,7 @@
         '</div>' +
         '</div>' +
         (pilesHtml || '') +
+        (startBannerHtml || '') +
         (resultHtml || '') +
         (nextHtml || '') +
         (privateHtml || '') +
@@ -5817,7 +6520,10 @@
     var lastRoom = null;
 
     var ui = {
-      hnHandFrontIndex: 0,
+      hnSelIndex: -1,
+      hnHandKey: '',
+      hnNewCardIndex: -1,
+      hnNewCardAnimPending: false,
       hnInfoSelectedIndex: -1,
       hnRumorSelectedIndex: -1,
       hnPrevHand: [],
@@ -5828,11 +6534,70 @@
       hnConfirm: null,
       hnDealNoticeKey: '',
       lobbyReturnWatching: false,
-      lobbyUnsub: null
+      lobbyUnsub: null,
+      // 演出のワンショット管理（fxReady=false の間はキー記録のみで演出しない）
+      fxReady: false,
+      cancelled: false,
+      lastTurnKey: '',
+      lastPrivKey: '',
+      lastNewCardKey: '',
+      lastResultKey: ''
     };
+
+    // 演出用タイマー（購読解除・画面遷移時にまとめてclearする）
+    var fxTimers = [];
+
+    function hnFxTimeout(fn, ms) {
+      var id = setTimeout(function () {
+        for (var i = 0; i < fxTimers.length; i++) {
+          if (fxTimers[i] === id) {
+            fxTimers.splice(i, 1);
+            break;
+          }
+        }
+        try {
+          fn();
+        } catch (e) {
+          // ignore
+        }
+      }, ms);
+      fxTimers.push(id);
+      return id;
+    }
+
+    function hnClearFxTimers() {
+      try {
+        for (var i = 0; i < fxTimers.length; i++) clearTimeout(fxTimers[i]);
+      } catch (e) {
+        // ignore
+      }
+      fxTimers = [];
+      try {
+        var cine0 = document.getElementById('hnCine');
+        if (cine0 && cine0.parentNode) cine0.parentNode.removeChild(cine0);
+      } catch (e2) {
+        // ignore
+      }
+    }
 
     function redirectToLobby() {
       if (!lobbyId) return;
+      // setQuery() は pushState なので popstate が起きない。購読を残すとこの画面の描画が
+      // 新しい画面を上書きし続け、演出も多重発火するため、遷移前に自分で解除する。
+      ui.cancelled = true;
+      hnClearFxTimers();
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -5987,15 +6752,27 @@
         // ignore
       }
 
-      // Bring newly received cards (rumor/info/deal results) to the front.
+      // 手札の変化を検出：新しく受け取ったカード(うわさ/情報操作/取引の結果)にNEWバッジを付け、
+      // 手札が変わったら選択状態はリセットする。
       try {
         var st0 = room && room.state ? room.state : null;
         var h0 = st0 && st0.hands && playerId && Array.isArray(st0.hands[playerId]) ? st0.hands[playerId] : [];
-        var newIdx = hnFindNewCardIndex(ui.hnPrevHand, h0);
-        if (newIdx >= 0 && newIdx < h0.length) {
-          ui.hnHandFrontIndex = newIdx;
+        var handKey0 = String(h0.length) + '|' + h0.join(',');
+        if (ui.hnHandKey !== handKey0) {
+          var newIdx = hnFindNewCardIndex(ui.hnPrevHand, h0);
+          // 初回（配札直後）は「新しく来た」とはみなさない。
+          var isFirstHand = !ui.hnHandKey;
+          if (!isFirstHand && newIdx >= 0 && newIdx < h0.length) {
+            ui.hnNewCardIndex = newIdx;
+            ui.hnNewCardAnimPending = true;
+          } else {
+            ui.hnNewCardIndex = -1;
+            ui.hnNewCardAnimPending = false;
+          }
+          ui.hnHandKey = handKey0;
+          ui.hnPrevHand = Array.isArray(h0) ? h0.slice() : [];
+          ui.hnSelIndex = -1;
         }
-        ui.hnPrevHand = Array.isArray(h0) ? h0.slice() : [];
       } catch (eFront) {
         // ignore
       }
@@ -6019,6 +6796,13 @@
                 message: hnPlayerName(room, aa) + ' が取引を使用しました。交換に出すカードを選んでください。',
                 cancelLabel: 'OK'
               };
+              // 選ばされる側への注意喚起（音+バイブ）。
+              try {
+                bbgFx.notify();
+                bbgFx.vibrate(80);
+              } catch (eDN) {
+                // ignore
+              }
             }
           }
         }
@@ -6028,124 +6812,53 @@
 
       renderHanninPlayer(viewEl, { roomId: roomId, room: room, playerId: playerId, lobbyId: lobbyId, isHost: isHost, ui: ui, isTableGmDevice: isTableGmDevice });
 
-      // Bind handlers on the freshly rendered DOM (important: renderNow can be called from events).
-      var cards = document.querySelectorAll('.hnPCard');
-      for (var iC = 0; iC < cards.length; iC++) {
-        var el = cards[iC];
-        if (!el) continue;
-
-        if (!el.__hn_click_bound) {
-          el.__hn_click_bound = true;
-          el.addEventListener('click', function (ev) {
-            var t = ev && ev.currentTarget ? ev.currentTarget : null;
-            if (!t) return;
-            var idx = parseIntSafe(t.getAttribute('data-hn-idx'), -1);
+      // 手札：タップで選択（もう一度タップで解除）。使用は下の大きなボタンに一本化した。
+      // 長押しと巡回タップは廃止。自分の番でなくてもタップして効果説明を見られる。
+      var handEl = document.getElementById('hnHand');
+      if (handEl && !handEl.__hn_bound) {
+        handEl.__hn_bound = true;
+        handEl.addEventListener('click', function (ev) {
+          if (ui.hnAction || ui.hnConfirm) return;
+          try {
+            var el0 = ev && ev.target ? ev.target : null;
+            var cardEl = null;
+            while (el0 && el0 !== handEl) {
+              if (el0.className && String(el0.className).indexOf('hnPCard') >= 0) {
+                cardEl = el0;
+                break;
+              }
+              el0 = el0.parentNode;
+            }
+            if (!cardEl) return;
+            var idx = parseIntSafe(cardEl.getAttribute('data-hn-idx'), -1);
             if (idx < 0) return;
-
-            try {
-              var st = lastRoom && lastRoom.state ? lastRoom.state : null;
-              var pending = st && st.pending ? st.pending : null;
-
-              if (ui.hnAction) {
-                return;
-              }
-
-              if (pending && pending.type === 'rumor') {
-                // rumor tap is handled on hnRumorPick elements
-                return;
-              } else if (pending && pending.type === 'deal') {
-                // deal tap is handled on hnDealPick elements
-                return;
-              } else {
-                // Normal: tap cycles the front card.
-                var h = st && st.hands && Array.isArray(st.hands[playerId]) ? st.hands[playerId] : [];
-                if (!h || !h.length) return;
-                var cur = parseIntSafe(ui.hnHandFrontIndex, 0);
-                if (cur < 0) cur = 0;
-                ui.hnHandFrontIndex = (cur + 1) % h.length;
-              }
-            } catch (e) {
-              // ignore
-            }
+            var st0 = lastRoom && lastRoom.state ? lastRoom.state : null;
+            var h0 = st0 && st0.hands && Array.isArray(st0.hands[playerId]) ? st0.hands[playerId] : [];
+            if (!h0.length || idx >= h0.length) return;
+            ui.hnSelIndex = parseIntSafe(ui.hnSelIndex, -1) === idx ? -1 : idx;
+            bbgFx.tap();
             renderNow(lastRoom);
-          });
-        }
+          } catch (e) {
+            // ignore
+          }
+        });
+      }
 
-        if (!el.__hn_hold_bound) {
-          el.__hn_hold_bound = true;
-          (function (btn) {
-            var holdMs = CN_LONG_PRESS_MS;
-            var timer = null;
-            var longFired = false;
-
-            function clearTimer() {
-              if (timer) {
-                clearTimeout(timer);
-                timer = null;
-              }
-            }
-
-            function startHold(ev) {
-              if (ui.inFlight) return;
-              if (ev && ev.button != null && ev.button !== 0) return;
-              if (ev && ev.preventDefault) ev.preventDefault();
-
-              clearTimer();
-              longFired = false;
-
-              var idx = parseIntSafe(btn.getAttribute('data-hn-idx'), -1);
-              if (idx < 0) return;
-
-              timer = setTimeout(function () {
-                longFired = true;
-                clearTimer();
-
-                try {
-                  var st = lastRoom && lastRoom.state ? lastRoom.state : null;
-                  var pending = st && st.pending ? st.pending : null;
-                  if (pending && pending.type === 'rumor') {
-                    // Long-press confirms currently selected facedown card.
-                    tryConfirmRumorByLongPress();
-                    return;
-                  }
-                } catch (e) {
-                  // ignore
-                }
-
-                // Normal play.
-                tryPlayCardByLongPress(idx);
-              }, holdMs);
-            }
-
-            btn.addEventListener('click', function (ev) {
-              // Ignore tap after long-press.
-              if (longFired) {
-                longFired = false;
-                if (ev && ev.preventDefault) ev.preventDefault();
-                if (ev && ev.stopPropagation) ev.stopPropagation();
-              }
-            });
-
-            if (typeof PointerEvent !== 'undefined') {
-              btn.addEventListener('pointerdown', startHold);
-              btn.addEventListener('pointerup', clearTimer);
-              btn.addEventListener('pointercancel', clearTimer);
-              btn.addEventListener('pointerleave', clearTimer);
-            } else {
-              btn.addEventListener('touchstart', startHold);
-              btn.addEventListener('touchend', clearTimer);
-              btn.addEventListener('touchcancel', clearTimer);
-
-              btn.addEventListener('mousedown', startHold);
-              btn.addEventListener('mouseup', clearTimer);
-              btn.addEventListener('mouseleave', clearTimer);
-            }
-
-            btn.addEventListener('contextmenu', function (ev) {
-              if (ev && ev.preventDefault) ev.preventDefault();
-            });
-          })(el);
-        }
+      // 使用ボタン（従来の長押しと同じ処理へ）
+      var useBtn = document.getElementById('hnUseBtn');
+      if (useBtn && !useBtn.__hn_bound) {
+        useBtn.__hn_bound = true;
+        useBtn.addEventListener('click', function (ev) {
+          if (ev && ev.preventDefault) ev.preventDefault();
+          if (ui.inFlight) return;
+          if (ui.hnAction || ui.hnConfirm) return;
+          var idx = parseIntSafe(ui.hnSelIndex, -1);
+          if (idx < 0) {
+            bbgShowToast('カードをえらんでください');
+            return;
+          }
+          tryPlayCard(idx);
+        });
       }
 
       // Modal bindings
@@ -6437,74 +7150,9 @@
 
             ui.hnRumorSelectedIndex = idx;
             ui.hnConfirm = { type: 'rumor', index: idx };
+            bbgFx.tap();
             renderNow(lastRoom);
           });
-        }
-
-        if (!rpEl.__hn_hold_bound) {
-          rpEl.__hn_hold_bound = true;
-          (function (btn) {
-            var holdMs = CN_LONG_PRESS_MS;
-            var timer = null;
-            var longFired = false;
-
-            function clearTimer() {
-              if (timer) {
-                clearTimeout(timer);
-                timer = null;
-              }
-            }
-
-            function startHold(ev) {
-              if (ui.inFlight) return;
-              if (ev && ev.button != null && ev.button !== 0) return;
-              if (ev && ev.preventDefault) ev.preventDefault();
-              clearTimer();
-              longFired = false;
-
-              timer = setTimeout(function () {
-                longFired = true;
-                clearTimer();
-                // Enforce tap-select then long-press confirm.
-                if (parseIntSafe(ui.hnRumorSelectedIndex, -1) < 0) {
-                  var idx = parseIntSafe(btn.getAttribute('data-hn-rumor-idx'), -1);
-                  if (idx >= 0) {
-                    ui.hnRumorSelectedIndex = idx;
-                    renderNow(lastRoom);
-                  }
-                  return;
-                }
-                tryConfirmRumorByLongPress();
-              }, holdMs);
-            }
-
-            btn.addEventListener('click', function (ev) {
-              if (longFired) {
-                longFired = false;
-                if (ev && ev.preventDefault) ev.preventDefault();
-                if (ev && ev.stopPropagation) ev.stopPropagation();
-              }
-            });
-
-            if (typeof PointerEvent !== 'undefined') {
-              btn.addEventListener('pointerdown', startHold);
-              btn.addEventListener('pointerup', clearTimer);
-              btn.addEventListener('pointercancel', clearTimer);
-              btn.addEventListener('pointerleave', clearTimer);
-            } else {
-              btn.addEventListener('touchstart', startHold);
-              btn.addEventListener('touchend', clearTimer);
-              btn.addEventListener('touchcancel', clearTimer);
-
-              btn.addEventListener('mousedown', startHold);
-              btn.addEventListener('mouseup', clearTimer);
-              btn.addEventListener('mouseleave', clearTimer);
-            }
-
-            btn.addEventListener('contextmenu', function (ev) {
-              if (ev && ev.preventDefault) ev.preventDefault();
-            });
-          })(rpEl);
         }
       }
 
@@ -6535,6 +7183,7 @@
           } catch (eTap3) {
             ui.hnConfirm = { type: 'info', index: idx, cardId: '' };
           }
+          bbgFx.tap();
           renderNow(lastRoom);
         });
       }
@@ -6570,12 +7219,92 @@
           } catch (eD2) {
             ui.hnConfirm = { type: 'deal', index: idx, cardId: '' };
           }
+          bbgFx.tap();
           renderNow(lastRoom);
         });
       }
+
+      // 効果音トグル（再描画のたびに貼り直されるので毎回バインドする）
+      bindBbgFxToggle();
+
+      // 演出は最後にまとめて（ワンショット管理）
+      hnRunOneShotFx(room);
     }
 
-    function tryPlayCardByLongPress(cardIndex) {
+    // 一回だけ鳴らす/出す演出。購読の初回コールバックではキー記録だけ行う。
+    function hnRunOneShotFx(room) {
+      // room が無いときはキーを触らない（次の更新で誤って再発火しないように）。
+      if (!room) return;
+      var ready = !!ui.fxReady;
+      var st = room && room.state ? room.state : null;
+      var phase0 = String((room && room.phase) || '');
+
+      // 1) 自分の番が新しく来たときのオーバーレイ（開始前・待機中は鳴らさない）
+      try {
+        var turnKey = '';
+        var myTurnNow = false;
+        var blocked = false;
+        if (st && phase0 === 'playing' && st.turn && st.turn.playerId) {
+          turnKey = String(st.turnCount || 0) + ':' + String(st.turn.playerId || '');
+          myTurnNow = String(st.turn.playerId || '') === String(playerId || '');
+          blocked = !!((st.waitFor && st.waitFor.type) || (st.pending && st.pending.type) || (st.result && st.result.decidedAt));
+        }
+        if (ready && turnKey && turnKey !== ui.lastTurnKey && myTurnNow && !blocked) {
+          bbgShowTurnOverlay();
+        }
+        ui.lastTurnKey = turnKey;
+      } catch (eT0) {
+        // ignore
+      }
+
+      // 2) 自分あての通知モーダルが出た瞬間の効果音
+      try {
+        var pm0 = st && st.private && playerId && st.private[String(playerId)] ? st.private[String(playerId)] : null;
+        var pKind = pm0 ? String(pm0.type || '') : '';
+        var pKey = pm0 ? pKind + ':' + String(pm0.createdAt || '') : '';
+        if (ready && pKey && pKey !== ui.lastPrivKey) {
+          if (pKind === 'notice' || pKind === 'dog_not_culprit' || pKind === 'detective_alibi') {
+            // 「はずれ」スタンプ(0.55秒遅れ)に合わせて低い音を鳴らす。
+            bbgFx.miss();
+          } else if (pKind === 'boy' || pKind === 'witness') {
+            bbgFx.reveal();
+          } else {
+            bbgFx.notify();
+          }
+        }
+        ui.lastPrivKey = pKey;
+      } catch (eP0) {
+        // ignore
+      }
+
+      // 3) 新しいカードを受け取ったとき
+      try {
+        var newKey = ui.hnNewCardIndex >= 0 ? String(ui.hnHandKey || '') : '';
+        if (ready && newKey && newKey !== ui.lastNewCardKey) {
+          bbgFx.notify();
+        }
+        ui.lastNewCardKey = newKey;
+      } catch (eN0) {
+        // ignore
+      }
+
+      // 4) 決着の段階演出
+      try {
+        var res0 = st && st.result ? st.result : null;
+        var rKey = res0 && res0.decidedAt ? String(res0.decidedAt) : '';
+        if (ready && rKey && rKey !== ui.lastResultKey && hnShouldPlayResultCine(room)) {
+          hnShowResultCine(room, playerId, hnFxTimeout);
+        }
+        ui.lastResultKey = rKey;
+      } catch (eR0) {
+        // ignore
+      }
+
+      ui.fxReady = true;
+    }
+
+    // 使用ボタンから呼ぶ。出せない場合はトーストで理由を伝える（以前は無言だった）。
+    function tryPlayCard(cardIndex) {
       if (ui.inFlight) return;
       if (!lastRoom || !lastRoom.state) return;
       if (!canOperateThisDevice()) return;
@@ -6588,7 +7317,10 @@
       if ((st.pending && st.pending.type) || (st.waitFor && st.waitFor.type)) return;
 
       var turnPid = st.turn && st.turn.playerId ? String(st.turn.playerId) : '';
-      if (!turnPid || String(turnPid) !== String(playerId)) return;
+      if (!turnPid || String(turnPid) !== String(playerId)) {
+        bbgShowToast('いまはあなたの番ではありません');
+        return;
+      }
 
       var myHand = playerId && st.hands && Array.isArray(st.hands[playerId]) ? st.hands[playerId] : [];
       var idx = parseIntSafe(cardIndex, -1);
@@ -6597,114 +7329,43 @@
       var cardId = String(myHand[idx] || '');
 
       // Before start, only the first discoverer card can be used (no reaction otherwise).
-      if (!st.started && cardId !== 'first') return;
+      if (!st.started && cardId !== 'first') {
+        bbgShowToast('まだ出せません（最初は第一発見者から）');
+        return;
+      }
 
       // Detective can only be used from the 2nd round and later.
       if (cardId === 'detective' && st.started) {
         var tc = parseIntSafe(st.turnCount, -1);
         var order = Array.isArray(st.order) ? st.order : [];
         if (tc >= 0 && order && order.length && tc < order.length) {
-          ui.hnConfirm = { type: 'notice', title: '探偵', message: '探偵は二週目以降でしか使えません' };
-          renderNow(lastRoom);
+          bbgShowToast('探偵は2周目から使えます');
           return;
         }
+      }
+
+      // Culprit can only be played as the last card in hand.
+      if (cardId === 'culprit' && myHand.length > 1) {
+        bbgShowToast('犯人は最後の1枚のときだけ出せます');
+        return;
       }
 
       // Cards with choices: open modal instead of prompt.
       if (cardId === 'detective' || cardId === 'dog' || cardId === 'deal' || cardId === 'witness') {
         ui.hnAction = { type: 'play', cardIndex: idx, cardId: cardId, step: 'target', targetPid: '', targetIndex: -1, giveIndex: -1, takeIndex: -1 };
+        bbgFx.play();
         renderNow(lastRoom);
         return;
       }
 
       // Other cards: require confirm/cancel.
       ui.hnConfirm = { type: 'play', cardIndex: idx, cardId: cardId };
+      bbgFx.play();
       renderNow(lastRoom);
     }
 
-    function tryConfirmInfoByLongPress() {
-      if (ui.inFlight) return;
-      if (!lastRoom || !lastRoom.state) return;
-      if (!canOperateThisDevice()) return;
-      var st = lastRoom.state;
-      if (!st.pending || st.pending.type !== 'info') return;
-      if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return;
-
-      var idx = parseIntSafe(ui.hnInfoSelectedIndex, -1);
-      if (idx < 0) return;
-      ui.inFlight = true;
-      submitHanninInfoChoice(roomId, playerId, idx)
-        .catch(function (e) {
-          alert((e && e.message) || '失敗');
-        })
-        .finally(function () {
-          ui.inFlight = false;
-        });
-    }
-
-    function ackHanninPrivate(roomId, playerId) {
-      var base = hanninRoomPath(roomId);
-      return runTxn(base, function (room) {
-        if (!room || room.phase !== 'playing') return room;
-        var st = assign({}, room.state || {});
-        var pid = String(playerId || '');
-        if (!pid) return room;
-        if (!st.private || typeof st.private !== 'object') return room;
-        if (!st.private[pid]) return room;
-        var wf = st.waitFor && st.waitFor.type ? st.waitFor : null;
-        if (wf && String(wf.by || '') === String(pid)) {
-          var nextPrivateAll = {};
-          var keys = Object.keys(st.private || {});
-          for (var i = 0; i < keys.length; i++) {
-            var k = keys[i];
-            var m = st.private[k];
-            if (!m) continue;
-            if (wf.createdAt && m.createdAt && String(m.createdAt) === String(wf.createdAt)) continue;
-            nextPrivateAll[k] = m;
-          }
-          st.private = nextPrivateAll;
-          st.waitFor = null;
-
-          try {
-            var turnPid = String(st.turn && st.turn.playerId ? st.turn.playerId : '');
-            if (turnPid && String(turnPid) === String(pid)) {
-              var order = Array.isArray(st.order) ? st.order.slice() : [];
-              var hands = st.hands || {};
-              st.turn = hnNextTurnSkipEmpty(order, pid, hands);
-            }
-          } catch (eAdv) {
-            // ignore
-          }
-
-          return assign({}, room, { state: st });
-        }
-
-        var nextPrivate = assign({}, st.private);
-        delete nextPrivate[pid];
-        st.private = nextPrivate;
-        return assign({}, room, { state: st });
-      });
-    }
-
-    function tryConfirmRumorByLongPress() {
-      if (ui.inFlight) return;
-      if (!lastRoom || !lastRoom.state) return;
-      if (!canOperateThisDevice()) return;
-      var st = lastRoom.state;
-      if (!st.pending || st.pending.type !== 'rumor') return;
-      if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return;
-
-      var idx = parseIntSafe(ui.hnRumorSelectedIndex, -1);
-      if (idx < 0) return;
-      ui.inFlight = true;
-      submitHanninRumorChoice(roomId, playerId, idx)
-        .catch(function (e) {
-          alert((e && e.message) || '失敗');
-        })
-        .finally(function () {
-          ui.inFlight = false;
-        });
-    }
+    // NOTE: うわさ/情報操作の長押し確定は廃止（タップ→確認モーダルに一本化）したため、
+    // tryConfirmRumorByLongPress / tryConfirmInfoByLongPress は削除した。
 
     function maybeAutoAdvancePendingForTests(room) {
       // Disabled: test players are progressed from the table screen by clicking.
@@ -6776,6 +7437,7 @@
     firebaseReady()
       .then(function () {
         return subscribeHanninRoom(roomId, function (room) {
+          if (ui.cancelled) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -6834,12 +7496,23 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐに解除する。
+        if (ui.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
     window.addEventListener('popstate', function () {
+      ui.cancelled = true;
+      hnClearFxTimers();
       if (unsub) unsub();
       try {
         if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
@@ -6913,6 +7586,87 @@
       reason: String(reason || '')
     };
     return st;
+  }
+
+  // private(通知)のOK処理の中身。ackHanninPrivate と forceAdvanceHannin の両方から使う。
+  // force=true のときだけ waitFor.by の本人チェックをスキップする（ホストの代理進行用）。
+  function hnMakeAckPrivateTxn(playerId, force) {
+    return function (room) {
+      if (!room || room.phase !== 'playing') return room;
+      var st = assign({}, room.state || {});
+      var pid = String(playerId || '');
+      var wf = st.waitFor && st.waitFor.type ? st.waitFor : null;
+
+      function clearWaitPrivate(byPid) {
+        // この待機に対応する private をまとめて消す（createdAt が無い古いデータは全消し）。
+        if (!wf || !wf.createdAt) {
+          st.private = {};
+          return;
+        }
+        var nextAll = {};
+        var keys = Object.keys(st.private || {});
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          var m = st.private[k];
+          if (!m) continue;
+          if (m.createdAt && String(m.createdAt) === String(wf.createdAt)) continue;
+          nextAll[k] = m;
+        }
+        st.private = nextAll;
+      }
+
+      function advanceFrom(byPid) {
+        try {
+          var turnPid = String(st.turn && st.turn.playerId ? st.turn.playerId : '');
+          if (turnPid && String(turnPid) === String(byPid)) {
+            var order = Array.isArray(st.order) ? st.order.slice() : [];
+            var hands = st.hands || {};
+            st.turn = hnNextTurnSkipEmpty(order, byPid, hands);
+          }
+        } catch (eAdv) {
+          // ignore
+        }
+      }
+
+      if (force) {
+        // 代理進行：待機している本人が操作できない状態でも進める。
+        if (!wf) return room;
+        var byPid0 = String(wf.by || '');
+        if (!st.private || typeof st.private !== 'object') st.private = {};
+        clearWaitPrivate(byPid0);
+        st.waitFor = null;
+        advanceFrom(byPid0);
+        return assign({}, room, { state: st });
+      }
+
+      if (!pid) return room;
+      if (!st.private || typeof st.private !== 'object') return room;
+      if (!st.private[pid]) return room;
+
+      if (wf && String(wf.by || '') === String(pid)) {
+        clearWaitPrivate(pid);
+        st.waitFor = null;
+        advanceFrom(pid);
+        return assign({}, room, { state: st });
+      }
+
+      // 進行のゲートではない人のOK：自分の表示を消すだけ。
+      var nextPrivate = assign({}, st.private);
+      delete nextPrivate[pid];
+      st.private = nextPrivate;
+      return assign({}, room, { state: st });
+    };
+  }
+
+  function ackHanninPrivate(roomId, playerId) {
+    var base = hanninRoomPath(roomId);
+    return runTxn(base, hnMakeAckPrivateTxn(playerId, false));
+  }
+
+  // ホスト救済：待機中の本人が操作できなくなったとき、テーブル画面から代理で進める。
+  function forceAdvanceHannin(roomId) {
+    var base = hanninRoomPath(roomId);
+    return runTxn(base, hnMakeAckPrivateTxn('', true));
   }
 
   function playHanninCard(roomId, actorId, cardIndex, action) {
@@ -7708,7 +8462,12 @@
           peek: null,
           lastPlay: { by: startId, to: '', card: String(other0 || ''), at: serverNowMs(), text: lpText0 },
           reveal: { type: 'minister_overload', by: startId, had: '7', drew: String(other0 || '') },
-          waitFor: { type: 'minister_overload_ack', by: startId, pending: { type: 'minister_overload', pid: startId, other: String(other0 || '') } },
+          waitFor: {
+            type: 'minister_overload_ack',
+            by: startId,
+            createdAt: serverNowMs(),
+            pending: { type: 'minister_overload', pid: startId, other: String(other0 || '') }
+          },
           winners: []
         };
       }
@@ -7947,7 +8706,7 @@
 
           // Show guess + result to everyone, and wait for actor to proceed.
           round.reveal = { type: 'guard', by: actorId, target: t, guess: String(g), result: hit ? 'hit' : 'miss', protected: !!protectedHit };
-          round.waitFor = { type: 'guard_ack', by: actorId };
+          round.waitFor = { type: 'guard_ack', by: actorId, createdAt: serverNowMs() };
         } else {
           logText += '（対象なし）';
         }
@@ -7967,7 +8726,7 @@
             // Show arrow on table while waiting for ack.
             round.reveal = { type: 'clown', by: actorId, target: t2 };
             // Block turn advancement until the peeker acknowledges.
-            round.waitFor = { type: 'peek_ack', by: actorId };
+            round.waitFor = { type: 'peek_ack', by: actorId, createdAt: serverNowMs() };
           }
         } else {
           logText += '（対象なし）';
@@ -8002,7 +8761,7 @@
             }
             // Show both cards to everyone, and wait for actor to proceed.
             round.reveal = { type: 'knight', by: actorId, target: t3, byCard: aCard, targetCard: bCard };
-            round.waitFor = { type: 'knight_ack', by: actorId };
+            round.waitFor = { type: 'knight_ack', by: actorId, createdAt: serverNowMs() };
           }
         } else {
           logText += '（対象なし）';
@@ -8053,7 +8812,7 @@
 
             // Show discarded card (and drawn card if any), and wait for actor to proceed.
             round.reveal = { type: 'wizard_discard', by: actorId, target: t5, discarded: String(old || ''), drew: String(drawn || '') };
-            round.waitFor = { type: 'wizard_ack', by: actorId };
+            round.waitFor = { type: 'wizard_ack', by: actorId, createdAt: serverNowMs() };
           }
         } else {
           logText += '（対象なし）';
@@ -8076,7 +8835,7 @@
 
             // Show swapped cards and wait for actor to proceed.
             round.reveal = { type: 'general_swap', by: actorId, target: t6, byCard: a6, targetCard: b6 };
-            round.waitFor = { type: 'general_ack', by: actorId };
+            round.waitFor = { type: 'general_ack', by: actorId, createdAt: serverNowMs() };
           }
         } else {
           logText += '（対象なし）';
@@ -8147,7 +8906,7 @@
         // Showdown: reveal all hands, and wait for host to announce result.
         var hostId = llFindHostId(nextRoom) || String(round.currentPlayerId || '') || String(actorId || '');
         round.reveal = { type: 'showdown', hostId: hostId, hands: assign({}, round.hands || {}) };
-        round.waitFor = { type: 'showdown_ack', by: hostId };
+        round.waitFor = { type: 'showdown_ack', by: hostId, createdAt: serverNowMs() };
         nextRoom.round = round;
         nextRoom.log = llAppendLog(nextRoom, '山札切れ：全員公開');
         return nextRoom;
@@ -8193,7 +8952,7 @@
             }
 
             round.reveal = { type: 'minister_overload', by: overPid, had: '7', drew: String(other || '') };
-            round.waitFor = { type: 'minister_overload_ack', by: overPid, pending: { type: 'minister_overload', pid: overPid, other: String(other || '') } };
+            round.waitFor = { type: 'minister_overload_ack', by: overPid, createdAt: serverNowMs(), pending: { type: 'minister_overload', pid: overPid, other: String(other || '') } };
             nextRoom.round = round;
             return nextRoom;
           }
@@ -8206,16 +8965,18 @@
     });
   }
 
-  function ackLoveLetter(roomId, playerId) {
-    var base = loveletterRoomPath(roomId);
-    return runTxn(base, function (room) {
+  // ack の中身（waitFor/reveal/peek のクリア → 終了判定 → ターン送り）を作る。
+  // ackLoveLetter と forceAdvanceLoveLetter の両方から使う共通トランザクション。
+  // force=true のときだけ waitFor.by の本人チェックをスキップする（ホストの代理進行用）。
+  function llMakeAckTxn(playerId, force) {
+    return function (room) {
       if (!room) return room;
       if (room.phase !== 'playing') return room;
       var round = room.round || null;
       if (!round || round.state !== 'playing') return room;
       var wf = round.waitFor || null;
       if (!wf || !wf.type) return room;
-      if (String(wf.by || '') !== String(playerId || '')) return room;
+      if (!force && String(wf.by || '') !== String(playerId || '')) return room;
       var wfType = String(wf.type || '');
 
       // Clear waiting state
@@ -8365,7 +9126,7 @@
         if (deckLeft0 === 0) {
           var hostId0 = llFindHostId(nextRoom) || String(round.currentPlayerId || '') || String(playerId || '');
           round.reveal = { type: 'showdown', hostId: hostId0, hands: assign({}, round.hands || {}) };
-          round.waitFor = { type: 'showdown_ack', by: hostId0 };
+          round.waitFor = { type: 'showdown_ack', by: hostId0, createdAt: serverNowMs() };
           nextRoom.round = round;
           nextRoom.log = llAppendLog(nextRoom, '山札切れ：全員公開');
           return nextRoom;
@@ -8404,7 +9165,7 @@
               var otherN = x0 === '7' ? y0 : x0;
               round.hands[nxt0.id] = ['7', otherN].filter(Boolean);
               round.reveal = { type: 'minister_overload', by: nxt0.id, had: '7', drew: String(otherN || '') };
-              round.waitFor = { type: 'minister_overload_ack', by: nxt0.id, pending: { type: 'minister_overload', pid: nxt0.id, other: String(otherN || '') } };
+              round.waitFor = { type: 'minister_overload_ack', by: nxt0.id, createdAt: serverNowMs(), pending: { type: 'minister_overload', pid: nxt0.id, other: String(otherN || '') } };
               nextRoom.round = round;
               return nextRoom;
             }
@@ -8448,7 +9209,7 @@
         }
         var hostId = llFindHostId(nextRoom) || String(round.currentPlayerId || '') || String(playerId || '');
         round.reveal = { type: 'showdown', hostId: hostId, hands: assign({}, round.hands || {}) };
-        round.waitFor = { type: 'showdown_ack', by: hostId };
+        round.waitFor = { type: 'showdown_ack', by: hostId, createdAt: serverNowMs() };
         nextRoom.round = round;
         nextRoom.log = llAppendLog(nextRoom, '山札切れ：全員公開');
         return nextRoom;
@@ -8588,7 +9349,19 @@
 
       nextRoom.round = round;
       return nextRoom;
-    });
+    };
+  }
+
+  function ackLoveLetter(roomId, playerId) {
+    var base = loveletterRoomPath(roomId);
+    return runTxn(base, llMakeAckTxn(playerId, false));
+  }
+
+  // ホスト救済：待機中の本人が操作できなくなった（アプリを閉じた等）ときに、
+  // テーブル画面から代理で waitFor を解除してターンを進める。
+  function forceAdvanceLoveLetter(roomId) {
+    var base = loveletterRoomPath(roomId);
+    return runTxn(base, llMakeAckTxn('', true));
   }
 
   function resetLoveLetterToLobby(roomId, playerId) {
@@ -11425,6 +12198,13 @@
     }
 
     renderHome(viewEl);
+
+    // 開発者用: 自動プレイデモへの小さな入口
+    try {
+      demoInstallHomeEntry(viewEl);
+    } catch (eDemoEntry) {
+      // ignore
+    }
 
     var btnJoin = document.getElementById('homeCreateJoin');
     var btnGm = document.getElementById('homeCreateGm');
@@ -15639,12 +16419,13 @@
     var pilesText = '山札 ' + String(deckLeft) + ' / 墓地 ' + String(graveCount);
     var pilesHtml =
       '<div class="ll-piles-box">' +
-      '<div class="ll-piles-text">' +
+      '<div class="ll-piles-text' + (phase === 'playing' && deckLeft <= 3 ? ' ll-deck-low' : '') + '">' +
       escapeHtml(pilesText) +
       '</div>' +
       (graveLatest
         ? '<img class="ll-piles-icon" alt="grave" src="' + escapeHtml((llCardDef(graveLatest) || {}).icon || '') + '" />'
         : '') +
+      bbgFxToggleHtml() +
       '</div>';
 
     function llCardImgHtml(rank) {
@@ -15665,6 +16446,32 @@
         // ignore
       }
       return '<img class="ll-card-img" draggable="false" alt="裏面" src="' + escapeHtml(backIcon) + '" />';
+    }
+
+    // 裏面→表面のフリップ表示。wrapCls には .ll-reveal-card 等のサイズ用クラスを渡す。
+    function llFlipCardHtml(rank, wrapCls, delay) {
+      return (
+        '<div class="' + escapeHtml(String(wrapCls || '')) + ' bbg-flip' + (delay ? ' bbg-flip--delay' : '') + '">' +
+        '<div class="bbg-flip-inner">' +
+        '<div class="bbg-flip-face bbg-flip-back">' + llCardBackImgHtml() + '</div>' +
+        '<div class="bbg-flip-face bbg-flip-front">' + llCardImgHtml(rank) + '</div>' +
+        '</div>' +
+        '</div>'
+      );
+    }
+
+    // 誰も操作できない時間に「いま何を待っているか」を出す共通の待機モーダル。
+    function llWaitModalHtml(title, text) {
+      return (
+        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+        '<div class="ll-overlay-backdrop"></div>' +
+        '<div class="ll-overlay-panel">' +
+        '<div class="big">' + escapeHtml(String(title || '')) + '</div>' +
+        '<div class="muted">' + escapeHtml(String(text || '')) + '</div>' +
+        '<div class="muted center" style="margin-top:10px">（処理が終わるまでお待ちください）' + bbgWaitDotsHtml() + '</div>' +
+        '</div>' +
+        '</div>'
+      );
     }
 
     // Winners (single game)
@@ -15734,31 +16541,149 @@
       }
     }
 
+    // 直近のプレイ（待機中でも手元で状況が分かるようにする）
+    var lastPlayHtml = '';
+    try {
+      var lp0 = r && r.lastPlay ? r.lastPlay : null;
+      var lpBy0 = lp0 && lp0.by ? String(lp0.by) : '';
+      var lpCard0 = lp0 && lp0.card ? String(lp0.card) : '';
+      if (phase === 'playing' && lpBy0 && lpCard0) {
+        var lpText0 = lp0 && lp0.text ? String(lp0.text) : '';
+        if (!lpText0) {
+          var lpDef0 = llCardDef(lpCard0);
+          var lpTo0 = lp0 && lp0.to ? String(lp0.to) : '';
+          var lpLabel0 = String((lpDef0 && lpDef0.name) || '-') + '(' + String((lpDef0 && lpDef0.rank) || llCardRankStr(lpCard0) || '-') + ')';
+          var lpByName0 = ps[lpBy0] ? formatPlayerDisplayName(ps[lpBy0]) : lpBy0;
+          var lpToName0 = lpTo0 ? (ps[lpTo0] ? formatPlayerDisplayName(ps[lpTo0]) : lpTo0) : '';
+          lpText0 = lpToName0 ? lpByName0 + ' が ' + lpToName0 + ' へ ' + lpLabel0 + ' を使用。' : lpByName0 + ' が ' + lpLabel0 + ' を使用。';
+        }
+        // ワンショット：内容が変わった再描画のときだけ出現アニメを付ける。
+        var lpKey0 = lpBy0 + '|' + lpCard0 + '|' + String((lp0 && lp0.at) || '') + '|' + String(graveCount);
+        var lpAnim0 = !!(ui.lastPlayKey && ui.lastPlayKey !== lpKey0);
+        ui.lastPlayKey = lpKey0;
+        var lpIcon0 = (llCardDef(lpCard0) || {}).icon || '';
+        lastPlayHtml =
+          '<div class="ll-lastplay' + (lpAnim0 ? ' bbg-banner-in' : '') + '" aria-live="polite">' +
+          (lpIcon0 ? '<img class="ll-lastplay-icon" alt="" src="' + escapeHtml(lpIcon0) + '" />' : '') +
+          '<div class="ll-lastplay-text">' + escapeHtml(lpText0) + '</div>' +
+          '</div>';
+      } else {
+        // 'none' を入れておくと、次に最初のプレイが来たときにアニメが出る（初期値''のときは出ない）。
+        ui.lastPlayKey = 'none';
+      }
+    } catch (eLP0) {
+      lastPlayHtml = '';
+    }
+
     // Hand (always show your card while waiting)
     var handHtml = '';
     if (phase === 'playing' && !myElim && Array.isArray(myHand) && myHand.length) {
-      var frontIdx = parseIntSafe(ui.handFrontIndex, 0);
-      if (!(frontIdx === 0 || frontIdx === 1)) frontIdx = myHand.length >= 2 ? 1 : 0;
-      if (myHand.length < 2) frontIdx = 0;
-      var backIdx = myHand.length >= 2 ? (frontIdx === 0 ? 1 : 0) : -1;
-      var frontRank = myHand[frontIdx] ? String(myHand[frontIdx]) : '';
-      var backRank = backIdx >= 0 && myHand[backIdx] ? String(myHand[backIdx]) : '';
       var must7 = llMustPlayCountess(myHand);
+      var handCount = myHand.length;
+
+      // 新しく引いたカードにだけ出現アニメを付ける（ワンショット）。
+      // 手札が変わったら選択もリセットする（前のターンの選択が残らないように）。
+      var newCardIdx = -1;
+      try {
+        var handKey0 = String(handCount) + '|' + myHand.join(',');
+        if (ui.handKey !== handKey0) {
+          var prevHand0 = Array.isArray(ui.prevHand) ? ui.prevHand : [];
+          if (ui.handKey && handCount >= 2 && prevHand0.length === 1) {
+            // 通常は後ろに積まれるのでindex1が新カード。順序が入れ替わる場合だけindex0にする。
+            newCardIdx = 1;
+            if (String(myHand[1] || '') === String(prevHand0[0] || '') && String(myHand[0] || '') !== String(prevHand0[0] || '')) {
+              newCardIdx = 0;
+            }
+          }
+          ui.handKey = handKey0;
+          ui.prevHand = myHand.slice();
+          ui.selIndex = null;
+        }
+      } catch (eHK0) {
+        newCardIdx = -1;
+      }
+
+      // 選択インデックス（ui.selIndex）。1枚しかないときは常にそれを選択扱いにする。
+      var selIdx = -1;
+      if (handCount <= 1) {
+        selIdx = 0;
+      } else {
+        if (ui.selIndex === 0 || ui.selIndex === 1) selIdx = ui.selIndex;
+        // 女侯爵の強制がある場合は、初期表示で 7:countess を選んでおく。
+        if (selIdx < 0 && must7) {
+          for (var mi0 = 0; mi0 < handCount; mi0++) {
+            if (String(myHand[mi0] || '') === '7:countess') {
+              selIdx = mi0;
+              break;
+            }
+          }
+        }
+      }
+
+      var cardsHtml = '';
+      for (var hi1 = 0; hi1 < handCount && hi1 < 2; hi1++) {
+        var rank1 = String(myHand[hi1] || '');
+        cardsHtml +=
+          '<div class="ll-card2' +
+          (handCount <= 1 ? ' ll-card2--only' : '') +
+          (hi1 === selIdx && handCount >= 2 ? ' ll-card2--sel' : '') +
+          (hi1 === newCardIdx ? ' bbg-slidein' : '') +
+          '" data-idx="' +
+          escapeHtml(String(hi1)) +
+          '" data-rank="' +
+          escapeHtml(rank1) +
+          '">' +
+          llCardImgHtml(rank1) +
+          '</div>';
+      }
+
+      // 選択中カードの名前+効果テキスト
+      var infoHtml = '';
+      if (selIdx >= 0 && myHand[selIdx]) {
+        var selDef1 = llCardDef(String(myHand[selIdx]));
+        infoHtml =
+          '<div class="ll-card-info">' +
+          '<div class="ll-card-info-name">' + escapeHtml(String(selDef1.name || '-') + '(' + String(selDef1.rank || '-') + ')') + '</div>' +
+          '<div class="ll-card-info-desc muted">' + escapeHtml(String(selDef1.desc || '')) + '</div>' +
+          '</div>';
+      } else {
+        infoHtml = '<div class="ll-card-info"><div class="ll-card-info-empty muted">カードをタップすると効果が見られます</div></div>';
+      }
+
+      // 使用ボタン（自分の番のみ表示。押せない理由は注記で伝える）
+      var useHtml = '';
+      if (isMyTurn) {
+        var useLabel1 = 'このカードを使う';
+        var useDisabled1 = false;
+        var useNote1 = '';
+        var selCard1 = selIdx >= 0 ? String(myHand[selIdx] || '') : '';
+        if (!selCard1) {
+          useDisabled1 = true;
+          useLabel1 = 'カードをえらんでください';
+        } else if (selCard1 === '8') {
+          useDisabled1 = true;
+          useNote1 = '姫は捨てられません（捨てたら脱落）';
+        } else if (must7 && selCard1 !== '7:countess') {
+          useDisabled1 = true;
+          useNote1 = '女侯爵(7)を必ず使用します';
+        }
+        useHtml =
+          '<button type="button" id="llUseBtn" class="primary bbg-start-btn"' +
+          (useDisabled1 ? ' disabled' : '') +
+          '>' +
+          escapeHtml(useLabel1) +
+          '</button>' +
+          (useNote1 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote1) + '</div>' : '');
+      }
 
       handHtml =
         '<div class="ll-hand-wrap">' +
-        '<div class="ll-hand" id="llHand" data-frontidx="' + escapeHtml(String(frontIdx)) + '">' +
-        (backRank
-          ? '<div class="ll-card ll-card-back" id="llCardBack" data-rank="' + escapeHtml(backRank) + '">' + llCardImgHtml(backRank) + '</div>'
-          : '') +
-        '<div class="ll-card ll-card-front" id="llCardFront" data-rank="' + escapeHtml(frontRank) + '">' +
-        llCardImgHtml(frontRank) +
+        '<div class="ll-hand2" id="llHand2">' +
+        cardsHtml +
         '</div>' +
-        '</div>' +
-        (isMyTurn
-          ? '<div class="muted center ll-hint">タップで前後切替 / 長押しで使用</div>'
-          : '<div class="muted center ll-hint">あなたの手札</div>') +
-        (isMyTurn && must7 ? '<div class="muted center">※ 女侯爵(7)を必ず使用（合計12以上）</div>' : '') +
+        infoHtml +
+        useHtml +
+        (isMyTurn ? '' : '<div class="muted center ll-hint">あなたの手札</div>') +
         '</div>';
     }
 
@@ -15861,7 +16786,7 @@
         '<div class="ll-overlay-panel">' +
         '<div class="big">道化：確認</div>' +
         '<div class="ll-modal-name">' + escapeHtml(String(m.targetName || '')) + '</div>' +
-        '<div class="ll-reveal-card">' + llCardImgHtml(String(m.rank || '')) + '</div>' +
+        llFlipCardHtml(String(m.rank || ''), 'll-reveal-card', false) +
         '<div class="row" style="justify-content:flex-end">' +
         '<button id="llAck" class="primary">OK</button>' +
         '</div>' +
@@ -15870,17 +16795,7 @@
     } else if (!ui.ackInFlight && ui && ui.modal && ui.modal.type === 'peek_wait') {
       // Show to other players while someone is peeking.
       var mw = ui.modal;
-      modalHtml =
-        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
-        '<div class="ll-overlay-backdrop"></div>' +
-        '<div class="ll-overlay-panel">' +
-        '<div class="big">道化：確認中</div>' +
-        '<div class="muted">' +
-        escapeHtml(String(mw.byName || '') + ' が ' + String(mw.targetName || '') + ' の手札を確認中') +
-        '</div>' +
-        '<div class="muted center" style="margin-top:10px">（処理が終わるまでお待ちください）</div>' +
-        '</div>' +
-        '</div>';
+      modalHtml = llWaitModalHtml('道化：確認中', String(mw.byName || '') + ' が ' + String(mw.targetName || '') + ' の手札を確認中');
     }
 
     // Reveal modal (兵士/騎士/将軍交換/大臣オーバー/全員公開)
@@ -15893,8 +16808,12 @@
         var tgName0 = ps[tg0] ? formatPlayerDisplayName(ps[tg0]) : tg0;
         var guess0 = String(rv.guess || '');
         var res0 = String(rv.result || '');
-        var resText0 = res0 === 'hit' ? '該当（脱落）' : res0 === 'miss' ? '非該当' : '不明';
-        if (rv.protected) resText0 = '無効（保護中）';
+        var resText0 = res0 === 'hit' ? '的中！脱落' : res0 === 'miss' ? 'はずれ' : '不明';
+        var resCls0 = res0 === 'hit' ? ' bbg-stamp--hit' : ' bbg-stamp--miss';
+        if (rv.protected) {
+          resText0 = '無効（保護中）';
+          resCls0 = ' bbg-stamp--miss';
+        }
         modalHtml =
           '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
           '<div class="ll-overlay-backdrop"></div>' +
@@ -15902,7 +16821,8 @@
           '<div class="big">兵士：推測結果</div>' +
           '<div class="muted">' + escapeHtml(byName0 + ' → ' + tgName0) + '</div>' +
           '<div class="ll-reveal-card">' + llCardImgHtml(guess0) + '</div>' +
-          '<div class="big center">' + escapeHtml(resText0) + '</div>' +
+          // 結果は0.55秒遅れで出す（CSSのanimation-delay）ので「ため」ができる。
+          '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay' + resCls0 + '">' + escapeHtml(resText0) + '</span></div>' +
           '<div class="row" style="justify-content:flex-end">' +
           (String(playerId) === by0 ? '<button id="llAck" class="primary">次へ</button>' : '<div class="muted">' + escapeHtml(byName0) + ' が進めます</div>') +
           '</div>' +
@@ -15917,44 +16837,47 @@
         if (rv.type === 'knight') {
           // Only the two involved players see the compared cards; others see a minimal "in progress" message.
           if (String(playerId) === by || String(playerId) === tg) {
+            // 数字の小さい方が脱落。負けた側のカードを揺らして結果スタンプを遅れて出す。
+            var kAv = llCardRank(String(rv.byCard || ''));
+            var kBv = llCardRank(String(rv.targetCard || ''));
+            var kLoser = '';
+            if (kAv && kBv && kAv !== kBv) kLoser = kAv < kBv ? by : tg;
+            var kStamp = '';
+            if (kLoser) {
+              kStamp =
+                '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay bbg-stamp--hit">' +
+                escapeHtml((kLoser === by ? byName : tgName) + ' の脱落') +
+                '</span></div>';
+            } else {
+              kStamp = '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay bbg-stamp--miss">引き分け</span></div>';
+            }
             modalHtml =
               '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
               '<div class="ll-overlay-backdrop"></div>' +
               '<div class="ll-overlay-panel">' +
               '<div class="big">騎士：比較結果</div>' +
               '<div class="ll-compare-row">' +
-              '<div class="ll-compare-col">' +
+              '<div class="ll-compare-col' + (kLoser === by ? ' bbg-shake bbg-shake--delay' : '') + '">' +
               '<div class="ll-modal-name">' +
               escapeHtml(byName) +
               '</div>' +
-              '<div class="ll-compare-card">' +
-              llCardImgHtml(String(rv.byCard || '')) +
+              llFlipCardHtml(String(rv.byCard || ''), 'll-compare-card', false) +
               '</div>' +
-              '</div>' +
-              '<div class="ll-compare-col">' +
+              '<div class="ll-compare-col' + (kLoser === tg ? ' bbg-shake bbg-shake--delay' : '') + '">' +
               '<div class="ll-modal-name">' +
               escapeHtml(tgName) +
               '</div>' +
-              '<div class="ll-compare-card">' +
-              llCardImgHtml(String(rv.targetCard || '')) +
+              llFlipCardHtml(String(rv.targetCard || ''), 'll-compare-card', false) +
               '</div>' +
               '</div>' +
-              '</div>' +
+              kStamp +
               '<div class="row" style="justify-content:flex-end">' +
               (String(playerId) === by ? '<button id="llAck" class="primary">次へ</button>' : '') +
               '</div>' +
               '</div>' +
               '</div>';
           } else {
-            modalHtml =
-              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
-              '<div class="ll-overlay-backdrop"></div>' +
-              '<div class="ll-overlay-panel">' +
-              '<div class="big">騎士：勝負中</div>' +
-              '<div class="muted">' + escapeHtml(byName + ' が ' + tgName + ' と勝負中') + '</div>' +
-              '<div class="muted center" style="margin-top:10px">（処理が終わるまでお待ちください）</div>' +
-              '</div>' +
-              '</div>';
+            modalHtml = llWaitModalHtml('騎士：勝負中', byName + ' が ' + tgName + ' と勝負中');
           }
         } else {
           // General swap stays private to the two involved players.
@@ -15969,34 +16892,36 @@
               '<div class="ll-modal-name">' +
               escapeHtml(byName) +
               '</div>' +
-              '<div class="ll-compare-card">' +
-              llCardImgHtml(String(rv.byCard || '')) +
+              llFlipCardHtml(String(rv.byCard || ''), 'll-compare-card', false) +
               '</div>' +
-              '</div>' +
+              '<div class="ll-swap-mark" aria-hidden="true">⇄</div>' +
               '<div class="ll-compare-col">' +
               '<div class="ll-modal-name">' +
               escapeHtml(tgName) +
               '</div>' +
-              '<div class="ll-compare-card">' +
-              llCardImgHtml(String(rv.targetCard || '')) +
+              llFlipCardHtml(String(rv.targetCard || ''), 'll-compare-card', false) +
               '</div>' +
               '</div>' +
-              '</div>' +
+              '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay bbg-stamp--ok">交換しました</span></div>' +
               '<div class="row" style="justify-content:flex-end">' +
               (String(playerId) === by ? '<button id="llAck" class="primary">次へ</button>' : '') +
               '</div>' +
               '</div>' +
               '</div>';
+          } else {
+            // 非当事者にも「いま何を待っているか」を出す（無表示の時間を無くす）。
+            modalHtml = llWaitModalHtml('将軍：手札交換中', byName + ' が ' + tgName + ' と手札を交換中');
           }
         }
       } else if (rv.type === 'minister_overload') {
         var by2 = String(rv.by || '');
+        var by2Name = ps[by2] ? formatPlayerDisplayName(ps[by2]) : by2;
+        var drew2 = String(rv.drew || '');
         if (String(playerId) === by2) {
-          var drew2 = String(rv.drew || '');
           modalHtml =
             '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
             '<div class="ll-overlay-backdrop"></div>' +
-            '<div class="ll-overlay-panel">' +
+            '<div class="ll-overlay-panel bbg-shake">' +
             '<div class="big">大臣：合計12以上</div>' +
             '<div class="ll-compare-row">' +
             '<div class="ll-compare-col">' +
@@ -16008,11 +16933,38 @@
             '<div class="ll-compare-card">' + (drew2 ? llCardImgHtml(drew2) : llCardBackImgHtml()) + '</div>' +
             '</div>' +
             '</div>' +
+            '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay bbg-stamp--hit">脱落</span></div>' +
             '<div class="row" style="justify-content:flex-end">' +
             '<button id="llAck" class="primary">脱落</button>' +
             '</div>' +
             '</div>' +
             '</div>';
+        } else {
+          // 本人以外にも何が起きたかを伝える（OKはローカルで閉じるだけ。進行のゲートは本人のackのみ）。
+          var mKey2 = 'minister:' + by2 + ':' + drew2;
+          if (String(ui.dismissedRevealKey || '') !== mKey2) {
+            modalHtml =
+              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+              '<div class="ll-overlay-backdrop"></div>' +
+              '<div class="ll-overlay-panel">' +
+              '<div class="big">大臣：合計12以上</div>' +
+              '<div class="muted">' + escapeHtml(by2Name + ' は大臣の効果で脱落しました（手札の合計が12以上）。') + '</div>' +
+              '<div class="ll-compare-row">' +
+              '<div class="ll-compare-col">' +
+              '<div class="ll-modal-name">手札</div>' +
+              '<div class="ll-compare-card">' + llCardImgHtml(String(rv.had || '7')) + '</div>' +
+              '</div>' +
+              '<div class="ll-compare-col">' +
+              '<div class="ll-modal-name">引いたカード</div>' +
+              '<div class="ll-compare-card">' + (drew2 ? llCardImgHtml(drew2) : llCardBackImgHtml()) + '</div>' +
+              '</div>' +
+              '</div>' +
+              '<div class="row" style="justify-content:flex-end">' +
+              '<button type="button" id="llRevealDismiss" class="primary" data-key="' + escapeHtml(mKey2) + '">OK</button>' +
+              '</div>' +
+              '</div>' +
+              '</div>';
+          }
         }
       } else if (rv.type === 'showdown') {
         var hostId = String(rv.hostId || '');
@@ -16025,8 +16977,10 @@
           var h = handsMap && handsMap[pid3] && Array.isArray(handsMap[pid3]) ? handsMap[pid3] : (r.hands && Array.isArray(r.hands[pid3]) ? r.hands[pid3] : []);
           if (!h || !h.length) continue;
           var nm = ps[pid3] ? formatPlayerDisplayName(ps[pid3]) : String(pid3);
+          // 1枚ずつ順番にポップさせる（最大0.24秒までの遅延）。
+          var sdDelay = sdi >= 3 ? ' bbg-delay3' : sdi === 2 ? ' bbg-delay2' : sdi === 1 ? ' bbg-delay1' : '';
           grid +=
-            '<div class="ll-showdown-item">' +
+            '<div class="ll-showdown-item bbg-pop' + sdDelay + '">' +
             '<div class="ll-modal-name">' + escapeHtml(nm) + '</div>' +
             '<div class="ll-showdown-card">' + llCardImgHtml(String(h[0] || '')) + '</div>' +
             '</div>';
@@ -16046,9 +17000,11 @@
           '</div>';
       } else if (rv.type === 'wizard_discard') {
         var by3 = String(rv.by || '');
-        if (String(playerId) === by3) {
-          var tId = String(rv.target || '');
-          var tName = ps[tId] ? formatPlayerDisplayName(ps[tId]) : tId;
+        var tId = String(rv.target || '');
+        var by3Name = ps[by3] ? formatPlayerDisplayName(ps[by3]) : by3;
+        var tName = ps[tId] ? formatPlayerDisplayName(ps[tId]) : tId;
+        if (String(playerId) === by3 || String(playerId) === tId) {
+          // 捨て札は公開情報なので、対象者本人にも同じ内容を見せる（進めるのは使用者のみ）。
           var discarded = String(rv.discarded || '');
           modalHtml =
             '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
@@ -16060,9 +17016,7 @@
             '<div class="ll-compare-row">' +
             '<div class="ll-compare-col">' +
             '<div class="ll-modal-name">捨て札</div>' +
-            '<div class="ll-compare-card">' +
-            llCardImgHtml(discarded) +
-            '</div>' +
+            llFlipCardHtml(discarded, 'll-compare-card', false) +
             '</div>' +
             '<div class="ll-compare-col">' +
             '<div class="ll-modal-name">引いたカード</div>' +
@@ -16072,10 +17026,15 @@
             '</div>' +
             '</div>' +
             '<div class="row" style="justify-content:flex-end">' +
-            '<button id="llAck" class="primary">次へ</button>' +
+            (String(playerId) === by3
+              ? '<button id="llAck" class="primary">次へ</button>'
+              : '<div class="muted">' + escapeHtml(by3Name) + ' が進めます</div>') +
             '</div>' +
             '</div>' +
             '</div>';
+        } else {
+          // 非当事者にも進行状況を出す（無表示の時間を無くす）。
+          modalHtml = llWaitModalHtml('魔術師：処理中', by3Name + ' が ' + tName + ' の手札を捨てさせています');
         }
       }
     }
@@ -16090,6 +17049,8 @@
         '\n\n      <div class="card ll-status-card" style="padding:10px">\n        <div class="ll-topline">\n          <div class="ll-status">' +
         escapeHtml(statusText || '') +
         '</div>\n        </div>\n      </div>\n\n      ' +
+        (lastPlayHtml || '') +
+        '\n\n      ' +
         (resultHtml || '') +
         '\n\n      ' +
         (spectateHtml || '') +
@@ -16358,6 +17319,19 @@
 
   function routeLoveLetterHost(roomId) {
     var unsub = null;
+    // setQuery() は pushState なので popstate が起きない。画面遷移時に購読を残すと
+    // この画面の描画が新しい画面を上書きし続けるため、遷移時に自分で解除する。
+    var hostStopped = false;
+    function stopHostWatch() {
+      hostStopped = true;
+      try {
+        if (unsub) unsub();
+      } catch (eSt) {
+        // ignore
+      }
+      unsub = null;
+    }
+
     var joinUrl = makeLoveLetterJoinUrl(roomId);
     var hostPlayerId = getOrCreateLoveLetterPlayerId(roomId);
 
@@ -16495,6 +17469,7 @@
           q.host = '1';
           q.player = '1';
           q.screen = 'loveletter_extras';
+          stopHostWatch();
           setQuery(q);
           route();
         });
@@ -16504,6 +17479,7 @@
     firebaseReady()
       .then(function () {
         return subscribeLoveLetterRoom(roomId, function (room) {
+          if (hostStopped) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -16515,18 +17491,33 @@
       })
       .then(function (u) {
         unsub = u;
+        if (hostStopped) stopHostWatch();
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
     window.addEventListener('popstate', function () {
-      if (unsub) unsub();
+      stopHostWatch();
     });
   }
 
   function routeLoveLetterExtras(roomId, isHost) {
     var unsub = null;
+    // setQuery() は pushState なので popstate が発生せず、購読が解除されないまま残る。
+    // この画面は購読コールバックの中から自動で画面遷移するため、解除しないと
+    // 更新のたびに route() が呼ばれ、プレイヤー画面の購読が増殖してしまう（演出も多重発火する）。
+    var extrasStopped = false;
+    function stopExtrasWatch() {
+      extrasStopped = true;
+      try {
+        if (unsub) unsub();
+      } catch (eSt) {
+        // ignore
+      }
+      unsub = null;
+    }
+
     var playerId = getOrCreateLoveLetterPlayerId(roomId);
     var isTableGm = false;
     try {
@@ -16596,6 +17587,7 @@
       .then(function () {
         if (lobbyId) ensureLobbyReturnWatcher();
         return subscribeLoveLetterRoom(roomId, function (room) {
+          if (extrasStopped) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -16617,6 +17609,7 @@
               // ignore
             }
             qx.screen = 'loveletter_player';
+            stopExtrasWatch();
             setQuery(qx);
             route();
             return;
@@ -16638,6 +17631,7 @@
             }
             if (!isTableGm) qy.player = '1';
             qy.screen = isTableGm ? 'loveletter_table' : 'loveletter_player';
+            stopExtrasWatch();
             setQuery(qy);
             route();
             return;
@@ -16727,6 +17721,7 @@
                   }
                   if (!isTableGm) qz.player = '1';
                   qz.screen = isTableGm ? 'loveletter_table' : 'loveletter_player';
+                  stopExtrasWatch();
                   setQuery(qz);
                   route();
                 })
@@ -16740,13 +17735,15 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐ解除する。
+        if (extrasStopped) stopExtrasWatch();
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
     window.addEventListener('popstate', function () {
-      if (unsub) unsub();
+      stopExtrasWatch();
     });
   }
 
@@ -16761,8 +17758,55 @@
 
     var playerId = getOrCreateLoveLetterPlayerId(roomId);
     var unsub = null;
-    var ui = { pending: null, modal: null, handFrontIndex: 1, peekDismissedKey: '', ackInFlight: false, modalScrollTop: 0, cancelled: false };
+    var ui = {
+      pending: null,
+      modal: null,
+      selIndex: null,
+      peekDismissedKey: '',
+      dismissedRevealKey: '',
+      ackInFlight: false,
+      modalScrollTop: 0,
+      cancelled: false,
+      // 演出のワンショット管理（fxReady=false の間はキー記録のみで演出しない）
+      fxReady: false,
+      lastTurnKey: '',
+      lastModalFxKey: '',
+      lastFinishKey: '',
+      lastPlayKey: '',
+      handKey: '',
+      prevHand: null
+    };
     var lastRoom = null;
+
+    // 演出用タイマー（購読解除時にまとめてclearする）
+    var fxTimers = [];
+
+    function llFxTimeout(fn, ms) {
+      var id = setTimeout(function () {
+        for (var i = 0; i < fxTimers.length; i++) {
+          if (fxTimers[i] === id) {
+            fxTimers.splice(i, 1);
+            break;
+          }
+        }
+        try {
+          fn();
+        } catch (e) {
+          // ignore
+        }
+      }, ms);
+      fxTimers.push(id);
+      return id;
+    }
+
+    function llClearFxTimers() {
+      try {
+        for (var i = 0; i < fxTimers.length; i++) clearTimeout(fxTimers[i]);
+      } catch (e) {
+        // ignore
+      }
+      fxTimers = [];
+    }
 
     var lobbyId = '';
     try {
@@ -16778,6 +17822,7 @@
     function redirectToLobby() {
       if (!lobbyId) return;
       ui.cancelled = true;
+      llClearFxTimers();
       try {
         if (unsub) unsub();
       } catch (eU0) {
@@ -16834,7 +17879,9 @@
         if (!r || !r.peek) return null;
         var pk = r.peek;
         if (String(pk.to || '') !== String(playerId || '')) return null;
-        if (!pk.until || serverNowMs() > pk.until) return null;
+        // NOTE: 以前は until 超過でモーダルを消していたが、確認者本人のOKボタンまで
+        // 消えてしまい round.waitFor が解除できずソフトロックしていた。
+        // 本人側は期限で消さない（他プレイヤーの待機表示は computePeekWaitModal 側で期限切れにする）。
         var key = String(pk.to || '') + '|' + String(pk.until || '') + '|' + String(pk.target || '') + '|' + String(pk.card || '');
         if (ui.peekDismissedKey && ui.peekDismissedKey === key) return null;
         var ps = room && room.players ? room.players : {};
@@ -16861,6 +17908,211 @@
       } catch (e) {
         return null;
       }
+    }
+
+    // 勝敗の全画面演出。1.6秒で自動的に消える。pointer-events:none でタップは奪わない。
+    function llShowResultCine(text) {
+      try {
+        var old = document.getElementById('llCine');
+        if (old && old.parentNode) old.parentNode.removeChild(old);
+        var el = document.createElement('div');
+        el.className = 'bbg-cine';
+        el.id = 'llCine';
+        el.setAttribute('aria-hidden', 'true');
+        try {
+          el.style.pointerEvents = 'none';
+        } catch (eS) {
+          // ignore
+        }
+        el.innerHTML = '<div class="bbg-cine-text">' + escapeHtml(String(text || '')) + '</div>';
+        document.body.appendChild(el);
+        llFxTimeout(function () {
+          try {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          } catch (e2) {
+            // ignore
+          }
+        }, 1600);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // いま出ているモーダルの識別キーと種類。全再描画で音が鳴り直さないようキーで管理する。
+    function llModalFxInfo(room) {
+      var out = { key: '', kind: '', hit: false, loserIsMe: false, isParty: false };
+      try {
+        if (ui.pending && ui.pending.card) {
+          out.key = 'pending:' + String(ui.pending.card);
+          out.kind = 'pending';
+          return out;
+        }
+        if (ui.modal && ui.modal.type === 'peek') {
+          out.key = 'peek:' + String(ui.modal.key || '');
+          out.kind = 'peek';
+          return out;
+        }
+        if (ui.modal && ui.modal.type === 'peek_wait') {
+          out.key = 'peekwait:' + String(ui.modal.byName || '') + ':' + String(ui.modal.targetName || '');
+          out.kind = 'wait';
+          return out;
+        }
+        var rr = room && room.round ? room.round : null;
+        var rv = rr && rr.reveal ? rr.reveal : null;
+        if (!rv || !rv.type) return out;
+        var t = String(rv.type || '');
+        var by = String(rv.by || '');
+        var tg = String(rv.target || '');
+        var me = String(playerId || '');
+        out.key =
+          'reveal:' + t + ':' + by + ':' + tg + ':' + String(rv.guess || '') + ':' + String(rv.result || '') + ':' + String(rv.discarded || '') + ':' + String(rv.drew || '');
+        out.isParty = me === by || me === tg;
+        if (t === 'guard') {
+          out.kind = 'guard';
+          out.hit = String(rv.result || '') === 'hit' && !rv.protected;
+        } else if (t === 'knight') {
+          out.kind = out.isParty ? 'knight' : 'wait';
+          var av = llCardRank(String(rv.byCard || ''));
+          var bv = llCardRank(String(rv.targetCard || ''));
+          if (av && bv && av !== bv) {
+            var loser = av < bv ? by : tg;
+            out.loserIsMe = me === loser;
+          }
+        } else if (t === 'general_swap') {
+          out.kind = out.isParty ? 'reveal' : 'wait';
+        } else if (t === 'wizard_discard') {
+          out.kind = out.isParty ? 'reveal' : 'wait';
+        } else if (t === 'minister_overload') {
+          out.kind = me === by ? 'minister_self' : 'minister_other';
+          if (out.kind === 'minister_other' && String(ui.dismissedRevealKey || '') === 'minister:' + by + ':' + String(rv.drew || '')) {
+            out.key = '';
+            out.kind = '';
+          }
+        } else if (t === 'showdown') {
+          out.kind = 'reveal';
+        } else if (t === 'clown') {
+          // 道化はpeek/peek_wait側で扱う（ここには来ないが保険）。
+          out.kind = 'wait';
+        }
+      } catch (e) {
+        return out;
+      }
+      return out;
+    }
+
+    function llPlayModalFx(info) {
+      try {
+        var kind = String(info && info.kind ? info.kind : '');
+        if (!kind || kind === 'pending') return;
+        if (kind === 'wait' || kind === 'minister_other') {
+          bbgFx.notify();
+          return;
+        }
+        if (kind === 'minister_self') {
+          bbgFx.miss();
+          bbgFx.vibrate(120);
+          return;
+        }
+        // 公開系はまず「めくり」の音。結果音はスタンプの遅延(0.55秒)に合わせて鳴らす。
+        bbgFx.reveal();
+        if (kind === 'guard') {
+          var hit0 = !!(info && info.hit);
+          llFxTimeout(function () {
+            if (hit0) bbgFx.hit();
+            else bbgFx.miss();
+          }, 560);
+        } else if (kind === 'knight') {
+          var lose0 = !!(info && info.loserIsMe);
+          llFxTimeout(function () {
+            if (lose0) bbgFx.miss();
+            else bbgFx.hit();
+          }, 560);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // 一回だけ鳴らす/出す演出。購読の初回コールバックではキー記録だけ行う。
+    function llRunOneShotFx(room) {
+      var ready = !!ui.fxReady;
+
+      // 1) 自分の番が新しく来たときのオーバーレイ
+      try {
+        var rr0 = room && room.round ? room.round : null;
+        var turnKey = '';
+        var myTurnNow = false;
+        var blocked = false;
+        if (room && String(room.phase || '') === 'playing' && rr0 && rr0.currentPlayerId) {
+          turnKey = String(rr0.no || '') + ':' + String(rr0.currentPlayerId || '');
+          myTurnNow = String(rr0.currentPlayerId || '') === String(playerId || '') && !(rr0.eliminated && rr0.eliminated[playerId]);
+          blocked = !!(rr0.waitFor && rr0.waitFor.type);
+        }
+        if (ready && turnKey && turnKey !== ui.lastTurnKey && myTurnNow && !blocked) {
+          bbgShowTurnOverlay();
+        }
+        ui.lastTurnKey = turnKey;
+      } catch (eT) {
+        // ignore
+      }
+
+      // 2) モーダル出現時の効果音
+      try {
+        var info = llModalFxInfo(room);
+        if (ready && info.key && info.key !== ui.lastModalFxKey) {
+          llPlayModalFx(info);
+        }
+        ui.lastModalFxKey = info.key;
+      } catch (eM) {
+        // ignore
+      }
+
+      // 3) 勝敗（背景色 + 全画面演出）
+      try {
+        var fin = room && String(room.phase || '') === 'finished' && room.result && Array.isArray(room.result.winners) ? room.result : null;
+        if (fin) {
+          var ws = fin.winners;
+          var iWin = false;
+          for (var wi0 = 0; wi0 < ws.length; wi0++) {
+            if (String(ws[wi0] || '') === String(playerId || '')) iWin = true;
+          }
+          try {
+            if (viewEl && viewEl.classList) {
+              viewEl.classList.toggle('result-win', !!iWin);
+              viewEl.classList.toggle('result-lose', !iWin);
+            }
+          } catch (eC0) {
+            // ignore
+          }
+          var fkey = 'w:' + ws.join(',');
+          if (ready && fkey !== ui.lastFinishKey) {
+            var psF = (room && room.players) || {};
+            var namesF = [];
+            for (var wi1 = 0; wi1 < ws.length; wi1++) {
+              var wpid = String(ws[wi1] || '');
+              namesF.push(psF[wpid] ? formatPlayerDisplayName(psF[wpid]) : wpid);
+            }
+            llShowResultCine('🎉 ' + (namesF.length ? namesF.join(' / ') : '-') + ' の勝ち！');
+            if (iWin) bbgFx.win();
+            else bbgFx.lose();
+          }
+          ui.lastFinishKey = fkey;
+        } else {
+          try {
+            if (viewEl && viewEl.classList) {
+              viewEl.classList.remove('result-win');
+              viewEl.classList.remove('result-lose');
+            }
+          } catch (eC1) {
+            // ignore
+          }
+          ui.lastFinishKey = '';
+        }
+      } catch (eF) {
+        // ignore
+      }
+
+      ui.fxReady = true;
     }
 
     function renderNow(room) {
@@ -17123,16 +18375,30 @@
         });
       }
 
-      var hand = document.getElementById('llHand');
-      if (hand && !hand.__ll_bound) {
-        hand.__ll_bound = true;
-        hand.addEventListener('click', function (ev) {
+      // 手札: タップで選択（もう一度タップで解除）。使用は下の大きなボタンに一本化した。
+      var hand2 = document.getElementById('llHand2');
+      if (hand2 && !hand2.__ll_bound) {
+        hand2.__ll_bound = true;
+        hand2.addEventListener('click', function (ev) {
           if (ui.pending || (ui.modal && ui.modal.type)) return;
           try {
-            var r = lastRoom && lastRoom.round ? lastRoom.round : {};
-            var myHand = r && r.hands && Array.isArray(r.hands[playerId]) ? r.hands[playerId] : [];
-            if (!Array.isArray(myHand) || myHand.length < 2) return;
-            ui.handFrontIndex = ui.handFrontIndex === 0 ? 1 : 0;
+            var el = ev && ev.target ? ev.target : null;
+            var cardEl = null;
+            while (el && el !== hand2) {
+              if (el.className && String(el.className).indexOf('ll-card2') >= 0) {
+                cardEl = el;
+                break;
+              }
+              el = el.parentNode;
+            }
+            if (!cardEl) return;
+            var idx = parseIntSafe(cardEl.getAttribute('data-idx'), -1);
+            if (!(idx === 0 || idx === 1)) return;
+            var rr1 = lastRoom && lastRoom.round ? lastRoom.round : {};
+            var myHand1 = rr1 && rr1.hands && Array.isArray(rr1.hands[playerId]) ? rr1.hands[playerId] : [];
+            if (!Array.isArray(myHand1) || myHand1.length < 2) return;
+            ui.selIndex = ui.selIndex === idx ? null : idx;
+            bbgFx.tap();
             renderNow(lastRoom);
           } catch (e) {
             // ignore
@@ -17140,87 +18406,70 @@
         });
       }
 
-      var front = document.getElementById('llCardFront');
-      if (front && !front.__ll_bound) {
-        front.__ll_bound = true;
+      // 使用ボタン（従来の長押しと同じ処理へ）
+      var useBtn = document.getElementById('llUseBtn');
+      if (useBtn && !useBtn.__ll_bound) {
+        useBtn.__ll_bound = true;
+        useBtn.addEventListener('click', function (ev) {
+          if (ev && ev.preventDefault) ev.preventDefault();
+          if (ui.pending || (ui.modal && ui.modal.type)) return;
+          try {
+            var rr2 = lastRoom && lastRoom.round ? lastRoom.round : null;
+            if (!rr2 || String(rr2.currentPlayerId || '') !== String(playerId || '')) return;
+            if (rr2.waitFor && rr2.waitFor.type) return;
+            if (rr2.eliminated && rr2.eliminated[playerId]) return;
 
-        (function (btn) {
-          var holdMs = CN_LONG_PRESS_MS;
-          var timer = null;
-          var longFired = false;
-
-          function clearTimer() {
-            if (timer) {
-              clearTimeout(timer);
-              timer = null;
+            var myHand2 = rr2 && rr2.hands && Array.isArray(rr2.hands[playerId]) ? rr2.hands[playerId] : [];
+            var idx2 = myHand2.length <= 1 ? 0 : ui.selIndex;
+            if (!(idx2 === 0 || idx2 === 1)) {
+              // 女侯爵の強制がある場合は自動選択されている（renderと同じ判定）。
+              if (llMustPlayCountess(myHand2)) {
+                for (var ci2 = 0; ci2 < myHand2.length; ci2++) {
+                  if (String(myHand2[ci2] || '') === '7:countess') {
+                    idx2 = ci2;
+                    break;
+                  }
+                }
+              }
             }
-          }
-
-          function startHold(ev) {
-            if (ui.pending || (ui.modal && ui.modal.type)) return;
-            try {
-              var rr0 = lastRoom && lastRoom.round ? lastRoom.round : null;
-              if (!rr0 || String(rr0.currentPlayerId || '') !== String(playerId || '')) return;
-              if (rr0.waitFor && rr0.waitFor.type) return;
-              if (rr0.eliminated && rr0.eliminated[playerId]) return;
-            } catch (e0) {
+            if (!(idx2 === 0 || idx2 === 1)) {
+              bbgShowToast('カードをえらんでください');
               return;
             }
-            if (ev && ev.button != null && ev.button !== 0) return;
-            if (ev && ev.preventDefault) ev.preventDefault();
-            clearTimer();
-            longFired = false;
-
-            var rank = String(btn.getAttribute('data-rank') || '');
-            if (!rank) return;
-            if (rank === '8') return;
-
-            // Enforce 女侯爵(7:countess) mandatory rule on UI side too.
-            try {
-              var rr = lastRoom && lastRoom.round ? lastRoom.round : {};
-              var myHand2 = rr && rr.hands && Array.isArray(rr.hands[playerId]) ? rr.hands[playerId] : [];
-              if (llMustPlayCountess(myHand2) && rank !== '7:countess') return;
-            } catch (e) {
-              // ignore
+            var rank2 = String(myHand2[idx2] || '');
+            if (!rank2) return;
+            if (rank2 === '8') {
+              bbgShowToast('姫は捨てられません');
+              return;
+            }
+            if (llMustPlayCountess(myHand2) && rank2 !== '7:countess') {
+              bbgShowToast('女侯爵(7)を必ず使用します');
+              return;
             }
 
-            timer = setTimeout(function () {
-              longFired = true;
-              clearTimer();
-              ui.modal = null;
-              ui.pending = { card: rank, target: '', guess: '' };
-              renderNow(lastRoom);
-            }, holdMs);
+            ui.modal = null;
+            ui.pending = { card: rank2, target: '', guess: '' };
+            bbgFx.play();
+            renderNow(lastRoom);
+          } catch (e) {
+            // ignore
           }
+        });
+      }
 
-          btn.addEventListener('click', function (ev) {
-            // Short tap is handled by llHand click (toggle). Ignore if long-press fired.
-            if (longFired) {
-              longFired = false;
-              if (ev && ev.preventDefault) ev.preventDefault();
-              if (ev && ev.stopPropagation) ev.stopPropagation();
-            }
-          });
-
-          if (typeof PointerEvent !== 'undefined') {
-            btn.addEventListener('pointerdown', startHold);
-            btn.addEventListener('pointerup', clearTimer);
-            btn.addEventListener('pointercancel', clearTimer);
-            btn.addEventListener('pointerleave', clearTimer);
-          } else {
-            btn.addEventListener('touchstart', startHold);
-            btn.addEventListener('touchend', clearTimer);
-            btn.addEventListener('touchcancel', clearTimer);
-
-            btn.addEventListener('mousedown', startHold);
-            btn.addEventListener('mouseup', clearTimer);
-            btn.addEventListener('mouseleave', clearTimer);
+      // 大臣の全員向け情報モーダル（ローカルで閉じるだけ。進行のゲートにはしない）
+      var dismissBtn = document.getElementById('llRevealDismiss');
+      if (dismissBtn && !dismissBtn.__ll_bound) {
+        dismissBtn.__ll_bound = true;
+        dismissBtn.addEventListener('click', function (ev) {
+          if (ev && ev.preventDefault) ev.preventDefault();
+          try {
+            ui.dismissedRevealKey = String(dismissBtn.getAttribute('data-key') || '');
+          } catch (e) {
+            ui.dismissedRevealKey = '';
           }
-
-          btn.addEventListener('contextmenu', function (ev) {
-            if (ev && ev.preventDefault) ev.preventDefault();
-          });
-        })(front);
+          renderNow(lastRoom);
+        });
       }
 
       var pickTargets = document.querySelectorAll('.llPickTarget');
@@ -17294,6 +18543,12 @@
             });
         });
       }
+
+      // 効果音トグル（再描画のたびに貼り直されるので毎回バインドする）
+      bindBbgFxToggle();
+
+      // 演出は最後にまとめて（ワンショット管理）
+      llRunOneShotFx(room);
     }
 
     firebaseReady()
@@ -17335,6 +18590,13 @@
 
     window.addEventListener('popstate', function () {
       if (unsub) unsub();
+      llClearFxTimers();
+      try {
+        var cine0 = document.getElementById('llCine');
+        if (cine0 && cine0.parentNode) cine0.parentNode.removeChild(cine0);
+      } catch (eCine) {
+        // ignore
+      }
       try {
         if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
       } catch (e2) {
@@ -17355,6 +18617,8 @@
     var room = opts.room;
     var isHost = !!opts.isHost;
     var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var ui = opts.ui || {};
+    var stalled = !!opts.stalled;
 
     var phase = (room && room.phase) || 'lobby';
     var ps = (room && room.players) || {};
@@ -17418,7 +18682,19 @@
           var cardLabel = String((dlp && dlp.name) || '-') + '(' + String((dlp && dlp.rank) || llCardRankStr(lpCard) || '-') + ')';
           lpText = lpTo ? pname(lpBy) + ' が ' + pname(lpTo) + ' へ ' + cardLabel + ' のカードを使用した。' : pname(lpBy) + ' が ' + cardLabel + ' のカードを使用した。';
         }
-        lastPlayHtml = '<div class="ll-table-lastplay ll-table-lastplay-banner" aria-live="polite">' + escapeHtml(lpText) + '</div>';
+        // ワンショット：内容が変わった再描画のときだけ出現アニメを付ける（毎回だとうるさいため）。
+        var lpKey = lpBy + '|' + lpCard + '|' + String((lp && lp.at) || '') + '|' + String(graveArr.length);
+        var lpAnim = !!(ui.lastPlayKey && ui.lastPlayKey !== lpKey);
+        ui.lastPlayKey = lpKey;
+        var lpIcon = (llCardDef(lpCard) || {}).icon || '';
+        lastPlayHtml =
+          '<div class="ll-table-lastplay ll-table-lastplay-banner' + (lpAnim ? ' bbg-banner-in' : '') + '" aria-live="polite">' +
+          (lpIcon ? '<img class="ll-table-lastplay-icon" alt="" src="' + escapeHtml(lpIcon) + '" />' : '') +
+          '<span>' + escapeHtml(lpText) + '</span>' +
+          '</div>';
+      } else {
+        // 'none' を入れておくと、次に最初のプレイが来たときにアニメが出る（初期値''のときは出ない）。
+        ui.lastPlayKey = 'none';
       }
     } catch (eLP) {
       lastPlayHtml = '';
@@ -17472,7 +18748,9 @@
         '<div class="ll-table-center-top">' +
         '<div class="ll-table-pile">' +
         '<div class="muted">山札</div>' +
-        '<div class="ll-table-pile-count"><b>' +
+        '<div class="ll-table-pile-count"><b' +
+        (deckLeft <= 3 ? ' class="ll-deck-low"' : '') +
+        '>' +
         escapeHtml(String(deckLeft)) +
         '</b></div>' +
         '<div class="ll-table-pile-stack">' +
@@ -17511,6 +18789,27 @@
       effectSoloId = '';
     }
 
+    // 脱落した瞬間だけ席を揺らす（ワンショット：前回描画時の脱落者との差分）。
+    var newlyElim = {};
+    try {
+      var curElim = {};
+      for (var ei0 = 0; ei0 < order.length; ei0++) {
+        var epid0 = String(order[ei0] || '');
+        if (!epid0) continue;
+        if (r && r.eliminated && r.eliminated[epid0]) curElim[epid0] = 1;
+      }
+      var prevElim = ui.elimSeen || null;
+      if (prevElim) {
+        for (var ek0 in curElim) {
+          if (!Object.prototype.hasOwnProperty.call(curElim, ek0)) continue;
+          if (!prevElim[ek0]) newlyElim[ek0] = 1;
+        }
+      }
+      ui.elimSeen = curElim;
+    } catch (eEl0) {
+      newlyElim = {};
+    }
+
     var seatsHtml = '';
     var n = order.length || 0;
     var radius = 42;
@@ -17539,7 +18838,7 @@
         '%;top:' +
         escapeHtml(String(y.toFixed(3))) +
         '%">' +
-        '<div class="ll-seat-card">' +
+        '<div class="ll-seat-card' + (newlyElim[String(pid)] ? ' bbg-shake' : '') + '">' +
         '<div class="ll-seat-name">' + escapeHtml(nm) + '</div>' +
         (isProtectedSeat && !isElimSeat ? '<div class="ll-seat-sub muted">僧侶により保護中</div>' : '') +
         '</div>' +
@@ -17572,9 +18871,25 @@
         '</div>';
     }
 
+    // ホスト救済：待機中の本人が操作できず進行が止まったときに代理で進める。
+    var forceHtml = '';
+    if (stalled) {
+      forceHtml =
+        '<div class="card ll-force-box">' +
+        '<div class="ll-force-title">⚠ 進行が止まっています</div>' +
+        '<div class="muted center">待っている人が操作できない状態かもしれません。代理で次に進められます。</div>' +
+        '<button type="button" id="llForceAdvance" class="primary">代理で進める</button>' +
+        '</div>';
+    }
+
     render(
       viewEl,
       '\n    <div class="stack">\n      <div class="big">ラブレター（テーブル）</div>\n      ' +
+        '<div class="ll-fx-row">' +
+        bbgFxToggleHtml() +
+        '</div>' +
+        '\n      ' +
+        (forceHtml || '') +
         '\n      ' +
         (phase === 'finished' ? resultHtml + '<hr />' : '') +
         '<div class="ll-table">' +
@@ -17756,7 +19071,8 @@
       svg.setAttribute('viewBox', '0 0 ' + String(w) + ' ' + String(h));
       svg.setAttribute('preserveAspectRatio', 'none');
       svg.innerHTML =
-        '<line class="ll-table-arrow-line" x1="' +
+        // .bbg-dash で流れる破線にする（効果の向きが分かりやすい）。
+        '<line class="ll-table-arrow-line bbg-dash" x1="' +
         escapeHtml(String(lineStart.x.toFixed(2))) +
         '" y1="' +
         escapeHtml(String(lineStart.y.toFixed(2))) +
@@ -17850,6 +19166,9 @@
 
     var unsub = null;
     var lobbyId = '';
+    var tUi = { lastPlayKey: '', elimSeen: null, stalledShown: false };
+    var lastRoom = null;
+    var stallTimer = null;
     try {
       var q0 = parseQuery();
       lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
@@ -17857,8 +19176,34 @@
       lobbyId = '';
     }
 
+    // 進行が止まっているか（waitFor が20秒以上解除されない）。
+    // createdAt が無い古いデータでは常に「止まっている」とみなす（救済を出しておく）。
+    function llTableStalled(room) {
+      try {
+        if (!room || String(room.phase || '') !== 'playing') return false;
+        var rr = room.round || null;
+        var wf = rr && rr.waitFor ? rr.waitFor : null;
+        if (!wf || !wf.type) return false;
+        var ca = parseIntSafe(wf.createdAt, 0);
+        if (!ca) return true;
+        return serverNowMs() - ca > 20000;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function clearStallTimer() {
+      try {
+        if (stallTimer) clearInterval(stallTimer);
+      } catch (e) {
+        // ignore
+      }
+      stallTimer = null;
+    }
+
     function redirectToLobby() {
       if (!lobbyId) return;
+      clearStallTimer();
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -17905,6 +19250,69 @@
         });
     }
 
+    function renderTableNow(room) {
+      lastRoom = room;
+      tUi.stalledShown = llTableStalled(room);
+
+      renderLoveLetterTable(viewEl, { roomId: roomId, room: room, isHost: isHost, lobbyId: lobbyId, ui: tUi, stalled: tUi.stalledShown });
+      updateLoveLetterTableEffectArrow(viewEl, room);
+      bindBbgFxToggle();
+
+      // NOTE: cnAbortToLobby is removed (use gm participant button on player screen).
+
+      var forceBtn = document.getElementById('llForceAdvance');
+      if (forceBtn && !forceBtn.__ll_bound) {
+        forceBtn.__ll_bound = true;
+        forceBtn.addEventListener('click', function () {
+          forceBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return forceAdvanceLoveLetter(roomId);
+            })
+            .then(function () {
+              bbgShowToast('代理で進めました');
+            })
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              forceBtn.disabled = false;
+            });
+        });
+      }
+
+      var nextBtn = document.getElementById('llNextToLobby');
+      if (nextBtn && !nextBtn.__ll_bound) {
+        nextBtn.__ll_bound = true;
+        nextBtn.addEventListener('click', function () {
+          if (!lobbyId) return;
+          nextBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              var extras = [];
+              try {
+                extras = room && room.settings ? room.settings.extraCards : [];
+              } catch (e0) {
+                extras = [];
+              }
+              return setLobbyLoveLetterExtraCards(lobbyId, extras);
+            })
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobby();
+            })
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              nextBtn.disabled = false;
+            });
+        });
+      }
+    }
+
     firebaseReady()
       .then(function () {
         if (lobbyId) ensureLobbyReturnWatcher();
@@ -17913,42 +19321,7 @@
             renderError(viewEl, '部屋が見つかりません');
             return;
           }
-
-          renderLoveLetterTable(viewEl, { roomId: roomId, room: room, isHost: isHost, lobbyId: lobbyId });
-          updateLoveLetterTableEffectArrow(viewEl, room);
-
-          // NOTE: cnAbortToLobby is removed (use gm participant button on player screen).
-
-          var nextBtn = document.getElementById('llNextToLobby');
-          if (nextBtn && !nextBtn.__ll_bound) {
-            nextBtn.__ll_bound = true;
-            nextBtn.addEventListener('click', function () {
-              if (!lobbyId) return;
-              nextBtn.disabled = true;
-              firebaseReady()
-                .then(function () {
-                  var extras = [];
-                  try {
-                    extras = room && room.settings ? room.settings.extraCards : [];
-                  } catch (e0) {
-                    extras = [];
-                  }
-                  return setLobbyLoveLetterExtraCards(lobbyId, extras);
-                })
-                .then(function () {
-                  return setLobbyCurrentGame(lobbyId, null);
-                })
-                .then(function () {
-                  redirectToLobby();
-                })
-                .catch(function (e) {
-                  alert((e && e.message) || '失敗');
-                })
-                .finally(function () {
-                  nextBtn.disabled = false;
-                });
-            });
-          }
+          renderTableNow(room);
         });
       })
       .then(function (u) {
@@ -17958,8 +19331,22 @@
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
+    // テーブルはRTDBの更新が無いと再描画されないので、停止検出だけ軽い間隔で回す。
+    clearStallTimer();
+    stallTimer = setInterval(function () {
+      try {
+        if (!lastRoom) return;
+        var s = llTableStalled(lastRoom);
+        if (s === !!tUi.stalledShown) return;
+        renderTableNow(lastRoom);
+      } catch (e) {
+        // ignore
+      }
+    }, 10000);
+
     window.addEventListener('popstate', function () {
       if (unsub) unsub();
+      clearStallTimer();
     });
   }
 
@@ -17969,6 +19356,9 @@
     var room = opts.room;
     var isHost = !!opts.isHost;
     var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var tUi = (opts && opts.ui) || {};
+    var stalled = !!(opts && opts.stalled);
+    var pendingStalled = !!(opts && opts.pendingStalled);
 
     var players = (room && room.players) || {};
     var st = (room && room.state) || {};
@@ -18064,12 +19454,47 @@
         graveHtml2 += '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + hnCardImgHtml(top) + '</div>';
       }
 
+      // 直近3枚を小さく表向きで並べる行（右端が最新）。
+      var graveRecentHtml = '';
+      try {
+        var recentG = grave.length > 3 ? grave.slice(grave.length - 3) : grave.slice();
+        for (var rgi = 0; rgi < recentG.length; rgi++) {
+          graveRecentHtml +=
+            '<div class="hn-grave-mini' + (rgi === recentG.length - 1 ? '' : ' hn-grave-mini--old') + '">' +
+            hnCardImgHtml(String(recentG[rgi] || '')) +
+            '</div>';
+        }
+        if (graveRecentHtml) graveRecentHtml = '<div class="hn-grave-recent">' + graveRecentHtml + '</div>';
+      } catch (eGR) {
+        graveRecentHtml = '';
+      }
+
       var lastPlay = hnLastPlayText(room);
 
       var lastPlayHtml = '';
       try {
         if (lastPlay) {
-          lastPlayHtml = '<div class="ll-table-lastplay ll-table-lastplay-banner" aria-live="polite">' + escapeHtml(String(lastPlay || '')) + '</div>';
+          var lpCard0 = '';
+          try {
+            lpCard0 = st && st.lastPlay && st.lastPlay.cardId ? String(st.lastPlay.cardId || '') : '';
+          } catch (eLPC) {
+            lpCard0 = '';
+          }
+          var lpIcon0 = lpCard0 ? String(hnCardDef(lpCard0).icon || '') : '';
+          // ワンショット：内容が変わった再描画のときだけ出現アニメを付ける（毎回だとうるさいため）。
+          var lpKey0 = String(lpCard0) + '|' + String((st && st.lastPlay && st.lastPlay.at) || '') + '|' + String(grave.length || 0) + '|' + String(lastPlay);
+          var lpAnim0 = !!(tUi.lastPlayKey && tUi.lastPlayKey !== lpKey0);
+          tUi.lastPlayKey = lpKey0;
+          lastPlayHtml =
+            '<div class="ll-table-lastplay ll-table-lastplay-banner' +
+            (lpAnim0 ? ' bbg-banner-in' : '') +
+            '" aria-live="polite">' +
+            (lpIcon0 ? '<img class="ll-table-lastplay-icon" alt="" src="' + escapeHtml(lpIcon0) + '" />' : '') +
+            '<span>' + escapeHtml(String(lastPlay || '')) + '</span>' +
+            '</div>';
+        } else {
+          // 'none' を入れておくと、次に最初のプレイが来たときにアニメが出る（初期値''のときは出ない）。
+          tUi.lastPlayKey = 'none';
         }
       } catch (eLP) {
         lastPlayHtml = '';
@@ -18085,6 +19510,7 @@
         '<div class="ll-table-grave-stack">' +
         graveHtml2 +
         '</div>' +
+        (graveRecentHtml || '') +
         '</div>' +
         '</div>' +
         (lastPlayHtml ? '<div class="ll-table-center-bottom">' + lastPlayHtml + '</div>' : '') +
@@ -18105,6 +19531,15 @@
       } catch (eT0) {
         turnPid = '';
       }
+      var decidedSeat = !!(result && result.decidedAt);
+      var culpritSeatId = decidedSeat ? String(result.culpritId || '') : '';
+      var winnerMap = {};
+      try {
+        var ws0 = decidedSeat && Array.isArray(result.winners) ? result.winners : [];
+        for (var wsi = 0; wsi < ws0.length; wsi++) winnerMap[String(ws0[wsi] || '')] = 1;
+      } catch (eWs) {
+        winnerMap = {};
+      }
       for (var si = 0; si < nSeats; si++) {
         var pid = String(order0[si] || '');
         if (!pid) continue;
@@ -18120,6 +19555,20 @@
           plotOn = !!(allies0 && allies0[String(pid)]);
         } catch (ePlot0) {
           plotOn = false;
+        }
+        // 同時選択中は「選択済み」チェックを出す。
+        var chosenBadge = '';
+        try {
+          if (pending && pending.type && pending.choices && pending.choices[String(pid)] !== undefined) {
+            chosenBadge = ' <span class="badge hn-badge-done">✔ 選択済</span>';
+          }
+        } catch (eCB) {
+          chosenBadge = '';
+        }
+        var resultBadge = '';
+        if (decidedSeat) {
+          if (culpritSeatId && String(pid) === culpritSeatId) resultBadge += ' <span class="badge hn-badge-culprit">犯人</span>';
+          if (winnerMap[String(pid)]) resultBadge += ' <span class="hn-badge-win">🎉</span>';
         }
         seatsHtml +=
           '<div class="ll-seat' +
@@ -18137,6 +19586,8 @@
           '<div class="ll-seat-name">' +
           escapeHtml(pname(pid)) +
           (plotOn ? ' <span class="badge">たくらみ中</span>' : '') +
+          chosenBadge +
+          resultBadge +
           '</div>' +
           '<div class="hn-sim-handcount muted">手札: ' +
           escapeHtml(String(cnt)) +
@@ -18374,9 +19825,48 @@
       }
     }
 
+    // ホスト救済：待機中の本人が操作できず進行が止まったときに代理で進める。
+    var forceHtml = '';
+    if (stalled) {
+      forceHtml =
+        '<div class="card ll-force-box">' +
+        '<div class="ll-force-title">⚠ 進行が止まっています</div>' +
+        '<div class="muted center">待っている人が操作できない状態かもしれません。代理で次に進められます。</div>' +
+        '<button type="button" id="hnForceAdvance" class="primary">代理で進める</button>' +
+        '</div>';
+    }
+
+    // 同時選択が長引いているときは、誰を待っているかだけ出す（強制はしない）。
+    var pendingWaitHtml = '';
+    try {
+      if (pendingStalled && pending && pending.type) {
+        var pr0 = hnPendingProgress(room);
+        if (pr0.waitingNames.length) {
+          pendingWaitHtml =
+            '<div class="card ll-force-box">' +
+            '<div class="ll-force-title">⏳ 選択を待っています</div>' +
+            '<div class="muted center">えらんだ人 ' +
+            escapeHtml(String(pr0.done)) +
+            '/' +
+            escapeHtml(String(pr0.total)) +
+            ' ／ 待っている人：' +
+            escapeHtml(pr0.waitingNames.join('、')) +
+            '</div>' +
+            '</div>';
+        }
+      }
+    } catch (ePW) {
+      pendingWaitHtml = '';
+    }
+
     render(
       viewEl,
       '<div class="hn-table hn-table-only">' +
+        '<div class="ll-fx-row">' +
+        bbgFxToggleHtml() +
+        '</div>' +
+        (forceHtml || '') +
+        (pendingWaitHtml || '') +
         (hanninTableVizHtml() || '<div class="muted">（表示できません）</div>') +
         (lobbyId && result && result.decidedAt
           ? '<div class="row" style="justify-content:center;margin-top:12px"><button id="hnNextToLobby" class="primary">次へ</button></div>'
@@ -18696,7 +20186,8 @@
         svg.setAttribute('viewBox', '0 0 ' + String(w) + ' ' + String(h));
         svg.setAttribute('preserveAspectRatio', 'none');
         svg.innerHTML =
-          '<line class="ll-table-arrow-line" x1="' +
+          // .bbg-dash で流れる破線にする（効果の向きが分かりやすい）。
+          '<line class="ll-table-arrow-line bbg-dash" x1="' +
           escapeHtml(String(lineStart.x.toFixed(2))) +
           '" y1="' +
           escapeHtml(String(lineStart.y.toFixed(2))) +
@@ -18794,8 +20285,97 @@
       lobbyId = '';
     }
 
+    // 表示用の一時状態（ワンショット演出のキーなど）
+    var tUi = { lastPlayKey: '', stalledShown: false, pendingStalledShown: false, fxReady: false, lastResultKey: '', cancelled: false };
+    var stallTimer = null;
+    var tableFxTimers = [];
+
+    function hnTableFxTimeout(fn, ms) {
+      var id = setTimeout(function () {
+        for (var i = 0; i < tableFxTimers.length; i++) {
+          if (tableFxTimers[i] === id) {
+            tableFxTimers.splice(i, 1);
+            break;
+          }
+        }
+        try {
+          fn();
+        } catch (e) {
+          // ignore
+        }
+      }, ms);
+      tableFxTimers.push(id);
+      return id;
+    }
+
+    function hnTableClearFxTimers() {
+      try {
+        for (var i = 0; i < tableFxTimers.length; i++) clearTimeout(tableFxTimers[i]);
+      } catch (e) {
+        // ignore
+      }
+      tableFxTimers = [];
+      try {
+        var cine0 = document.getElementById('hnCine');
+        if (cine0 && cine0.parentNode) cine0.parentNode.removeChild(cine0);
+      } catch (e2) {
+        // ignore
+      }
+    }
+
+    function clearStallTimer() {
+      try {
+        if (stallTimer) clearInterval(stallTimer);
+      } catch (e) {
+        // ignore
+      }
+      stallTimer = null;
+    }
+
+    // 進行が止まっているか（waitFor が20秒以上解除されない）。
+    // createdAt が無い古いデータでは常に「止まっている」とみなす（救済を出しておく）。
+    function hnTableStalled(room) {
+      try {
+        if (!room || String(room.phase || '') !== 'playing') return false;
+        var st0 = room.state || null;
+        if (st0 && st0.result && st0.result.decidedAt) return false;
+        var wf = st0 && st0.waitFor ? st0.waitFor : null;
+        if (!wf || !wf.type) return false;
+        var ca = parseIntSafe(wf.createdAt, 0);
+        if (!ca) return true;
+        return serverNowMs() - ca > 20000;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // 同時選択(情報操作/うわさ/取引)が20秒以上終わらないか。表示だけで強制はしない。
+    function hnTablePendingStalled(room) {
+      try {
+        if (!room || String(room.phase || '') !== 'playing') return false;
+        var st0 = room.state || null;
+        var pd = st0 && st0.pending ? st0.pending : null;
+        if (!pd || !pd.type) return false;
+        var ca = parseIntSafe(pd.createdAt, 0);
+        if (!ca) return true;
+        return serverNowMs() - ca > 20000;
+      } catch (e) {
+        return false;
+      }
+    }
+
     function redirectToLobbyHost() {
       if (!lobbyId) return;
+      // setQuery() は pushState なので popstate が起きない。遷移前に自分で解除する。
+      tUi.cancelled = true;
+      clearStallTimer();
+      hnTableClearFxTimers();
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -18852,17 +20432,71 @@
 
     var lastRoom = null;
 
+    // 描画とホスト救済まわりのバインドをまとめる（購読コールバックと停止検出タイマーの両方から呼ぶ）。
+    function renderTableNow(room) {
+      lastRoom = room;
+      tUi.stalledShown = hnTableStalled(room);
+      tUi.pendingStalledShown = hnTablePendingStalled(room);
+
+      renderHanninTable(viewEl, {
+        roomId: roomId,
+        room: room,
+        isHost: isHost,
+        lobbyId: lobbyId,
+        playerId: playerId,
+        ui: tUi,
+        stalled: tUi.stalledShown,
+        pendingStalled: tUi.pendingStalledShown
+      });
+      updateHanninTableEffectArrow(viewEl, room);
+      bindBbgFxToggle();
+
+      var forceBtn = document.getElementById('hnForceAdvance');
+      if (forceBtn && !forceBtn.__hn_bound) {
+        forceBtn.__hn_bound = true;
+        forceBtn.addEventListener('click', function () {
+          forceBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return forceAdvanceHannin(roomId);
+            })
+            .then(function () {
+              bbgShowToast('代理で進めました');
+            })
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              forceBtn.disabled = false;
+            });
+        });
+      }
+
+      // 決着の段階演出（テーブル端末はスピーカー代わりなので音も出す）。
+      try {
+        var st0 = room && room.state ? room.state : null;
+        var res0 = st0 && st0.result ? st0.result : null;
+        var rKey0 = res0 && res0.decidedAt ? String(res0.decidedAt) : '';
+        if (tUi.fxReady && rKey0 && rKey0 !== tUi.lastResultKey && hnShouldPlayResultCine(room)) {
+          hnShowResultCine(room, '', hnTableFxTimeout);
+        }
+        tUi.lastResultKey = rKey0;
+      } catch (eCine0) {
+        // ignore
+      }
+      tUi.fxReady = true;
+    }
+
     firebaseReady()
       .then(function () {
         if (lobbyId) ensureLobbyReturnWatcher();
         return subscribeHanninRoom(roomId, function (room) {
+          if (tUi.cancelled) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
           }
-          lastRoom = room;
-          renderHanninTable(viewEl, { roomId: roomId, room: room, isHost: isHost, lobbyId: lobbyId, playerId: playerId });
-          updateHanninTableEffectArrow(viewEl, room);
+          renderTableNow(room);
 
           // Auto-deal at game start: no distribution screen.
           try {
@@ -19130,12 +20764,39 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐに解除する。
+        if (tUi.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
+    // テーブルはRTDBの更新が無いと再描画されないので、停止検出だけ軽い間隔で回す。
+    clearStallTimer();
+    stallTimer = setInterval(function () {
+      try {
+        if (tUi.cancelled) return;
+        if (!lastRoom) return;
+        var s0 = hnTableStalled(lastRoom);
+        var s1 = hnTablePendingStalled(lastRoom);
+        if (s0 === !!tUi.stalledShown && s1 === !!tUi.pendingStalledShown) return;
+        renderTableNow(lastRoom);
+      } catch (e) {
+        // ignore
+      }
+    }, 10000);
+
     window.addEventListener('popstate', function () {
+      tUi.cancelled = true;
+      clearStallTimer();
+      hnTableClearFxTimers();
       if (unsub) unsub();
       try {
         if (lobbyUnsub) lobbyUnsub();
@@ -20857,6 +22518,1109 @@
     });
   }
 
+  // -------------------- demo (自動プレイ・目視デバッグ) --------------------
+  // 開発者がUI・演出・間(ま)を目視確認するための自動プレイモード。
+  // ・実際のルーム作成/参加/開始/プレイ関数をそのまま呼ぶので、本番と同じ画面・同じ演出が出る。
+  // ・1つのタブが4体のボットを代理操作する（各ロジック関数は actorId/playerId を引数に取る）。
+  // ・Firebaseのパスは既存の loveletterRooms / hanninRooms のみを使う（新パスは作らない）。
+  // 使い方: ?screen=demo_loveletter / ?screen=demo_hannin（ホーム画面の下部にも小さな入口あり）
+
+  var DEMO_TICK_MS = 200; // ドライバーの見張り間隔
+  var DEMO_BOT_COUNT = 4;
+  var DEMO_RESTART_MS = 10000; // 決着してから次のデモを始めるまで
+  var DEMO_STALL_MS = 25000; // 打てる手が見つからないまま固まったと判断するまで
+  var DEMO_LL_EXTRA_CARDS = ['7:countess', '8:megane']; // 追加カードのルールも確認できるように入れておく
+
+  // 進行中のデモは常に1つだけ（多重起動防止）。
+  var demoState = null;
+  var demoSuppressPopstate = false;
+  var demoAttachBusy = false;
+
+  function demoIsDemoScreen(screen) {
+    var sc = String(screen || '');
+    return sc === 'demo_loveletter' || sc === 'demo_hannin';
+  }
+
+  function demoMakeRoomId() {
+    return 'demo' + randomId(6);
+  }
+
+  function demoBotIds(roomId) {
+    var out = [];
+    for (var i = 0; i < DEMO_BOT_COUNT; i++) out.push('b' + String(i + 1) + '_' + String(roomId || ''));
+    return out;
+  }
+
+  function demoBotName(i) {
+    return 'ボット' + String((i || 0) + 1);
+  }
+
+  function demoViewIndex(view) {
+    var v = String(view || '');
+    for (var i = 0; i < DEMO_BOT_COUNT; i++) {
+      if (v === 'bot' + String(i + 1)) return i;
+    }
+    return -1;
+  }
+
+  function demoGameLabel(game) {
+    return String(game || '') === 'll' ? 'ラブレター' : '犯人は踊る';
+  }
+
+  function demoRandBetween(min, max) {
+    var lo = Math.floor(min);
+    var hi = Math.floor(max);
+    if (hi <= lo) return lo;
+    return lo + randomInt(hi - lo + 1);
+  }
+
+  // 間隔倍率: ゆっくり1.6 / ふつう1 / はやい0.5
+  function demoDelayMs(s, min, max) {
+    var mul = s && s.speed ? Number(s.speed) : 1;
+    if (!mul || isNaN(mul)) mul = 1;
+    var ms = Math.round(demoRandBetween(min, max) * mul);
+    return ms < 150 ? 150 : ms;
+  }
+
+  function demoLog(text, extra) {
+    try {
+      if (typeof console !== 'undefined' && console && console.warn) console.warn('[demo] ' + String(text || ''), extra);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function demoNewState(game) {
+    return {
+      game: String(game || ''),
+      roomId: '',
+      botIds: [],
+      view: 'bot1',
+      speed: 1,
+      paused: false,
+      unsub: null,
+      room: null,
+      tickTimer: null,
+      gen: 0,
+      actKey: '',
+      actAt: 0,
+      actKeySince: 0,
+      forcedKey: '',
+      restartAt: 0,
+      stallSince: 0,
+      viewAttached: false,
+      stopped: false,
+      lastStatus: ''
+    };
+  }
+
+  // -------------------- demo: 後始末 --------------------
+  function demoTeardownRoom(s) {
+    if (!s) return;
+    s.gen = (s.gen || 0) + 1; // 進行中の非同期コールバックを無効化する
+    try {
+      if (s.tickTimer) clearInterval(s.tickTimer);
+    } catch (e0) {
+      // ignore
+    }
+    s.tickTimer = null;
+    try {
+      if (s.unsub) s.unsub();
+    } catch (e1) {
+      // ignore
+    }
+    s.unsub = null;
+    s.room = null;
+    s.actKey = '';
+    s.actAt = 0;
+    s.actKeySince = 0;
+    s.forcedKey = '';
+    s.restartAt = 0;
+    s.stallSince = 0;
+  }
+
+  function demoTeardown(s) {
+    if (!s) return;
+    s.stopped = true;
+    demoTeardownRoom(s);
+  }
+
+  function demoStopAll() {
+    var s = demoState;
+    demoState = null;
+    demoTeardown(s);
+    demoRemoveBar();
+    try {
+      if (document && document.body && document.body.classList) document.body.classList.remove('bbg-demo-on');
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 既存のroute関数は popstate で購読とタイマーを片付ける。視点切替や終了のときは
+  // それに合わせて合成popstateを投げる（ブラウザバックと同じ後始末をさせる）。
+  // ※ boot側の popstate ハンドラが route() を呼ぶため、demoAttachBusy で再入をガードしている。
+  function demoFirePopstate() {
+    demoSuppressPopstate = true;
+    try {
+      var ev = null;
+      try {
+        ev = document.createEvent('Event');
+        ev.initEvent('popstate', false, false);
+      } catch (e0) {
+        ev = null;
+      }
+      if (ev) window.dispatchEvent(ev);
+    } catch (e1) {
+      // ignore
+    }
+    demoSuppressPopstate = false;
+  }
+
+  function demoBindPopstate(s) {
+    window.addEventListener('popstate', function () {
+      if (demoSuppressPopstate) return;
+      if (demoState === s) {
+        // boot側の popstate ハンドラが先に route() を実行済み。まだ同じデモの画面なら続行する。
+        var q = {};
+        try {
+          q = parseQuery();
+        } catch (e0) {
+          q = {};
+        }
+        var sc = q && q.screen ? String(q.screen) : '';
+        if (demoIsDemoScreen(sc) && String((q && q.room) || '') === String(s.roomId || '')) return;
+        demoStopAll();
+        return;
+      }
+      // すでに別のデモ/画面へ切り替わっている。自分の分だけ確実に片付ける。
+      demoTeardown(s);
+    });
+  }
+
+  // -------------------- demo: URL --------------------
+  function demoBuildQueryObj(s) {
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    q.screen = s.game === 'll' ? 'demo_loveletter' : 'demo_hannin';
+    q.room = String(s.roomId || '');
+    q.view = String(s.view || 'bot1');
+    var idx = demoViewIndex(s.view);
+    // 犯人は踊るの routeHanninPlayer は ?player= から自分のIDを読む。
+    if (s.game === 'hn' && idx >= 0) q.player = String(s.botIds[idx] || '');
+    if (Number(s.speed) !== 1) q.sp = String(s.speed);
+    if (s.paused) q.pz = '1';
+    return q;
+  }
+
+  // 履歴を増やさない（ブラウザバックで素直にデモから抜けられるように）。
+  function demoReplaceUrl(s) {
+    try {
+      var qq = buildQuery(demoBuildQueryObj(s));
+      var url = baseUrl() + (qq ? '?' + qq : '');
+      if (location.hash) url += location.hash;
+      history.replaceState(null, '', url);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // -------------------- demo: ルーム作成 --------------------
+  function demoJoinBotsSeq(s, i) {
+    if (!s || s.stopped) return Promise.resolve(null);
+    if (i >= s.botIds.length) return Promise.resolve(null);
+    var pid = String(s.botIds[i] || '');
+    var nm = demoBotName(i);
+    var isHostPlayer = i === 0;
+    var p =
+      s.game === 'll'
+        ? joinPlayerInLoveLetterRoom(s.roomId, pid, nm, isHostPlayer)
+        : joinPlayerInHanninRoom(s.roomId, pid, nm, isHostPlayer);
+    return p.then(function () {
+      return demoJoinBotsSeq(s, i + 1);
+    });
+  }
+
+  function demoCreateAndStart(s) {
+    var settings = { order: s.botIds.slice() };
+    var create = s.game === 'll' ? createLoveLetterRoom(s.roomId, settings) : createHanninRoom(s.roomId, settings);
+    return create
+      .then(function () {
+        return demoJoinBotsSeq(s, 0);
+      })
+      .then(function () {
+        if (s.game !== 'll') return null;
+        // 追加カード（女侯爵・眼鏡）のルールも自動で通るようにしておく。
+        return setLoveLetterExtraCards(s.roomId, DEMO_LL_EXTRA_CARDS.slice()).catch(function () {
+          return null;
+        });
+      })
+      .then(function () {
+        if (s.game === 'll') return startLoveLetterGame(s.roomId, s.botIds[0]);
+        return dealHanninGame(s.roomId);
+      });
+  }
+
+  function demoEnsureRoom(s) {
+    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : hanninRoomPath(s.roomId);
+    return getValueOnce(path).then(function (room) {
+      if (room) return null; // リロード等で既にあるルームはそのまま使う
+      return demoCreateAndStart(s);
+    });
+  }
+
+  function demoSubscribe(s) {
+    var myGen = s.gen;
+    var sub = s.game === 'll' ? subscribeLoveLetterRoom : subscribeHanninRoom;
+    return sub(s.roomId, function (room) {
+      if (!s || s.stopped || s.gen !== myGen) return;
+      if (demoState !== s) return;
+      s.room = room || null;
+    }).then(function (u) {
+      if (!s || s.stopped || s.gen !== myGen || demoState !== s) {
+        try {
+          if (u) u();
+        } catch (e0) {
+          // ignore
+        }
+        return null;
+      }
+      s.unsub = u;
+      return null;
+    });
+  }
+
+  // -------------------- demo: 画面 --------------------
+  // 実際の画面をそのまま出す。既存の route 関数へ委譲するのが一番確実。
+  function demoAttachView(s) {
+    if (!s || s.stopped) return;
+    if (demoAttachBusy) return;
+    demoAttachBusy = true;
+    try {
+      demoReplaceUrl(s);
+      if (s.viewAttached) demoFirePopstate(); // 直前の画面の購読/タイマーを解除させる
+      s.viewAttached = true;
+
+      var idx = demoViewIndex(s.view);
+      if (idx < 0) {
+        // テーブル視点（routeXxxTable は isHost ガードがあるので true を渡す）
+        if (s.game === 'll') routeLoveLetterTable(s.roomId, true);
+        else routeHanninTable(s.roomId, true);
+      } else {
+        var pid = String(s.botIds[idx] || '');
+        if (s.game === 'll') {
+          setLoveLetterPlayerId(s.roomId, pid);
+          routeLoveLetterPlayer(s.roomId, false);
+        } else {
+          // routeHanninPlayer は ?player= を見る（demoReplaceUrl で入れてある）
+          routeHanninPlayer(s.roomId, false);
+        }
+      }
+    } catch (e) {
+      try {
+        renderError(viewEl, (e && e.message) || 'デモ画面の表示に失敗しました');
+      } catch (e2) {
+        // ignore
+      }
+    }
+    demoAttachBusy = false;
+    demoEnsureBar(s);
+  }
+
+  // -------------------- demo: コントロールバー --------------------
+  function demoRemoveBar() {
+    try {
+      var old = document.getElementById('bbgDemoBar');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function demoEnsureBar(s) {
+    if (!s || s.stopped) return;
+    var bar = null;
+    try {
+      bar = document.getElementById('bbgDemoBar');
+    } catch (e0) {
+      bar = null;
+    }
+    if (bar) {
+      demoSyncBar(s);
+      return;
+    }
+
+    var viewOpts = '';
+    for (var i = 0; i < DEMO_BOT_COUNT; i++) {
+      viewOpts += '<option value="bot' + String(i + 1) + '">' + escapeHtml(demoBotName(i)) + 'の画面</option>';
+    }
+    viewOpts += '<option value="table">テーブル</option>';
+
+    bar = document.createElement('div');
+    bar.id = 'bbgDemoBar';
+    bar.className = 'bbg-demo-bar';
+    bar.innerHTML =
+      '<div class="bbg-demo-row">' +
+      '<button type="button" id="bbgDemoPause" class="bbg-demo-btn" title="一時停止 / 再開">⏸</button>' +
+      '<select id="bbgDemoSpeed" class="bbg-demo-sel" title="速度">' +
+      '<option value="1.6">ゆっくり</option>' +
+      '<option value="1">ふつう</option>' +
+      '<option value="0.5">はやい</option>' +
+      '</select>' +
+      '<select id="bbgDemoView" class="bbg-demo-sel" title="視点">' +
+      viewOpts +
+      '</select>' +
+      '<button type="button" id="bbgDemoAgain" class="bbg-demo-btn" title="新しいデモを始める">🔄</button>' +
+      '<button type="button" id="bbgDemoExit" class="bbg-demo-btn bbg-demo-btn--exit" title="デモを終了">✕</button>' +
+      '</div>' +
+      '<div class="bbg-demo-status" id="bbgDemoStatus"></div>';
+
+    try {
+      document.body.appendChild(bar);
+      if (document.body.classList) document.body.classList.add('bbg-demo-on');
+    } catch (e1) {
+      // ignore
+    }
+
+    var pauseBtn = document.getElementById('bbgDemoPause');
+    if (pauseBtn) {
+      pauseBtn.addEventListener('click', function () {
+        var s2 = demoState;
+        if (!s2) return;
+        s2.paused = !s2.paused;
+        demoSyncBar(s2);
+        demoReplaceUrl(s2);
+      });
+    }
+
+    var speedSel = document.getElementById('bbgDemoSpeed');
+    if (speedSel) {
+      speedSel.addEventListener('change', function () {
+        var s2 = demoState;
+        if (!s2) return;
+        var v = Number(speedSel.value);
+        s2.speed = !v || isNaN(v) ? 1 : v;
+        demoReplaceUrl(s2);
+      });
+    }
+
+    var viewSel = document.getElementById('bbgDemoView');
+    if (viewSel) {
+      viewSel.addEventListener('change', function () {
+        var s2 = demoState;
+        if (!s2) return;
+        s2.view = String(viewSel.value || 'bot1');
+        demoAttachView(s2);
+      });
+    }
+
+    var againBtn = document.getElementById('bbgDemoAgain');
+    if (againBtn) {
+      againBtn.addEventListener('click', function () {
+        var s2 = demoState;
+        if (!s2) return;
+        demoRestart(s2);
+      });
+    }
+
+    var exitBtn = document.getElementById('bbgDemoExit');
+    if (exitBtn) {
+      exitBtn.addEventListener('click', function () {
+        demoExit();
+      });
+    }
+
+    demoSyncBar(s);
+  }
+
+  function demoSyncBar(s) {
+    if (!s) return;
+    try {
+      var pauseBtn = document.getElementById('bbgDemoPause');
+      if (pauseBtn) pauseBtn.textContent = s.paused ? '▶' : '⏸';
+      var speedSel = document.getElementById('bbgDemoSpeed');
+      if (speedSel) speedSel.value = String(s.speed);
+      var viewSel = document.getElementById('bbgDemoView');
+      if (viewSel) viewSel.value = String(s.view || 'bot1');
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function demoViewLabel(s) {
+    var idx = demoViewIndex(s && s.view);
+    if (idx < 0) return 'テーブル';
+    return demoBotName(idx);
+  }
+
+  function demoSetStatus(s, text) {
+    if (!s) return;
+    var line =
+      '🤖 ' + demoGameLabel(s.game) + ' / ' + String(s.roomId || '') + ' / ' + demoViewLabel(s) + ' — ' + String(text || '');
+    if (line === s.lastStatus) return;
+    s.lastStatus = line;
+    try {
+      var el = document.getElementById('bbgDemoStatus');
+      if (el) el.textContent = line;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // -------------------- demo: ドライバー --------------------
+  function demoIsFinished(s, room) {
+    try {
+      if (s.game === 'll') return String((room && room.phase) || '') === 'finished';
+      var st = room && room.state ? room.state : null;
+      return !!(st && st.result && st.result.decidedAt);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function demoStartTick(s) {
+    try {
+      if (s.tickTimer) clearInterval(s.tickTimer);
+    } catch (e) {
+      // ignore
+    }
+    s.tickTimer = setInterval(function () {
+      try {
+        demoTick(s);
+      } catch (e2) {
+        // ignore
+      }
+    }, DEMO_TICK_MS);
+  }
+
+  function demoTick(s) {
+    if (!s || s.stopped || demoState !== s) return;
+
+    if (s.paused) {
+      // 止めている間は「次に動く時刻」も一緒にずらす（再開直後に一気に動かない）。
+      if (s.actAt) s.actAt += DEMO_TICK_MS;
+      if (s.restartAt) s.restartAt += DEMO_TICK_MS;
+      demoSetStatus(s, '一時停止中（▶で再開）');
+      return;
+    }
+
+    if (s.restartAt) {
+      var leftMs = s.restartAt - nowMs();
+      if (leftMs <= 0) {
+        s.restartAt = 0;
+        demoRestart(s);
+        return;
+      }
+      demoSetStatus(s, '決着！ ' + String(Math.ceil(leftMs / 1000)) + '秒後に次のデモ');
+      return;
+    }
+
+    var room = s.room;
+    if (!room) {
+      demoSetStatus(s, '接続中…');
+      return;
+    }
+
+    if (demoIsFinished(s, room)) {
+      s.actKey = '';
+      s.actAt = 0;
+      s.actKeySince = 0;
+      s.stallSince = 0;
+      s.restartAt = nowMs() + DEMO_RESTART_MS;
+      return;
+    }
+
+    var plan = null;
+    try {
+      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : demoPlanHannin(s, room);
+    } catch (ePlan) {
+      plan = null;
+    }
+
+    if (!plan) {
+      s.actKey = '';
+      s.actAt = 0;
+      s.actKeySince = 0;
+      if (!s.stallSince) {
+        s.stallSince = nowMs();
+      } else if (nowMs() - s.stallSince > DEMO_STALL_MS) {
+        s.stallSince = 0;
+        demoLog('打てる手が見つからないためデモを作り直します', room);
+        demoRestart(s);
+        return;
+      }
+      demoSetStatus(s, '待機中…');
+      return;
+    }
+    s.stallSince = 0;
+
+    if (plan.key !== s.actKey) {
+      s.actKey = plan.key;
+      s.actKeySince = nowMs();
+      s.actAt = nowMs() + demoDelayMs(s, plan.min, plan.max);
+      demoSetStatus(s, plan.label || '思考中…');
+      return;
+    }
+
+    // 同じ状態から抜けられないときの保険。
+    // まずは既存のホスト救済（代理で待機解除）を1回だけ試し、それでもダメならデモを作り直す。
+    var stuckMs = s.actKeySince ? nowMs() - s.actKeySince : 0;
+    if (stuckMs > DEMO_STALL_MS) {
+      demoLog('同じ状態から進めないためデモを作り直します: ' + String(s.actKey || ''), room);
+      demoRestart(s);
+      return;
+    }
+    if (stuckMs > 12000 && s.forcedKey !== s.actKey && String(s.actKey || '').indexOf('_wf|') > 0) {
+      s.forcedKey = s.actKey;
+      demoLog('待機が解除されないので代理で進めます: ' + String(s.actKey || ''), null);
+      var fp = null;
+      try {
+        fp = s.game === 'll' ? forceAdvanceLoveLetter(s.roomId) : forceAdvanceHannin(s.roomId);
+      } catch (eF) {
+        fp = null;
+      }
+      if (fp && fp.catch) {
+        fp.catch(function () {
+          // ignore
+        });
+      }
+      return;
+    }
+
+    if (!s.actAt || nowMs() < s.actAt) return;
+
+    // 実行。トランザクションが弾いた場合は静かに次のtickへ（alertは出さない）。
+    s.actAt = nowMs() + demoDelayMs(s, 900, 1500);
+    var p = null;
+    try {
+      p = plan.run();
+    } catch (eRun) {
+      p = null;
+    }
+    if (p && p.catch) {
+      p.catch(function () {
+        // ignore
+      });
+    }
+  }
+
+  function demoRestart(s) {
+    if (!s || s.stopped || demoState !== s) return;
+    demoTeardownRoom(s);
+    s.roomId = demoMakeRoomId();
+    s.botIds = demoBotIds(s.roomId);
+    s.lastStatus = '';
+    demoBegin(s);
+  }
+
+  function demoExit() {
+    demoStopAll();
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    q.home = '1';
+    setQuery(q);
+    // URLを先にホームへ変えてから合成popstate。既存route関数の後始末と再描画を同時に行う。
+    demoFirePopstate();
+  }
+
+  function demoBegin(s) {
+    if (!s || s.stopped) return;
+    demoReplaceUrl(s); // 作り直しでroomIdが変わったときにURLを先に合わせておく
+    demoEnsureBar(s);
+    demoSetStatus(s, '準備中…');
+    try {
+      render(
+        viewEl,
+        '<div class="stack"><div class="badge">デモ</div><div class="big">デモを準備中…</div>' +
+          '<div class="muted">' +
+          escapeHtml(demoGameLabel(s.game)) +
+          ' をボット' +
+          String(DEMO_BOT_COUNT) +
+          '人で自動プレイします。</div></div>'
+      );
+    } catch (eR) {
+      // ignore
+    }
+
+    var myGen = s.gen;
+    firebaseReady()
+      .then(function () {
+        if (s.stopped || s.gen !== myGen || demoState !== s) return null;
+        return demoEnsureRoom(s);
+      })
+      .then(function () {
+        if (s.stopped || s.gen !== myGen || demoState !== s) return null;
+        demoAttachView(s);
+        demoStartTick(s);
+        return demoSubscribe(s);
+      })
+      .catch(function (e) {
+        if (s.stopped || s.gen !== myGen || demoState !== s) return;
+        try {
+          renderError(viewEl, (e && e.message) || 'デモの開始に失敗しました');
+        } catch (e2) {
+          // ignore
+        }
+      });
+  }
+
+  // -------------------- demo: ラブレターの判断 --------------------
+  // 手札から出せるカードを選ぶ。姫(8)はサーバ側で拒否されるので選ばない。
+  function demoPickLoveLetterPlay(room, r, actor, hand) {
+    var elim = r.eliminated || {};
+    var prot = r.protected || {};
+
+    var card = '';
+    if (llMustPlayCountess(hand)) {
+      card = '7:countess';
+    } else {
+      var cands = [];
+      for (var i = 0; i < hand.length; i++) {
+        var c = String(hand[i] || '');
+        if (!c) continue;
+        if (c === '8') continue; // 素の姫は手出しできない
+        cands.push(c);
+      }
+      if (!cands.length) return null;
+      card = cands[randomInt(cands.length)];
+    }
+
+    var payload = { card: card };
+    var rank = llCardRankStr(card);
+    if (rank === '1' || rank === '2' || rank === '3' || rank === '5' || rank === '6') {
+      var allowSelf = rank === '5'; // 魔術師は自分も対象にできる
+      var ids = llListPlayerIdsByJoin(room);
+      var free = [];
+      var any = [];
+      for (var j = 0; j < ids.length; j++) {
+        var id = String(ids[j] || '');
+        if (!id) continue;
+        if (!allowSelf && id === String(actor)) continue;
+        if (elim[id]) continue;
+        any.push(id);
+        if (!prot[id]) free.push(id); // 僧侶で保護されていない相手を優先
+      }
+      var pool = free.length ? free : any;
+      payload.target = pool.length ? pool[randomInt(pool.length)] : '';
+      if (rank === '1') payload.guess = String(2 + randomInt(7)); // 兵士の推測は2〜8
+    }
+    return payload;
+  }
+
+  function demoLLAckRun(s, pid) {
+    return function () {
+      return ackLoveLetter(s.roomId, pid);
+    };
+  }
+
+  function demoLLPlayRun(s, actor, payload) {
+    return function () {
+      return playLoveLetterAction(s.roomId, actor, payload);
+    };
+  }
+
+  function demoPlanLoveLetter(s, room) {
+    var phase = String((room && room.phase) || '');
+
+    if (phase === 'lobby') {
+      // 開始が何らかの理由で流れたときの保険
+      return {
+        key: 'll_start',
+        min: 700,
+        max: 1200,
+        label: 'ゲームを開始します',
+        run: function () {
+          return startLoveLetterGame(s.roomId, s.botIds[0]);
+        }
+      };
+    }
+
+    if (phase === 'round_over') {
+      return {
+        key: 'll_next|' + String((room.round && room.round.no) || 0),
+        min: 1500,
+        max: 2500,
+        label: '次のラウンドへ',
+        run: function () {
+          return startLoveLetterNextRound(s.roomId, s.botIds[0]);
+        }
+      };
+    }
+
+    if (phase !== 'playing') return null;
+
+    var r = room.round || null;
+    if (!r || String(r.state || '') !== 'playing') return null;
+
+    var wf = r.waitFor && r.waitFor.type ? r.waitFor : null;
+    if (wf) {
+      var by = String(wf.by || '');
+      if (!by) return null;
+      return {
+        key: 'll_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''),
+        min: 1800,
+        max: 2600,
+        label: demoLLPlayerName(room, by) + ' が確認中',
+        run: demoLLAckRun(s, by)
+      };
+    }
+
+    var actor = String(r.currentPlayerId || '');
+    if (!actor) return null;
+    if (r.eliminated && r.eliminated[actor]) return null;
+
+    var hand = r.hands && Array.isArray(r.hands[actor]) ? r.hands[actor] : [];
+    if (hand.length < 2) return null;
+
+    var payload = demoPickLoveLetterPlay(room, r, actor, hand);
+    if (!payload) return null;
+
+    var key =
+      'll_turn|' +
+      actor +
+      '|' +
+      String((r.lastPlay && r.lastPlay.at) || 0) +
+      '|' +
+      String(Array.isArray(r.deck) ? r.deck.length : 0);
+    return {
+      key: key,
+      min: 1200,
+      max: 2400,
+      label: demoLLPlayerName(room, actor) + ' の手番',
+      run: demoLLPlayRun(s, actor, payload)
+    };
+  }
+
+  function demoLLPlayerName(room, pid) {
+    try {
+      var ps = (room && room.players) || {};
+      if (pid && ps[pid]) return formatPlayerDisplayName(ps[pid]);
+    } catch (e) {
+      // ignore
+    }
+    return String(pid || '-');
+  }
+
+  // -------------------- demo: 犯人は踊るの判断 --------------------
+  // submitHanninRumorChoice と同じ「手札のある右隣」の探し方。
+  function demoHnRightWithCards(order, hands, fromPid) {
+    var from = String(fromPid || '');
+    var startIdx = order.indexOf(from);
+    if (startIdx < 0) return '';
+    for (var step = 1; step < order.length; step++) {
+      var cand = String(order[(startIdx + step) % order.length] || '');
+      if (!cand) continue;
+      var h0 = hands && Array.isArray(hands[cand]) ? hands[cand] : [];
+      if (h0.length) return cand;
+    }
+    return '';
+  }
+
+  function demoHnHasChosen(choices, pid) {
+    if (!choices) return false;
+    var v = choices[pid];
+    return v !== undefined && v !== null;
+  }
+
+  function demoHnInfoRun(s, pid, n) {
+    return function () {
+      return submitHanninInfoChoice(s.roomId, pid, randomInt(n));
+    };
+  }
+
+  function demoHnRumorRun(s, pid, n) {
+    return function () {
+      return submitHanninRumorChoice(s.roomId, pid, randomInt(n));
+    };
+  }
+
+  function demoHnDealRun(s, pid, n) {
+    return function () {
+      return submitHanninDealChoice(s.roomId, pid, randomInt(n));
+    };
+  }
+
+  function demoHnAckRun(s, pid) {
+    return function () {
+      return ackHanninPrivate(s.roomId, pid);
+    };
+  }
+
+  function demoHnPlayRun(s, pid, cardIndex, action) {
+    return function () {
+      return playHanninCard(s.roomId, pid, cardIndex, action);
+    };
+  }
+
+  // 同時選択(情報操作/うわさ/取引)で、まだ選んでいない人を1人だけ返す。
+  function demoHanninPendingNext(s, st, pending) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    var hands = st.hands || {};
+    var choices = pending.choices || {};
+    var i, pid, h;
+
+    if (pending.type === 'info') {
+      for (i = 0; i < order.length; i++) {
+        pid = String(order[i] || '');
+        if (!pid) continue;
+        h = Array.isArray(hands[pid]) ? hands[pid] : [];
+        if (!h.length) continue;
+        if (demoHnHasChosen(choices, pid)) continue;
+        return { pid: pid, run: demoHnInfoRun(s, pid, h.length) };
+      }
+      return null;
+    }
+
+    if (pending.type === 'rumor') {
+      for (i = 0; i < order.length; i++) {
+        pid = String(order[i] || '');
+        if (!pid) continue;
+        h = Array.isArray(hands[pid]) ? hands[pid] : [];
+        if (!h.length) continue;
+        var right = demoHnRightWithCards(order, hands, pid);
+        var rh = right && Array.isArray(hands[right]) ? hands[right] : [];
+        if (!right || !rh.length) continue;
+        if (demoHnHasChosen(choices, pid)) continue;
+        return { pid: pid, run: demoHnRumorRun(s, pid, rh.length) };
+      }
+      return null;
+    }
+
+    if (pending.type === 'deal') {
+      var pair = [String(pending.actorId || ''), String(pending.targetPid || '')];
+      for (i = 0; i < pair.length; i++) {
+        pid = pair[i];
+        if (!pid) continue;
+        if (demoHnHasChosen(choices, pid)) continue;
+        h = Array.isArray(hands[pid]) ? hands[pid] : [];
+        if (!h.length) continue;
+        return { pid: pid, run: demoHnDealRun(s, pid, h.length) };
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  // 手番のプレイヤーが出せるカードを列挙し、ランダムに1つ選ぶ。
+  // 判定条件は playHanninCard のサーバ側チェックと同じにしてある。
+  function demoPickHanninPlay(s, room, st) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    var hands = st.hands || {};
+    var pid = String(st.turn && st.turn.playerId ? st.turn.playerId : '');
+    if (!pid) return null;
+
+    var h = Array.isArray(hands[pid]) ? hands[pid] : [];
+    if (!h.length) return null;
+    var started = !!st.started;
+
+    var withCards = [];
+    for (var t = 0; t < order.length; t++) {
+      var tp = String(order[t] || '');
+      if (!tp || tp === pid) continue;
+      var th = Array.isArray(hands[tp]) ? hands[tp] : [];
+      if (th.length) withCards.push(tp);
+    }
+
+    function pickTarget() {
+      return withCards.length ? withCards[randomInt(withCards.length)] : '';
+    }
+
+    var plays = [];
+    for (var j = 0; j < h.length; j++) {
+      var cardId = String(h[j] || '');
+      if (!cardId) continue;
+
+      if (!started) {
+        // 開始前は第一発見者しか出せない
+        if (cardId !== 'first') continue;
+        plays.push({ index: j, cardId: cardId, action: {} });
+        continue;
+      }
+
+      if (cardId === 'culprit') {
+        // 犯人は手札1枚のときだけ
+        if (h.length !== 1) continue;
+        plays.push({ index: j, cardId: cardId, action: {} });
+        continue;
+      }
+
+      if (cardId === 'detective') {
+        // 探偵は2周目から（サーバ判定と同条件）
+        var tc = typeof st.turnCount === 'number' ? st.turnCount : order.length;
+        if (order.length && parseIntSafe(tc, 0) < order.length) continue;
+        if (!withCards.length) continue;
+        plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
+        continue;
+      }
+
+      if (cardId === 'dog') {
+        if (!withCards.length) continue;
+        var dt = pickTarget();
+        var dh = dt && Array.isArray(hands[dt]) ? hands[dt] : [];
+        if (!dh.length) continue;
+        plays.push({ index: j, cardId: cardId, action: { targetPid: dt, targetIndex: randomInt(dh.length) } });
+        continue;
+      }
+
+      if (cardId === 'witness') {
+        if (!withCards.length) continue;
+        plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
+        continue;
+      }
+
+      if (cardId === 'deal') {
+        // 出したあと自分の手札が残らないと交換できない
+        if (h.length < 2) continue;
+        if (!withCards.length) continue;
+        plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
+        continue;
+      }
+
+      plays.push({ index: j, cardId: cardId, action: {} });
+    }
+
+    if (!plays.length) return null;
+    var pick = plays[randomInt(plays.length)];
+    return { pid: pid, index: pick.index, cardId: pick.cardId, action: pick.action };
+  }
+
+  function demoPlanHannin(s, room) {
+    var phase = String((room && room.phase) || '');
+
+    if (phase === 'lobby') {
+      return {
+        key: 'hn_deal',
+        min: 700,
+        max: 1200,
+        label: 'カードを配ります',
+        run: function () {
+          return dealHanninGame(s.roomId);
+        }
+      };
+    }
+
+    if (phase !== 'playing') return null;
+
+    var st = room.state || null;
+    if (!st) return null;
+    if (st.result && st.result.decidedAt) return null;
+
+    var wf = st.waitFor && st.waitFor.type ? st.waitFor : null;
+    if (wf) {
+      var by = String(wf.by || '');
+      if (!by) return null;
+      return {
+        key: 'hn_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''),
+        min: 1800,
+        max: 2600,
+        label: hnPlayerName(room, by) + ' が確認中',
+        run: demoHnAckRun(s, by)
+      };
+    }
+
+    var pending = st.pending && st.pending.type ? st.pending : null;
+    if (pending) {
+      var need = demoHanninPendingNext(s, st, pending);
+      if (!need) return null;
+      var cnt = 0;
+      try {
+        cnt = Object.keys(pending.choices || {}).length;
+      } catch (eC) {
+        cnt = 0;
+      }
+      return {
+        key: 'hn_pd|' + String(pending.type || '') + '|' + String(pending.createdAt || '') + '|' + String(cnt) + '|' + need.pid,
+        min: 500,
+        max: 1500,
+        label: hnPlayerName(room, need.pid) + ' が選択中',
+        run: need.run
+      };
+    }
+
+    var play = demoPickHanninPlay(s, room, st);
+    if (!play) return null;
+
+    return {
+      key: 'hn_turn|' + play.pid + '|' + String(st.turnCount || 0) + '|' + String((st.lastPlay && st.lastPlay.at) || 0),
+      min: 1200,
+      max: 2400,
+      label: hnPlayerName(room, play.pid) + ' の手番',
+      run: demoHnPlayRun(s, play.pid, play.index, play.action)
+    };
+  }
+
+  // -------------------- demo: ルーティング --------------------
+  function routeDemoLoveLetter() {
+    return routeDemoGame('ll');
+  }
+
+  function routeDemoHannin() {
+    return routeDemoGame('hn');
+  }
+
+  function routeDemoGame(game) {
+    var q = {};
+    try {
+      q = parseQuery();
+    } catch (e0) {
+      q = {};
+    }
+    var roomId = q && q.room ? String(q.room) : '';
+    var view = q && q.view ? String(q.view) : 'bot1';
+    var sp = q && q.sp ? Number(q.sp) : 0;
+    var paused = String((q && q.pz) || '') === '1';
+
+    // 同じデモへの再入（視点切替の合成popstate等）：ドライバーは1つのまま画面だけ張り直す。
+    if (demoState && demoState.game === game && roomId && String(demoState.roomId) === roomId) {
+      demoState.view = demoViewIndex(view) >= 0 || view === 'table' ? view : demoState.view;
+      demoAttachView(demoState);
+      return;
+    }
+
+    demoStopAll();
+
+    var s = demoNewState(game);
+    s.roomId = roomId || demoMakeRoomId();
+    s.botIds = demoBotIds(s.roomId);
+    s.view = demoViewIndex(view) >= 0 || view === 'table' ? view : 'bot1';
+    if (sp === 1.6 || sp === 1 || sp === 0.5) s.speed = sp;
+    s.paused = paused;
+
+    demoState = s;
+    demoBindPopstate(s);
+    demoBegin(s);
+  }
+
+  // ホーム画面の下部に、開発者用の小さな入口を足す（renderHomeの中身は触らない）。
+  function demoInstallHomeEntry(rootEl) {
+    if (!rootEl) return;
+    try {
+      if (document.getElementById('bbgDemoEntry')) return;
+      var host = null;
+      try {
+        host = rootEl.querySelector ? rootEl.querySelector('.stack') : null;
+      } catch (eQ) {
+        host = null;
+      }
+      if (!host) host = rootEl;
+
+      var v = getCacheBusterParam();
+      var vq = v ? 'v=' + encodeQS(v) + '&' : '';
+      var box = document.createElement('div');
+      box.id = 'bbgDemoEntry';
+      box.className = 'bbg-demo-entry';
+      box.innerHTML =
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">🤖 デモ: ラブレター</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>';
+      host.appendChild(box);
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function route() {
     try {
       if (document && document.body && document.body.classList) {
@@ -21033,6 +23797,10 @@
     if (screen === 'hannin_sim_table') {
       return routeHanninSimTable();
     }
+
+    // 開発者用の自動プレイデモ（restricted端末のallowedには入れない）
+    if (screen === 'demo_loveletter') return routeDemoLoveLetter();
+    if (screen === 'demo_hannin') return routeDemoHannin();
 
     if (screen === 'codenames_rejoin') {
       if (!roomId) return routeHome();

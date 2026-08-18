@@ -746,3 +746,261 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   .ok-judge-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
   .ok-judge-img{max-height:34vh;width:auto;max-width:100%}
 }
+
+/* ---------- LL/HN 共通演出 (2026-08) ---------- */
+/* prefers-reduced-motion はこのファイル上部(253行付近)のグローバル指定で
+   すべてのanimation/transitionが無効化されるため、ここでの個別対応は不要。 */
+
+/* 効果音トグル (bbgFxToggleHtml) */
+.bbg-fx-toggle{
+  width:40px;height:40px;padding:0;font-size:18px;line-height:1;
+  border:1px solid var(--line);border-radius:10px;background:var(--card2);
+  display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+}
+
+/* ターン開始オーバーレイ (bbgShowTurnOverlay)。pointer-events:noneでタップを奪わない。 */
+.bbg-turn-overlay{position:fixed;inset:0;z-index:8000;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.bbg-turn-overlay b{
+  font-size:clamp(34px,10vw,64px);font-weight:900;color:#fff;text-align:center;
+  text-shadow:0 4px 24px rgba(0,0,0,.65);background:rgba(91,157,255,.28);
+  border:3px solid rgba(255,255,255,.65);border-radius:20px;padding:18px 30px;
+  animation:bbgTurnPop 1.2s cubic-bezier(.2,1.6,.4,1) both;
+}
+@keyframes bbgTurnPop{0%{transform:scale(.4);opacity:0}18%{transform:scale(1.06);opacity:1}70%{transform:scale(1);opacity:1}100%{transform:scale(.96);opacity:0}}
+
+/* 汎用トースト: .bbg-toast と併用。日本語の長文でも折り返せるようにする(既存トーストは変更しない)。 */
+.bbg-toast--wrap{
+  white-space:normal;max-width:min(420px,calc(100vw - 32px));
+  text-align:center;line-height:1.45;border-radius:14px;
+}
+
+/* 出現アニメ */
+.bbg-pop{animation:okPop .45s cubic-bezier(.2,1.6,.4,1) both}
+.bbg-slidein{animation:bbgSlideIn .3s ease-out both}
+@keyframes bbgSlideIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+/* 順番に出したいとき用(nth-child等と組み合わせず単体で使える遅延) */
+.bbg-delay1{animation-delay:.08s}
+.bbg-delay2{animation-delay:.16s}
+.bbg-delay3{animation-delay:.24s}
+
+/* モーダル出現(全ゲーム共通の .ll-overlay 系に適用される) */
+.ll-overlay-panel{animation:bbgPanelIn .22s cubic-bezier(.2,1.4,.4,1) both}
+.ll-overlay-backdrop{animation:bbgFadeIn .2s ease-out both}
+@keyframes bbgPanelIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes bbgFadeIn{from{opacity:0}to{opacity:1}}
+
+/* カードフリップ(裏→表)。外側に .bbg-flip、中に .bbg-flip-inner を置くと回転する。
+   .bbg-flip-back が裏面、.bbg-flip-front が表面。 */
+.bbg-flip{perspective:700px}
+.bbg-flip-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;animation:bbgFlip .7s cubic-bezier(.3,1.2,.4,1) both}
+.bbg-flip-face{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;border-radius:10px;overflow:hidden}
+.bbg-flip-back{transform:rotateY(0deg)}
+.bbg-flip-front{transform:rotateY(180deg)}
+@keyframes bbgFlip{from{transform:rotateY(0)}to{transform:rotateY(180deg)}}
+/* めくりに「ため」を作りたいとき */
+.bbg-flip--delay .bbg-flip-inner{animation-delay:.35s}
+
+/* 結果スタンプ(的中/はずれ等)。傾きを保ったままポップさせる専用keyframes。 */
+.bbg-stamp{
+  display:inline-block;font-size:26px;font-weight:900;
+  border:3px solid currentColor;border-radius:14px;padding:8px 18px;
+  transform:rotate(-4deg);
+  animation:bbgStampPop .5s cubic-bezier(.2,1.6,.4,1) both;
+}
+@keyframes bbgStampPop{
+  from{transform:rotate(-4deg) scale(.3);opacity:0}
+  60%{transform:rotate(-4deg) scale(1.12);opacity:1}
+  to{transform:rotate(-4deg) scale(1);opacity:1}
+}
+.bbg-stamp--hit{color:var(--danger)}
+.bbg-stamp--miss{color:var(--accent)}
+.bbg-stamp--ok{color:var(--ok)}
+/* ため(間)を作る用 */
+.bbg-stamp--delay{animation-delay:.55s}
+
+/* 揺れ(脱落・はずれ) */
+.bbg-shake{animation:bbgShake .5s ease-in-out both}
+@keyframes bbgShake{0%,100%{transform:none}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
+
+/* 手番席のパルス。既存の配色(background:var(--text))には触れずbox-shadowだけで脈動させる。
+   効果対象の強調リング(.ll-seat--effect)が出ている席では上書きしない。 */
+.ll-seat--turn:not(.ll-seat--effect) .ll-seat-card{animation:bbgSeatPulse 1.6s ease-in-out infinite}
+@keyframes bbgSeatPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,.55)}50%{box-shadow:0 0 0 9px rgba(255,255,255,0)}}
+
+/* バナー更新時の再アニメ用 */
+.bbg-banner-in{animation:bbgSlideIn .35s ease-out both}
+
+/* 全画面演出オーバーレイ(結果発表のため) */
+.bbg-cine{
+  position:fixed;inset:0;z-index:9500;
+  display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.78);padding:20px;text-align:center;
+  animation:bbgFadeIn .2s ease-out both;
+}
+.bbg-cine-text{font-size:clamp(22px,7vw,40px);font-weight:900;color:#fff;text-shadow:0 3px 18px rgba(0,0,0,.6)}
+.bbg-cine-sub{font-size:15px;font-weight:800;color:#dfe7f5;opacity:.9}
+.bbg-cine-card{width:min(220px,56vw);aspect-ratio:3/4}
+.bbg-cine-card img{width:100%;height:100%;object-fit:contain;border-radius:12px}
+.bbg-cine-skip{position:absolute;right:14px;bottom:calc(14px + env(safe-area-inset-bottom,0px));opacity:.8}
+
+/* 効果矢印(SVG)を流れる破線にする */
+.bbg-dash{stroke-dasharray:8 6;animation:bbgDash .6s linear infinite}
+@keyframes bbgDash{to{stroke-dashoffset:-14}}
+
+/* 揺れに「ため」をつけたいとき(フリップ後に揺らす等) */
+.bbg-shake--delay{animation-delay:.6s}
+
+/* ---------- ラブレター 手札レイアウト刷新 (2026-08) ---------- */
+/* 2枚を横並びにして「タップで選択 → ボタンで使用」に一本化する。 */
+.ll-hand2{display:flex;gap:12px;justify-content:center;align-items:flex-end;touch-action:manipulation}
+.ll-card2{
+  width:min(180px,44vw);
+  aspect-ratio:3/4;
+  border-radius:12px;
+  border:2px solid var(--line);
+  background:#0f1520;
+  overflow:hidden;
+  position:relative;
+  transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  -webkit-user-select:none;
+  user-select:none;
+  -webkit-touch-callout:none;
+  cursor:pointer;
+}
+.ll-card2--sel{transform:translateY(-12px);border-color:var(--accent);box-shadow:0 0 0 4px rgba(91,157,255,.35)}
+.ll-card2--only{width:min(220px,58vw)}
+/* 選択中カードの名前+効果テキスト */
+.ll-card-info{text-align:center;display:flex;flex-direction:column;gap:2px}
+.ll-card-info-name{font-weight:900;font-size:16px}
+.ll-card-info-desc{font-size:13px;line-height:1.45}
+.ll-card-info-empty{font-size:13px}
+/* 使用できない理由の注記 */
+.ll-use-note{font-size:13px;line-height:1.4;font-weight:800;color:var(--warn);text-align:center}
+
+/* プレイヤー画面の「直近のプレイ」バナー */
+.ll-lastplay{
+  display:flex;gap:8px;align-items:center;justify-content:center;
+  border:1px solid var(--line);border-radius:12px;background:var(--card2);
+  padding:8px 10px;
+}
+.ll-lastplay-icon{width:24px;height:24px;object-fit:contain;border-radius:6px;flex:0 0 auto;background:#0f1520}
+.ll-lastplay-text{min-width:0;font-size:13px;line-height:1.4;font-weight:800;text-align:left}
+
+/* テーブル画面の直近プレイ(アイコン付き) */
+.ll-table-lastplay-banner{display:flex;gap:10px;align-items:center;justify-content:center}
+.ll-table-lastplay-icon{width:32px;height:32px;object-fit:contain;border-radius:8px;flex:0 0 auto;background:#0f1520}
+
+/* 山札残りわずか */
+.ll-deck-low{color:var(--danger)}
+
+/* 将軍の交換マーク */
+.ll-swap-mark{align-self:center;font-size:26px;font-weight:900;color:var(--accent);flex:0 0 auto;padding:0 2px}
+
+/* 効果解決モーダルの結果行(スタンプ用) */
+.ll-stamp-row{display:flex;justify-content:center;margin-top:12px}
+
+/* ホスト救済(進行が止まったときの代理進行) */
+.ll-force-box{display:flex;flex-direction:column;gap:8px;align-items:center;padding:12px;border-color:var(--warn)}
+.ll-force-title{font-weight:900;color:var(--warn)}
+
+/* 効果音トグルを右寄せで置く行 */
+.ll-fx-row{display:flex;justify-content:flex-end}
+
+/* 席の揺れ(脱落演出)。手番席のパルス指定より優先させるため個別に上書きする。 */
+.ll-seat .ll-seat-card.bbg-shake,
+.ll-seat--turn:not(.ll-seat--effect) .ll-seat-card.bbg-shake{animation:bbgShake .5s ease-in-out both}
+
+/* ---------- 犯人は踊る 手札レイアウト刷新・演出 (2026-08) ---------- */
+/* 手札は横ファン(扇)配置。タップで選択 → 下のボタンで出す、に一本化した。 */
+.hn-hand--fan{width:auto;aspect-ratio:auto;margin:0 auto}
+.hn-card--fan{
+  inset:auto;
+  top:14px;
+  left:0;
+  border-width:2px;
+  cursor:pointer;
+  transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  -webkit-touch-callout:none;
+}
+.hn-card--sel{transform:translateY(-14px);border-color:var(--accent);box-shadow:0 0 0 4px rgba(91,157,255,.35)}
+/* 新しく受け取ったカードの目印 */
+.hn-card-new{
+  position:absolute;top:6px;left:6px;z-index:5;
+  background:var(--accent);color:#fff;font-size:11px;font-weight:900;
+  border-radius:8px;padding:2px 8px;letter-spacing:.04em;
+}
+/* 選択中カードの名前+効果テキスト */
+.hn-card-info{text-align:center;display:flex;flex-direction:column;gap:2px}
+.hn-card-info-name{font-weight:900;font-size:16px}
+.hn-card-info-desc{font-size:13px;line-height:1.45}
+.hn-card-info-empty{font-size:13px}
+
+/* 待機中の減光。新レイアウトのラッパにも効かせる（.ll-hand-wrap も併記している）。 */
+.ll-turn-waiting .hn-hand-wrap{filter:brightness(.72);opacity:.75}
+
+/* ゲーム開始前の案内バナー */
+.hn-banner{
+  border:1px solid var(--accent);border-radius:12px;background:var(--card2);
+  padding:10px 12px;text-align:center;font-weight:900;font-size:14px;line-height:1.5;
+}
+
+/* 同時選択(情報操作/うわさ/取引)の進捗 */
+.hn-progress{display:flex;flex-direction:column;gap:4px;align-items:center;text-align:center}
+.hn-progress-count{font-weight:900;font-size:15px}
+.hn-progress-wait{font-size:13px;line-height:1.4}
+
+/* 墓地：直近3枚（右端が最新・古いものは半透明） */
+.hn-grave-item{display:inline-flex}
+.hn-grave-item--old{opacity:.55}
+.hn-grave-recent{display:flex;gap:6px;justify-content:center;margin-top:6px}
+.hn-grave-mini{width:56px;aspect-ratio:3/4;border-radius:8px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
+.hn-grave-mini--old{opacity:.55}
+
+/* 少年：犯人保持者の名前を少し遅らせてポップさせる */
+.hn-boy-name{font-size:clamp(22px,7vw,34px);font-weight:900;text-align:center}
+.hn-pop-delay{animation-delay:.5s}
+
+/* テーブル席のバッジ */
+.hn-badge-done{border-color:var(--ok);color:var(--ok)}
+.hn-badge-culprit{border-color:var(--danger);color:var(--danger);font-weight:900}
+.hn-badge-win{font-size:16px;margin-left:4px}
+
+/* -------------------- デモ自動プレイ（開発者用） -------------------- */
+/* ホーム下部の目立たない入口 */
+.bbg-demo-entry{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:2px;opacity:.5}
+.bbg-demo-entry:hover{opacity:.95}
+.bbg-demo-entry .bbg-demo-entry-btn{
+  font-size:12px;padding:6px 10px;border-radius:10px;
+  color:var(--muted);border-color:var(--line);text-decoration:none;
+}
+
+/* 画面下部の操作バー。モーダル(.ll-overlay=9999)やcine(.bbg-cine=9500)より手前に出す。 */
+.bbg-demo-bar{
+  position:fixed;left:0;right:0;bottom:0;z-index:10001;
+  display:flex;flex-direction:column;gap:4px;align-items:center;
+  padding:6px 8px;
+  padding-bottom:calc(6px + env(safe-area-inset-bottom));
+  background:rgba(11,15,26,.93);
+  border-top:1px solid var(--line2);
+  box-shadow:0 -4px 16px rgba(0,0,0,.35);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+}
+/* モバイル(375px)で収まらないときは2行に折り返す */
+.bbg-demo-row{display:flex;gap:6px;align-items:center;justify-content:center;flex-wrap:wrap}
+.bbg-demo-bar .bbg-demo-btn{
+  font-size:14px;line-height:1;padding:8px 10px;border-radius:10px;
+  border:1px solid var(--line2);background:var(--card2);color:var(--text);
+  min-width:40px;font-weight:700;
+}
+.bbg-demo-bar .bbg-demo-btn--exit{border-color:var(--danger);color:var(--danger)}
+.bbg-demo-bar .bbg-demo-sel{
+  font-size:12px;padding:7px 8px;border-radius:10px;max-width:132px;
+  border:1px solid var(--line2);background:var(--card2);color:var(--text);
+}
+.bbg-demo-status{
+  font-size:11px;color:var(--muted);text-align:center;line-height:1.3;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+/* バーに隠れないように下端の余白を足す */
+body.bbg-demo-on .app{padding-bottom:104px}
