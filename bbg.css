@@ -329,27 +329,8 @@ body.ll-player-screen .app{padding-top:10px}
 
 /* Love Letter (mobile-first, no-scroll) */
 .ll-hand-wrap{display:flex;flex-direction:column;gap:10px}
-.ll-hand{
-  position:relative;
-  width:min(340px, 90vw);
-  margin:0 auto;
-  aspect-ratio:3/4;
-  touch-action:manipulation;
-}
-.ll-card{
-  position:absolute;
-  inset:0;
-  border-radius:12px;
-  border:1px solid var(--line);
-  background:#0f1520;
-  overflow:hidden;
-  -webkit-user-select:none;
-  user-select:none;
-  -webkit-touch-callout:none;
-}
-.ll-card-back{transform:translate(0,0) scale(.90);opacity:.85}
-.ll-card-front{transform:translate(14px,16%) scale(.90)}
-.ll-turn-waiting .ll-card-front{transform:translate(0,0) scale(.90);opacity:.85}
+/* NOTE: 旧手札レイアウト(.ll-hand / .ll-card / .ll-card-back / .ll-card-front)は
+   .ll-hand2 / .ll-card2 に置き換わったため削除した(.ll-card-img は現役)。 */
 .ll-card-img{width:100%;height:100%;object-fit:contain;display:block;-webkit-user-drag:none;user-drag:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation;pointer-events:none}
 .ll-hint{font-size:13px}
 
@@ -426,7 +407,6 @@ body.ll-table-screen .app{max-width:980px}
 
 .ll-grave-icon{width:22px;height:22px;object-fit:contain;vertical-align:-6px;display:inline-block;margin-left:6px;border-radius:6px;border:1px solid var(--line);background:#0f1520}
 
-.ll-modal-card{width:min(320px, 80vw);margin:10px auto;aspect-ratio:3/4}
 .ll-action-card{width:min(240px, 64vw);margin:8px auto;aspect-ratio:3/4}
 .ll-reveal-card{width:min(300px, 76vw);margin:8px auto;aspect-ratio:3/4}
 .ll-modal-name{font-weight:900;text-align:center;font-size:16px;margin:6px 0 0}
@@ -783,9 +763,12 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .bbg-delay2{animation-delay:.16s}
 .bbg-delay3{animation-delay:.24s}
 
-/* モーダル出現(全ゲーム共通の .ll-overlay 系に適用される) */
-.ll-overlay-panel{animation:bbgPanelIn .22s cubic-bezier(.2,1.4,.4,1) both}
-.ll-overlay-backdrop{animation:bbgFadeIn .2s ease-out both}
+/* モーダル出現。
+   .ll-overlay-panel / .ll-overlay-backdrop に直接指定すると全ゲーム共通に効いてしまい、
+   render() が毎回 innerHTML を差し替えるためRTDBの更新のたびに再生されてしまう。
+   そのため、JS側で「モーダルが新しく出たとき」だけワンショットで付けるクラスにしている。 */
+.bbg-panel-in{animation:bbgPanelIn .22s cubic-bezier(.2,1.4,.4,1) both}
+.bbg-backdrop-in{animation:bbgFadeIn .2s ease-out both}
 @keyframes bbgPanelIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
 @keyframes bbgFadeIn{from{opacity:0}to{opacity:1}}
 
@@ -832,7 +815,7 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 
 /* 全画面演出オーバーレイ(結果発表のため) */
 .bbg-cine{
-  position:fixed;inset:0;z-index:9500;
+  position:fixed;inset:0;z-index:10000;
   display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;
   background:rgba(0,0,0,.78);padding:20px;text-align:center;
   animation:bbgFadeIn .2s ease-out both;
@@ -974,7 +957,7 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
   color:var(--muted);border-color:var(--line);text-decoration:none;
 }
 
-/* 画面下部の操作バー。モーダル(.ll-overlay=9999)やcine(.bbg-cine=9500)より手前に出す。 */
+/* 画面下部の操作バー。モーダル(.ll-overlay=9999)やcine(.bbg-cine=10000)より手前に出す。 */
 .bbg-demo-bar{
   position:fixed;left:0;right:0;bottom:0;z-index:10001;
   display:flex;flex-direction:column;gap:4px;align-items:center;

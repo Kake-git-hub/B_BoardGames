@@ -6259,7 +6259,7 @@
         }
 
         confirmHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('confirm:' + String(cType || '')) + '">' +
           '<div class="ll-overlay-backdrop" id="hnConfirmBg"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6278,35 +6278,8 @@
       confirmHtml = '';
     }
 
-    // Reveal modal (e.g., witness)
-    var revealHtml = '';
-    try {
-      if (canOperate && ui && ui.hnReveal && ui.hnReveal.type === 'witness') {
-        var rp = String(ui.hnReveal.targetPid || '');
-        var rname = rp ? hnPlayerName(room, rp) : '';
-        var rcards = Array.isArray(ui.hnReveal.cards) ? ui.hnReveal.cards.slice() : [];
-        var cardsRow = '';
-        for (var rci = 0; rci < rcards.length; rci++) {
-          cardsRow += '<div class="hn-rumor-card">' + hnCardImgHtml(String(rcards[rci] || '')) + '</div>';
-        }
-        revealHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
-          '<div class="ll-overlay-backdrop" id="hnRevealBg"></div>' +
-          '<div class="ll-overlay-panel">' +
-          '<div class="stack">' +
-          '<div class="big ll-modal-title">目撃者</div>' +
-          '<div class="muted center">' + escapeHtml(rname ? rname + ' の手札' : '手札') + '</div>' +
-          '<div class="hn-rumor-row">' + cardsRow + '</div>' +
-          '<div class="row ll-modal-actions" style="justify-content:center">' +
-          '<button class="primary" id="hnRevealOk">OK</button>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>';
-      }
-    } catch (eRev) {
-      revealHtml = '';
-    }
+    // NOTE: 旧「目撃者」モーダル(ui.hnReveal)は削除した。
+    // 目撃者は st.private[pid].type === 'witness' の privateHtml 側で表示している。
 
     // Private modal (e.g., boy reveals culprit holder only to the actor)
     var privateHtml = '';
@@ -6316,7 +6289,7 @@
         var cpid = String(pmsg.culpritPid || '');
         var cname = cpid ? hnPlayerName(room, cpid) : '';
         privateHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:boy">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6334,7 +6307,7 @@
       } else if (pmsg && String(pmsg.type || '') === 'detective_alibi') {
         // Back-compat: legacy message (now handled as notice).
         privateHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:detective_alibi">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6358,7 +6331,7 @@
         }
         if (!wrow) wrow = '<div class="muted center">（手札なし）</div>';
         privateHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:witness">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6380,7 +6353,7 @@
         var tgtName2 = tgtPid2 ? hnPlayerName(room, tgtPid2) : '';
         var noticeIcon2 = title2 === '探偵' ? 'detective' : title2 === 'いぬ' ? 'dog' : '';
         privateHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:notice">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6399,7 +6372,7 @@
       } else if (pmsg && String(pmsg.type || '') === 'dog_not_culprit') {
         // Back-compat for older rooms.
         privateHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:dog_not_culprit">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6522,7 +6495,7 @@
         }
 
         modalHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('act:' + String(cardId || '')) + '">' +
           '<div class="ll-overlay-backdrop" id="hnModalBg"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
@@ -6802,8 +6775,9 @@
           var useNote0 = '';
           var detectiveLocked0 = false;
           try {
-            var tc0 = parseIntSafe(st.turnCount, 0);
             var ord0 = Array.isArray(st && st.order) ? st.order : [];
+            // turnCount 未定義の古いデータはサーバ判定(playHanninCard)と同じく「1周済み」とみなす。
+            var tc0 = typeof st.turnCount !== 'number' ? ord0.length : st.turnCount;
             detectiveLocked0 = !!(ord0.length && tc0 < ord0.length);
           } catch (eDL0) {
             detectiveLocked0 = false;
@@ -6986,12 +6960,32 @@
         (resultHtml || '') +
         (nextHtml || '') +
         (privateHtml || '') +
-        (revealHtml || '') +
         (confirmHtml || '') +
         (modalHtml || '') +
         (contentHtml || '') +
       '</div>'
     );
+  }
+
+  // モーダルの出現アニメをワンショットで付ける。
+  // render() は毎回 innerHTML を差し替えるため、CSSで .ll-overlay-panel に直接指定すると
+  // 無関係なRTDB更新（プレゼンス等）のたびに再生されてしまう。
+  // 開始タグの data-modal-key が前回と変わったときだけクラスを付ける。
+  function applyModalIntroOnce(rootEl, uiState) {
+    try {
+      if (!uiState) return;
+      var ov = rootEl && rootEl.querySelector ? rootEl.querySelector('.ll-overlay') : null;
+      var key = ov ? String(ov.getAttribute('data-modal-key') || 'modal') : '';
+      if (ov && key !== String(uiState.lastModalIntroKey || '')) {
+        var pnl = ov.querySelector('.ll-overlay-panel');
+        if (pnl && pnl.classList) pnl.classList.add('bbg-panel-in');
+        var bd = ov.querySelector('.ll-overlay-backdrop');
+        if (bd && bd.classList) bd.classList.add('bbg-backdrop-in');
+      }
+      uiState.lastModalIntroKey = key;
+    } catch (e) {
+      // ignore
+    }
   }
 
   function routeHanninPlayer(roomId, isHost) {
@@ -7038,11 +7032,10 @@
       hnRumorSelectedIndex: -1,
       hnPrevHand: [],
       inFlight: false,
-      autoKeyDone: {},
       hnAction: null,
-      hnReveal: null,
       hnConfirm: null,
       hnDealNoticeKey: '',
+      lastModalIntroKey: '',
       lobbyReturnWatching: false,
       lobbyUnsub: null,
       // 演出のワンショット管理（fxReady=false の間はキー記録のみで演出しない）
@@ -7202,18 +7195,78 @@
       }
     }
 
-    function clearRevealModal() {
+    function clearConfirmModal() {
       try {
-        ui.hnReveal = null;
+        ui.hnConfirm = null;
       } catch (e) {
         // ignore
       }
     }
 
-    function clearConfirmModal() {
+    // 「自分の番に手札から1枚出す」系モーダル(hnConfirm.type==='play' / hnAction)が
+    // 今のサーバ状態と食い違っていないか。
+    function hnPlayModalStale(room, m) {
       try {
-        ui.hnConfirm = null;
+        if (!m) return true;
+        var st0 = room && room.state ? room.state : null;
+        if (!st0) return true;
+        if (String((room && room.phase) || '') !== 'playing') return true;
+        if (st0.pending && st0.pending.type) return true;
+        if (st0.waitFor && st0.waitFor.type) return true;
+        var turnPid0 = st0.turn && st0.turn.playerId ? String(st0.turn.playerId) : '';
+        if (!turnPid0 || turnPid0 !== String(playerId || '')) return true;
+        var h0 = playerId && st0.hands && Array.isArray(st0.hands[playerId]) ? st0.hands[playerId] : [];
+        var mi = parseIntSafe(m.cardIndex, -1);
+        if (mi < 0 || mi >= h0.length) return true;
+        if (m.cardId && String(h0[mi] || '') !== String(m.cardId || '')) return true;
+        return false;
       } catch (e) {
+        return true;
+      }
+    }
+
+    // モーダルはユーザーがOK/キャンセルを押す以外に消える経路が無いため、
+    // サーバ側の pending/turn が先に進むと「古い全画面モーダル」が下のUIを覆って
+    // 操作不能になる。再描画のたびに突き合わせて、食い違っていれば破棄する。
+    function dropStaleModals(room) {
+      try {
+        var st0 = room && room.state ? room.state : null;
+        var phase0 = String((room && room.phase) || '');
+        var pend0 = st0 && st0.pending && st0.pending.type ? String(st0.pending.type) : '';
+        var chosen0 = false;
+        try {
+          chosen0 = !!(st0 && st0.pending && st0.pending.choices && st0.pending.choices[String(playerId)] !== undefined);
+        } catch (eCh) {
+          chosen0 = false;
+        }
+        var hand0 = playerId && st0 && st0.hands && Array.isArray(st0.hands[playerId]) ? st0.hands[playerId] : [];
+
+        if (ui.hnConfirm && ui.hnConfirm.type) {
+          var t0 = String(ui.hnConfirm.type || '');
+          var stale0 = false;
+          if (t0 === 'play') {
+            stale0 = hnPlayModalStale(room, ui.hnConfirm);
+          } else if (t0 === 'info' || t0 === 'rumor' || t0 === 'deal') {
+            // 同時選択は pending が一致していて、まだ自分が選んでいない間だけ有効。
+            if (phase0 !== 'playing' || pend0 !== t0 || chosen0) {
+              stale0 = true;
+            } else if (t0 === 'info' || t0 === 'deal') {
+              // 情報操作/取引は自分の手札のindexなので、手札が変わっていたら無効。
+              var ci0 = parseIntSafe(ui.hnConfirm.index, -1);
+              if (ci0 < 0 || ci0 >= hand0.length) stale0 = true;
+              else if (ui.hnConfirm.cardId && String(hand0[ci0] || '') !== String(ui.hnConfirm.cardId || '')) stale0 = true;
+            }
+          } else if (t0 === 'notice') {
+            // 取引の注意喚起。取引が終わっていれば不要。
+            if (phase0 !== 'playing' || pend0 !== 'deal' || chosen0) stale0 = true;
+          }
+          if (stale0) clearConfirmModal();
+        }
+
+        if (ui.hnAction && ui.hnAction.type === 'play' && hnPlayModalStale(room, ui.hnAction)) {
+          clearActionModal();
+        }
+      } catch (eDS) {
         // ignore
       }
     }
@@ -7254,6 +7307,9 @@
 
     function renderNow(room) {
       lastRoom = room;
+
+      // 先に「古くなったモーダル」を捨てる（下のUIを覆って操作不能になるのを防ぐ）。
+      dropStaleModals(room);
 
       // If we came from a lobby, keep a watcher so returning to lobby pulls players back too.
       try {
@@ -7321,6 +7377,7 @@
       }
 
       renderHanninPlayer(viewEl, { roomId: roomId, room: room, playerId: playerId, lobbyId: lobbyId, isHost: isHost, ui: ui, isTableGmDevice: isTableGmDevice });
+      applyModalIntroOnce(viewEl, ui);
 
       // 手札：タップで選択（もう一度タップで解除）。使用は下の大きなボタンに一本化した。
       // 長押しと巡回タップは廃止。自分の番でなくてもタップして効果説明を見られる。
@@ -7493,24 +7550,6 @@
           ackHanninPrivate(roomId, playerId).catch(function () {
             // ignore
           });
-        });
-      }
-
-      var rbg = document.getElementById('hnRevealBg');
-      if (rbg && !rbg.__hn_bound) {
-        rbg.__hn_bound = true;
-        rbg.addEventListener('click', function () {
-          clearRevealModal();
-          renderNow(lastRoom);
-        });
-      }
-
-      var rok = document.getElementById('hnRevealOk');
-      if (rok && !rok.__hn_bound) {
-        rok.__hn_bound = true;
-        rok.addEventListener('click', function () {
-          clearRevealModal();
-          renderNow(lastRoom);
         });
       }
 
@@ -7846,9 +7885,10 @@
 
       // Detective can only be used from the 2nd round and later.
       if (cardId === 'detective' && st.started) {
-        var tc = parseIntSafe(st.turnCount, -1);
         var order = Array.isArray(st.order) ? st.order : [];
-        if (tc >= 0 && order && order.length && tc < order.length) {
+        // turnCount 未定義の古いデータはサーバ判定(playHanninCard)と同じく「1周済み」とみなす。
+        var tc = typeof st.turnCount !== 'number' ? order.length : st.turnCount;
+        if (order && order.length && tc < order.length) {
           bbgShowToast('探偵は2周目から使えます');
           return;
         }
@@ -7877,72 +7917,8 @@
     // NOTE: うわさ/情報操作の長押し確定は廃止（タップ→確認モーダルに一本化）したため、
     // tryConfirmRumorByLongPress / tryConfirmInfoByLongPress は削除した。
 
-    function maybeAutoAdvancePendingForTests(room) {
-      // Disabled: test players are progressed from the table screen by clicking.
-      return;
-
-      var order = Array.isArray(st.order) ? st.order.slice() : [];
-      if (!order.length) return;
-      var hands = st.hands || {};
-      var choices = (pending.choices && typeof pending.choices === 'object') ? pending.choices : {};
-
-      var keyBase = type + '|' + String(pending.createdAt || 0);
-
-      for (var i = 0; i < order.length; i++) {
-        var pid = String(order[i] || '');
-        if (!pid) continue;
-        if (!hnIsTestPlayerId(pid)) continue;
-        if (choices && choices[pid] !== undefined) continue;
-
-        var k = keyBase + '|' + pid;
-        if (ui.autoKeyDone && ui.autoKeyDone[k]) continue;
-        if (!ui.autoKeyDone) ui.autoKeyDone = {};
-        ui.autoKeyDone[k] = true;
-
-        (function (targetPid) {
-          var delay = 120 + randomInt(420);
-          setTimeout(function () {
-            // Re-check latest room state to avoid double submit.
-            try {
-              var st2 = lastRoom && lastRoom.state ? lastRoom.state : null;
-              var p2 = st2 && st2.pending ? st2.pending : null;
-              if (!st2 || !p2 || String(p2.type || '') !== type) return;
-              if (p2.choices && p2.choices[targetPid] !== undefined) return;
-            } catch (e1) {
-              return;
-            }
-
-            if (type === 'info') {
-              var h = lastRoom && lastRoom.state && lastRoom.state.hands && Array.isArray(lastRoom.state.hands[targetPid]) ? lastRoom.state.hands[targetPid] : [];
-              if (!h || !h.length) return;
-              var pick = randomInt(h.length);
-              submitHanninInfoChoice(roomId, targetPid, pick).catch(function () {
-                // ignore
-              });
-              return;
-            }
-
-            if (type === 'rumor') {
-              var st3 = lastRoom && lastRoom.state ? lastRoom.state : null;
-              var order3 = st3 && Array.isArray(st3.order) ? st3.order.slice() : order;
-              var hands3 = st3 && st3.hands ? st3.hands : hands;
-              var right = hnRightPid(order3, targetPid);
-              var rh = right && hands3 && Array.isArray(hands3[right]) ? hands3[right] : [];
-              var count = rh && Array.isArray(rh) ? rh.length : 0;
-              var pick2 = count > 0 ? randomInt(count) : -1;
-              submitHanninRumorChoice(roomId, targetPid, pick2).catch(function () {
-                // ignore
-              });
-            }
-          }, delay);
-        })(pid);
-      }
-    }
-
-    function maybeAutoPlayTurnForTestPlayer(room) {
-      // Disabled: test players are progressed from the table screen by clicking.
-      return;
-    }
+    // NOTE: テストプレイヤーの自動進行（maybeAutoAdvancePendingForTests /
+    // maybeAutoPlayTurnForTestPlayer）は、テーブル画面からのクリック操作に一本化したため削除した。
 
     firebaseReady()
       .then(function () {
@@ -8218,8 +8194,9 @@
 
       // Detective can only be played from the 2nd round and later.
       if (cardId === 'detective' && st.started) {
+        // turnCount 未定義の古いデータは「1周済み」とみなす（描画側/tryPlayCardと同じ扱い）。
         if (typeof st.turnCount !== 'number') st.turnCount = order.length;
-        var tc0 = parseIntSafe(st.turnCount, 0);
+        var tc0 = st.turnCount;
         if (order && order.length && tc0 < order.length) return room;
       }
 
@@ -17111,7 +17088,7 @@
     // 誰も操作できない時間に「いま何を待っているか」を出す共通の待機モーダル。
     function llWaitModalHtml(title, text) {
       return (
-        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('wait:' + String(title || '')) + '">' +
         '<div class="ll-overlay-backdrop"></div>' +
         '<div class="ll-overlay-panel">' +
         '<div class="big">' + escapeHtml(String(title || '')) + '</div>' +
@@ -17299,8 +17276,10 @@
       }
 
       // 使用ボタン（自分の番のみ表示。押せない理由は注記で伝える）
+      // 誰かのack待ち(waitFor)の間は出せない。HN側の blockedByWait0 と揃えている。
+      var blockedByWait1 = !!(r && r.waitFor && r.waitFor.type);
       var useHtml = '';
-      if (isMyTurn) {
+      if (isMyTurn && !blockedByWait1) {
         var useLabel1 = 'このカードを使う';
         var useDisabled1 = false;
         var useNote1 = '';
@@ -17401,7 +17380,7 @@
       }
 
       modalHtml =
-        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('play:' + String(pendingCard || '')) + '">' +
         '<div class="ll-overlay-backdrop"></div>' +
         '<div class="ll-overlay-panel">' +
         '<div class="big ll-modal-title">' +
@@ -17429,7 +17408,7 @@
     if (!ui.ackInFlight && ui && ui.modal && ui.modal.type === 'peek') {
       var m = ui.modal;
       modalHtml =
-        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="peek">' +
         '<div class="ll-overlay-backdrop"></div>' +
         '<div class="ll-overlay-panel">' +
         '<div class="big">道化：確認</div>' +
@@ -17463,7 +17442,7 @@
           resCls0 = ' bbg-stamp--miss';
         }
         modalHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:guard">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="big">兵士：推測結果</div>' +
@@ -17500,7 +17479,7 @@
               kStamp = '<div class="ll-stamp-row"><span class="bbg-stamp bbg-stamp--delay bbg-stamp--miss">引き分け</span></div>';
             }
             modalHtml =
-              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:knight">' +
               '<div class="ll-overlay-backdrop"></div>' +
               '<div class="ll-overlay-panel">' +
               '<div class="big">騎士：比較結果</div>' +
@@ -17531,7 +17510,7 @@
           // General swap stays private to the two involved players.
           if (String(playerId) === by || String(playerId) === tg) {
             modalHtml =
-              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:general_swap">' +
               '<div class="ll-overlay-backdrop"></div>' +
               '<div class="ll-overlay-panel">' +
               '<div class="big">将軍：手札交換</div>' +
@@ -17567,7 +17546,7 @@
         var drew2 = String(rv.drew || '');
         if (String(playerId) === by2) {
           modalHtml =
-            '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+            '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:minister_self">' +
             '<div class="ll-overlay-backdrop"></div>' +
             '<div class="ll-overlay-panel bbg-shake">' +
             '<div class="big">大臣：合計12以上</div>' +
@@ -17592,7 +17571,7 @@
           var mKey2 = 'minister:' + by2 + ':' + drew2;
           if (String(ui.dismissedRevealKey || '') !== mKey2) {
             modalHtml =
-              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+              '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:minister_other">' +
               '<div class="ll-overlay-backdrop"></div>' +
               '<div class="ll-overlay-panel">' +
               '<div class="big">大臣：合計12以上</div>' +
@@ -17634,7 +17613,7 @@
             '</div>';
         }
         modalHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:showdown">' +
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="big">山札切れ：全員公開</div>' +
@@ -17655,7 +17634,7 @@
           // 捨て札は公開情報なので、対象者本人にも同じ内容を見せる（進めるのは使用者のみ）。
           var discarded = String(rv.discarded || '');
           modalHtml =
-            '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true">' +
+            '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="rev:wizard">' +
             '<div class="ll-overlay-backdrop"></div>' +
             '<div class="ll-overlay-panel">' +
             '<div class="big">魔術師：' +
@@ -17864,10 +17843,23 @@
 
   function routeLoveLetterRejoin(roomId, isHost) {
     var unsub = null;
+    // setQuery() は pushState なので popstate が発生せず、購読が残ったままになる。
+    // この画面は購読コールバックの中からも画面遷移するため、遷移前に自分で解除する。
+    var rejoinStopped = false;
+    function stopRejoinWatch() {
+      rejoinStopped = true;
+      try {
+        if (unsub) unsub();
+      } catch (eSt) {
+        // ignore
+      }
+      unsub = null;
+    }
 
     firebaseReady()
       .then(function () {
         return subscribeLoveLetterRoom(roomId, function (room) {
+          if (rejoinStopped) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -17886,6 +17878,7 @@
             } catch (e0) {
               // ignore
             }
+            stopRejoinWatch();
             setQuery(q0);
             route();
             return;
@@ -17911,6 +17904,7 @@
               } catch (e1) {
                 // ignore
               }
+              stopRejoinWatch();
               setQuery(q1);
               route();
             });
@@ -17947,6 +17941,7 @@
               } catch (e2) {
                 // ignore
               }
+              stopRejoinWatch();
               setQuery(q2);
               route();
             });
@@ -17955,13 +17950,15 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐ解除する。
+        if (rejoinStopped) stopRejoinWatch();
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
       });
 
     window.addEventListener('popstate', function () {
-      if (unsub) unsub();
+      stopRejoinWatch();
     });
   }
 
@@ -18185,6 +18182,8 @@
 
     function redirectToLobby() {
       if (!lobbyId) return;
+      // 他の遷移と同じく、setQuery() は pushState なので購読を自分で解除しておく。
+      stopExtrasWatch();
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -18414,6 +18413,7 @@
       dismissedRevealKey: '',
       ackInFlight: false,
       modalScrollTop: 0,
+      lastModalIntroKey: '',
       cancelled: false,
       // 演出のワンショット管理（fxReady=false の間はキー記録のみで演出しない）
       fxReady: false,
@@ -18454,6 +18454,14 @@
         // ignore
       }
       fxTimers = [];
+      // 決着演出(.bbg-cine)は自分のタイマーで消える設計なので、タイマーをclearするだけだと
+      // 画面遷移したときに黒い全画面カバーが残り続ける。HN側と同じくDOMも明示的に消す。
+      try {
+        var cine0 = document.getElementById('llCine');
+        if (cine0 && cine0.parentNode) cine0.parentNode.removeChild(cine0);
+      } catch (e2) {
+        // ignore
+      }
     }
 
     var lobbyId = '';
@@ -18777,6 +18785,7 @@
 
       var player = room && room.players ? room.players[playerId] : null;
       renderLoveLetterPlayer(viewEl, { roomId: roomId, playerId: playerId, player: player, room: room, isHost: isHost, ui: ui, lobbyId: lobbyId });
+      applyModalIntroOnce(viewEl, ui);
 
       // Prevent long-press image search/callout and dragging on card images.
       try {
@@ -18826,6 +18835,8 @@
           if (ev && ev.preventDefault) ev.preventDefault();
           if (ev && ev.stopPropagation) ev.stopPropagation();
 
+          // 失敗したときに元へ戻せるよう、確定前の値を控えておく。
+          var prevPeekDismissedKey = String(ui.peekDismissedKey || '');
           if (ui.modal && ui.modal.type === 'peek' && ui.modal.key) {
             ui.peekDismissedKey = String(ui.modal.key);
           }
@@ -18845,10 +18856,19 @@
 
           ackLoveLetter(roomId, playerId)
             .catch(function (e) {
+              // 通信失敗時はモーダルを戻す。道化は peekDismissedKey を確定させてしまうと
+              // 二度とボタンが出なくなるので巻き戻す。
+              ui.peekDismissedKey = prevPeekDismissedKey;
               alert((e && e.message) || '失敗');
             })
             .finally(function () {
               ui.ackInFlight = false;
+              // 成否にかかわらず再描画する（失敗時にモーダル無しで固まらないように）。
+              try {
+                renderNow(lastRoom);
+              } catch (e2) {
+                // ignore
+              }
             });
         };
 
@@ -18934,6 +18954,21 @@
               return setLobbyCurrentGame(lobbyId, null);
             })
             .then(function () {
+              // redirectToLobby() と同じく、遷移前に購読と演出タイマーを片付ける。
+              ui.cancelled = true;
+              llClearFxTimers();
+              try {
+                if (unsub) unsub();
+              } catch (eU1) {
+                // ignore
+              }
+              unsub = null;
+              try {
+                if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (eL1) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
               var q = {};
               var v = getCacheBusterParam();
               if (v) q.v = v;
@@ -18995,6 +19030,21 @@
           nextGameBtn.disabled = true;
           resetLoveLetterToLobby(roomId, playerId)
             .then(function () {
+              // ロビー無しの単独ルーム運用ではここが唯一の遷移なので、必ず購読を解除する。
+              ui.cancelled = true;
+              llClearFxTimers();
+              try {
+                if (unsub) unsub();
+              } catch (eU2) {
+                // ignore
+              }
+              unsub = null;
+              try {
+                if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (eL2) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
               var q = {};
               var v = getCacheBusterParam();
               if (v) q.v = v;
@@ -19212,6 +19262,15 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐ解除する。
+        if (ui.cancelled) {
+          try {
+            unsub();
+          } catch (eU3) {
+            // ignore
+          }
+          unsub = null;
+        }
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
@@ -19238,13 +19297,8 @@
 
     window.addEventListener('popstate', function () {
       if (unsub) unsub();
+      // llClearFxTimers() の中で #llCine も除去する。
       llClearFxTimers();
-      try {
-        var cine0 = document.getElementById('llCine');
-        if (cine0 && cine0.parentNode) cine0.parentNode.removeChild(cine0);
-      } catch (eCine) {
-        // ignore
-      }
       try {
         if (ui && ui.lobbyUnsub) ui.lobbyUnsub();
       } catch (e2) {
@@ -19814,7 +19868,7 @@
 
     var unsub = null;
     var lobbyId = '';
-    var tUi = { lastPlayKey: '', elimSeen: null, stalledShown: false };
+    var tUi = { lastPlayKey: '', elimSeen: null, stalledShown: false, cancelled: false };
     var lastRoom = null;
     var stallTimer = null;
     try {
@@ -19851,7 +19905,21 @@
 
     function redirectToLobby() {
       if (!lobbyId) return;
+      // setQuery() は pushState なので popstate が起きない。遷移前に自分で解除する。
+      tUi.cancelled = true;
       clearStallTimer();
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      lobbyUnsub = null;
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -19965,6 +20033,7 @@
       .then(function () {
         if (lobbyId) ensureLobbyReturnWatcher();
         return subscribeLoveLetterRoom(roomId, function (room) {
+          if (tUi.cancelled) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -19974,6 +20043,15 @@
       })
       .then(function (u) {
         unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐ解除する。
+        if (tUi.cancelled) {
+          try {
+            unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
       })
       .catch(function (e) {
         renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
@@ -19993,8 +20071,15 @@
     }, 10000);
 
     window.addEventListener('popstate', function () {
+      tUi.cancelled = true;
       if (unsub) unsub();
       clearStallTimer();
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (eL2) {
+        // ignore
+      }
+      lobbyUnsub = null;
     });
   }
 
