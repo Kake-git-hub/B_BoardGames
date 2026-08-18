@@ -6097,6 +6097,23 @@
     return hnNextTurn(order, currentPid);
   }
 
+  // 手札が1枚以上ある人の数。うわさ/情報操作の同時選択が成立するかの判定に使う。
+  function hnCountHandHolders(order, hands) {
+    var n = 0;
+    try {
+      var list = Array.isArray(order) ? order : [];
+      for (var i = 0; i < list.length; i++) {
+        var pid = String(list[i] || '');
+        if (!pid) continue;
+        var h = hands && Array.isArray(hands[pid]) ? hands[pid] : [];
+        if (h.length) n += 1;
+      }
+    } catch (e) {
+      return n;
+    }
+    return n;
+  }
+
   function hnPlayerName(room, pid) {
     try {
       return String((room && room.players && room.players[pid] && room.players[pid].name) || pid || '');
@@ -8503,6 +8520,15 @@
       }
 
       if (cardId === 'rumor') {
+        // うわさは「右どなりの手札から1枚引く」ので、手札のある人が2人以上いないと
+        // 誰ひとり選択できず、同時選択がいつまでも成立しない（進行停止）。
+        // その場合は効果なしで手番を進める。
+        if (hnCountHandHolders(order, hands) < 2) {
+          st.log = st.log.concat(['うわさ：引ける相手がいないため効果なし']);
+          advanceTurn();
+          return assign({}, room, { state: st });
+        }
+
         // Pending group action: each player selects 1 facedown card to draw from the right neighbor.
         st.pending = {
           type: 'rumor',
@@ -8516,6 +8542,13 @@
       }
 
       if (cardId === 'info') {
+        // 情報操作も、手札のある人が1人もいないと誰も選択できず止まる。
+        if (hnCountHandHolders(order, hands) < 1) {
+          st.log = st.log.concat(['情報操作：渡せる手札がないため効果なし']);
+          advanceTurn();
+          return assign({}, room, { state: st });
+        }
+
         // Pending group action: each player selects 1 card to pass to left neighbor.
         st.pending = {
           type: 'info',
@@ -8582,7 +8615,9 @@
         var hG = snapshot[pG] || [];
         if (!hG.length) continue; // skip players with no hand
         var choose = parseIntSafe(st.pending.choices[pG], -1);
-        if (choose < 0 || choose >= hG.length) return room;
+        // 記録済みの選択が範囲外でも、ここで return room すると今回の選択ごと巻き戻って
+        // 同時選択が永久に成立しなくなる。その人だけ「渡さない」扱いにして先へ進める。
+        if (choose < 0 || choose >= hG.length) continue;
         giveCard[pG] = String(hG[choose] || '');
       }
 
@@ -8831,8 +8866,21 @@
       // Resolve exchange.
       var aIdx = parseIntSafe(pending.choices[String(actorPid)], -1);
       var tIdx = parseIntSafe(pending.choices[String(targetPid)], -1);
-      if (aIdx < 0 || aIdx >= aHand.length) return room;
-      if (tIdx < 0 || tIdx >= tHand.length) return room;
+      // 記録済みの選択が範囲外でも、ここで return room すると今回の選択ごと巻き戻り、
+      // 2人の選択がそろわないまま永久に止まる。交換なしで手番を進める。
+      if (aIdx < 0 || aIdx >= aHand.length || tIdx < 0 || tIdx >= tHand.length) {
+        st.pending = null;
+        var rfX = '';
+        try {
+          rfX = String(pending && (pending.resumeFrom || pending.actorId) ? (pending.resumeFrom || pending.actorId) : '');
+        } catch (eRX) {
+          rfX = '';
+        }
+        if (rfX) st.turn = hnNextTurnSkipEmpty(Array.isArray(st.order) ? st.order.slice() : [], rfX, hands);
+        if (!Array.isArray(st.log)) st.log = [];
+        st.log = st.log.concat(['取引：選んだカードが見つからず、交換なし']);
+        return assign({}, room, { state: st });
+      }
 
       var giveCard = String(aHand[aIdx] || '');
       var takeCard = String(tHand[tIdx] || '');
@@ -24134,34 +24182,31 @@
         continue;
       }
 
+      // 以下の対象指定カードは、対象が選べない場合でもサーバ側は「効果なしで手番を進める」扱いに
+      // なるので、ここで手として捨ててはいけない（捨てると打てる手が無くなって進行が止まる）。
       if (cardId === 'detective') {
         // 探偵は2周目から（サーバ判定と同条件）
         var tc = typeof st.turnCount === 'number' ? st.turnCount : order.length;
         if (order.length && parseIntSafe(tc, 0) < order.length) continue;
-        if (!withCards.length) continue;
         plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
         continue;
       }
 
       if (cardId === 'dog') {
-        if (!withCards.length) continue;
         var dt = pickTarget();
         var dh = dt && Array.isArray(hands[dt]) ? hands[dt] : [];
-        if (!dh.length) continue;
-        plays.push({ index: j, cardId: cardId, action: { targetPid: dt, targetIndex: randomInt(dh.length) } });
+        if (!dt || !dh.length) plays.push({ index: j, cardId: cardId, action: {} });
+        else plays.push({ index: j, cardId: cardId, action: { targetPid: dt, targetIndex: randomInt(dh.length) } });
         continue;
       }
 
       if (cardId === 'witness') {
-        if (!withCards.length) continue;
         plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
         continue;
       }
 
       if (cardId === 'deal') {
-        // 出したあと自分の手札が残らないと交換できない
-        if (h.length < 2) continue;
-        if (!withCards.length) continue;
+        // 出したあと自分の手札が残らない／相手がいないときは、サーバ側は交換せずに手番を進める。
         plays.push({ index: j, cardId: cardId, action: { targetPid: pickTarget() } });
         continue;
       }
@@ -25468,7 +25513,10 @@
         oekaki_player: 1,
         // リレーモードはロビー外の遊び。LINE等で届いたリンクは制限端末でも開けるようにする
         // （部屋を作る側の画面 oekaki_relay_create は下のホスト系ブロックで弾かれる）。
-        oekaki_relay: 1
+        oekaki_relay: 1,
+        // デモ（自動プレイ）は見るだけの画面。ロビーに参加済みの端末でも開けるようにする。
+        demo_loveletter: 1,
+        demo_hannin: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
