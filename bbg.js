@@ -1036,7 +1036,7 @@
   function cleanupOldRooms() {
     if (!shouldRunCleanup()) return Promise.resolve();
 
-    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'lobbies'];
+    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'oekakiRelayRooms', 'lobbies'];
     var cutoff = nowMs() - CLEANUP_MAX_AGE_MS;
 
     return firebaseReady()
@@ -1222,6 +1222,17 @@
 
   function subscribeOekakiRoom(roomId, cb) {
     return onValue(oekakiRoomPath(roomId), cb);
+  }
+
+  // -------------------- oekaki battle relay (state) --------------------
+  // リレーモードは2人専用・非同期。ロビーを使わず、URLを手渡しして交互に進める。
+  // スロットは 'a'（ホスト=先攻）と 'b'（挑戦者=後攻）の2つ固定。
+  function oekakiRelayRoomPath(roomId) {
+    return 'oekakiRelayRooms/' + roomId;
+  }
+
+  function subscribeOekakiRelayRoom(roomId, cb) {
+    return onValue(oekakiRelayRoomPath(roomId), cb);
   }
 
   // -------------------- shared (persisted name) --------------------
@@ -1505,6 +1516,70 @@
     }).then(function (lobby) {
       try {
         if (lobby) updateLobbyIndex(lobbyId, lobby);
+      } catch (eIdx) {
+        // ignore
+      }
+      return lobby;
+    });
+  }
+
+  // -------------------- lobby: 退出 / 解散 --------------------
+  // ロビーに入ると出口が無く行き止まりになっていたため、明示的な退出手段を用意する。
+  // - 参加者: 「ロビーを出る」= 自分をメンバーから外す（leaveLobbyMember）
+  // - ホスト: 「ロビーを解散する」= ロビーごと削除して全員をホームへ（deleteLobby）
+
+  // ロビー本体と一覧インデックスをまとめて削除する。
+  // 参加者端末は subscribeLobby が null を受け取り、自動でホームへ戻る。
+  function deleteLobby(lobbyId) {
+    var id = String(lobbyId || '').trim();
+    if (!id) return Promise.reject(new Error('ロビーIDが不正です'));
+    return setValue(lobbyPath(id), null).then(function () {
+      return setValue(lobbyIndexPath(id), null).catch(function () {
+        // インデックスの削除失敗は致命的ではない（7日で自動的に掃除される）
+      });
+    });
+  }
+
+  // メンバー一覧と順番から自分を外す。
+  // - 誰もいなくなったらロビーごと削除する（ホーム一覧に空のロビーを残さない）
+  // - ホストが抜けた場合は残っている先頭のメンバーをホストに繰り上げる
+  //   （hostMid が居ないメンバーを指したままだと、誰もホスト画面を開けなくなるため）
+  function leaveLobbyMember(lobbyId, memberId) {
+    var id = String(lobbyId || '').trim();
+    var mid = String(memberId || '').trim();
+    if (!id || !mid) return Promise.reject(new Error('退出に失敗しました（ID不正）'));
+
+    var becameEmpty = false;
+    return runTxn(lobbyPath(id), function (lobby) {
+      if (!lobby) return lobby;
+
+      var members = assign({}, lobby.members || {});
+      delete members[mid];
+
+      var order = Array.isArray(lobby.order) ? lobby.order : [];
+      var nextOrder = [];
+      for (var i = 0; i < order.length; i++) {
+        var oid = String(order[i] || '');
+        if (!oid || oid === mid) continue;
+        if (!members[oid]) continue;
+        nextOrder.push(oid);
+      }
+
+      var remaining = Object.keys(members);
+      if (!remaining.length) {
+        becameEmpty = true;
+        return lobby; // 実体の削除はトランザクションの外で行う
+      }
+
+      var next = assign({}, lobby, { members: members, order: nextOrder });
+      if (String(lobby.hostMid || '') === mid) {
+        next.hostMid = String(nextOrder[0] || remaining[0] || '');
+      }
+      return next;
+    }).then(function (lobby) {
+      if (becameEmpty) return deleteLobby(id);
+      try {
+        if (lobby) updateLobbyIndex(id, lobby);
       } catch (eIdx) {
         // ignore
       }
@@ -4613,8 +4688,23 @@
     );
   }
 
-  function oekakiCallGeminiOnce(model, apiKey, topic, entries) {
-    var parts = [{ text: oekakiJudgePrompt(topic, entries.length) }];
+  // 採点結果のJSONスキーマ（同室モード: 配列のみ）
+  var OEKAKI_JUDGE_SCHEMA = {
+    type: 'ARRAY',
+    items: {
+      type: 'OBJECT',
+      properties: {
+        index: { type: 'INTEGER' },
+        score: { type: 'INTEGER' },
+        comment: { type: 'STRING' }
+      },
+      required: ['index', 'score', 'comment']
+    }
+  };
+
+  // prompt / schema を差し替えられるようにしてある（リレーモードは別プロンプト・別スキーマ）。
+  function oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries) {
+    var parts = [{ text: String(prompt || '') }];
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
       parts.push({ text: '絵' + String(i + 1) + '（プレイヤー: ' + String(e.name || '?') + '）' });
@@ -4624,18 +4714,7 @@
       contents: [{ parts: parts }],
       generationConfig: {
         responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'ARRAY',
-          items: {
-            type: 'OBJECT',
-            properties: {
-              index: { type: 'INTEGER' },
-              score: { type: 'INTEGER' },
-              comment: { type: 'STRING' }
-            },
-            required: ['index', 'score', 'comment']
-          }
-        }
+        responseSchema: schema || OEKAKI_JUDGE_SCHEMA
       }
     };
     var url =
@@ -4675,25 +4754,25 @@
         } catch (e3) {
           text = '';
         }
-        var arr = null;
+        var parsed = null;
         try {
-          arr = JSON.parse(text);
+          parsed = JSON.parse(text);
         } catch (e4) {
-          arr = null;
+          parsed = null;
         }
-        if (!Array.isArray(arr)) throw new Error('AI判定結果の解析に失敗しました');
-        return arr;
+        if (!parsed || typeof parsed !== 'object') throw new Error('AI判定結果の解析に失敗しました');
+        return parsed;
       });
   }
 
-  function oekakiCallGemini(apiKey, topic, entries) {
+  function oekakiCallGemini(apiKey, prompt, schema, entries) {
     var idx = 0;
     function tryNext(lastErr) {
       if (idx >= OEKAKI_GEMINI_MODELS.length) {
         return Promise.reject(lastErr || new Error('Gemini APIに接続できません'));
       }
       var model = OEKAKI_GEMINI_MODELS[idx++];
-      return oekakiCallGeminiOnce(model, apiKey, topic, entries).catch(function (e) {
+      return oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries).catch(function (e) {
         // モデル名が無効(404)の場合のみ次の候補を試す。
         if (e && e.status === 404 && idx < OEKAKI_GEMINI_MODELS.length) return tryNext(e);
         throw e;
@@ -4763,8 +4842,9 @@
         });
       }
 
-      return oekakiCallGemini(apiKey, topic, entries)
-      .then(function (arr) {
+      return oekakiCallGemini(apiKey, oekakiJudgePrompt(topic, entries.length), OEKAKI_JUDGE_SCHEMA, entries)
+      .then(function (res) {
+        var arr = Array.isArray(res) ? res : [];
         var scored = entries.map(function (e, i2) {
           var hit = null;
           for (var j = 0; j < arr.length; j++) {
@@ -4805,6 +4885,419 @@
           error: 'AIはんてい に しっぱいしました: ' + String((e && e.message) || e)
         });
       });
+    });
+  }
+
+  // ==================== oekaki battle relay (logic) ====================
+  // 2人専用の投稿型おえかきバトル。ロビーもQRも使わず、URLをLINE等で手渡しして進める。
+  //
+  //   ホスト(a) が設定 → a が先に描いて提出 → URLを相手に渡す
+  //     → 挑戦者(b) が同じお題を描いて提出 → b の端末でAI採点 → b が結果を見る
+  //     → b が結果共有URLをホストに返す（「再戦を申し込む」を選ぶと b が次戦の設定も決める）
+  //     → a が結果を見て、再戦が申し込まれていれば次戦を開始する（以降ループ）
+  //
+  // 部屋のURLは最初から最後まで同じなので、共有は「同じリンクを送り返すだけ」で済む。
+
+  var OKR_SLOT_LS_PREFIX = 'bbg_okrelay_slot_v1_';
+  // 「はじめる」を押してから実際に描き始めるまでのリード時間（3・2・1 カウントダウン用）。
+  var OKR_LEAD_MS = 4000;
+  // 結果発表までのタメ（AI応答が速くてもこの時間は判定中の演出を見せる）。
+  var OKR_JUDGE_MIN_MS = 8000;
+  // 判定担当（b）の端末が落ちた場合に、もう一方が判定を引き取れるようになるまでの待ち時間。
+  var OKR_JUDGE_TAKEOVER_MS = 60000;
+
+  function okrSlotStorageKey(roomId) {
+    return OKR_SLOT_LS_PREFIX + String(roomId || '');
+  }
+
+  function okrLoadSlot(roomId) {
+    try {
+      var v = String(localStorage.getItem(okrSlotStorageKey(roomId)) || '');
+      return v === 'a' || v === 'b' ? v : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function okrSaveSlot(roomId, slot) {
+    var s = slot === 'a' || slot === 'b' ? slot : '';
+    try {
+      if (!s) localStorage.removeItem(okrSlotStorageKey(roomId));
+      else localStorage.setItem(okrSlotStorageKey(roomId), s);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function okrOtherSlot(slot) {
+    return slot === 'a' ? 'b' : 'a';
+  }
+
+  function okrRoundIndex(room) {
+    return parseIntSafe(room && room.round && room.round.index, 1);
+  }
+
+  function okrPlayer(room, slot) {
+    var players = (room && room.players) || {};
+    return players[slot] || null;
+  }
+
+  function okrName(room, slot) {
+    var p = okrPlayer(room, slot);
+    var nm = String((p && p.name) || '').trim();
+    return nm || (slot === 'a' ? 'ホスト' : 'チャレンジャー');
+  }
+
+  // まだリンクを渡していない＝相手が席についていない段階では名前を出せないので「相手」と呼ぶ。
+  function okrNameOrGeneric(room, slot) {
+    return okrPlayer(room, slot) ? okrName(room, slot) : '相手';
+  }
+
+  // 現ラウンドで提出済みか（前ラウンドの絵が残っていても誤判定しないよう round も見る）。
+  function okrHasSubmitted(room, slot) {
+    var p = okrPlayer(room, slot);
+    return !!(p && p.image && parseIntSafe(p.round, 0) === okrRoundIndex(room));
+  }
+
+  // 現ラウンドの持ち時間を開始済みか（＝「はじめる」を押して endsAt が入っているか）。
+  function okrHasStarted(room, slot) {
+    var p = okrPlayer(room, slot);
+    return !!(p && parseIntSafe(p.endsAt, 0) > 0 && parseIntSafe(p.startedRound, 0) === okrRoundIndex(room));
+  }
+
+  function okrEndsAt(room, slot) {
+    var p = okrPlayer(room, slot);
+    if (!okrHasStarted(room, slot)) return 0;
+    return parseIntSafe(p.endsAt, 0);
+  }
+
+  // このラウンドの先攻スロット。第1戦はホスト(a)、再戦は申し込んだ側が先攻。
+  // （first が無い古い部屋は 'a' 先攻として扱う）
+  function okrFirstSlot(room) {
+    return room && room.round && room.round.first === 'b' ? 'b' : 'a';
+  }
+
+  function okrSecondSlot(room) {
+    return okrOtherSlot(okrFirstSlot(room));
+  }
+
+  // いま誰の番か。先攻 → 後攻 → 'judging' → 'result' の順に進む。
+  function okrStage(room) {
+    var phase = String((room && room.phase) || '');
+    if (phase === 'result') return 'result';
+    if (phase === 'judging') return 'judging';
+    var first = okrFirstSlot(room);
+    var second = okrOtherSlot(first);
+    if (!okrHasSubmitted(room, first)) return first;
+    if (!okrHasSubmitted(room, second)) return second;
+    return 'judging';
+  }
+
+  function createOekakiRelayRoom(roomId, settings, topic, hostName) {
+    var s = normalizeOekakiLobbySettings(settings);
+    var room = {
+      createdAt: serverNowMs(),
+      relay: true,
+      phase: 'drawing',
+      settings: {
+        drawSeconds: s.drawSeconds,
+        topicMode: s.topicMode,
+        topicAge: s.topicAge,
+        setBy: 'a'
+      },
+      round: {
+        index: 1,
+        topic: String(topic || ''),
+        first: 'a'
+      },
+      players: {
+        a: { name: String(hostName || '').trim() || 'ホスト', joinedAt: serverNowMs(), isHost: true }
+      }
+    };
+    return setValue(oekakiRelayRoomPath(roomId), room);
+  }
+
+  // 挑戦者スロット(b)の確保。同時に開かれても1人だけが取れるよう claim トークンで判定する。
+  // 取れたら true、すでに埋まっていたら false（呼び出し側は観戦者として扱う）。
+  function okrJoinChallenger(roomId, name, token) {
+    var nm = String(name || '').trim() || 'チャレンジャー';
+    var tk = String(token || '');
+    return runTxn(oekakiRelayRoomPath(roomId) + '/players/b', function (p) {
+      if (p) return p; // 先着がいる場合は上書きしない
+      return { name: nm, joinedAt: serverNowMs(), claim: tk };
+    }).then(function (p) {
+      return !!(p && String(p.claim || '') === tk);
+    });
+  }
+
+  // 自分の持ち時間を開始する（相手とは非同期なので endsAt はプレイヤーごとに持つ）。
+  function okrStartTurn(roomId, slot, roundIndex, drawSeconds) {
+    var sec = clamp(parseIntSafe(drawSeconds, 90), 30, 600);
+    var rIdx = parseIntSafe(roundIndex, 1);
+    return runTxn(oekakiRelayRoomPath(roomId) + '/players/' + slot, function (p) {
+      if (!p) return p;
+      // 同じラウンドで開始済みなら上書きしない（再読み込みで時間が延びるのを防ぐ）。
+      if (parseIntSafe(p.startedRound, 0) === rIdx && parseIntSafe(p.endsAt, 0) > 0) return p;
+      return assign({}, p, {
+        startedRound: rIdx,
+        startedAt: serverNowMs(),
+        endsAt: serverNowMs() + sec * 1000 + OKR_LEAD_MS
+      });
+    });
+  }
+
+  // 時間切れで描けないまま画面を閉じてしまった場合の救済（同じラウンドをもう一度開始）。
+  function okrRestartTurn(roomId, slot, roundIndex, drawSeconds) {
+    var sec = clamp(parseIntSafe(drawSeconds, 90), 30, 600);
+    var rIdx = parseIntSafe(roundIndex, 1);
+    return runTxn(oekakiRelayRoomPath(roomId) + '/players/' + slot, function (p) {
+      if (!p) return p;
+      if (p.image && parseIntSafe(p.round, 0) === rIdx) return p; // 提出済みならやり直させない
+      return assign({}, p, {
+        startedRound: rIdx,
+        startedAt: serverNowMs(),
+        endsAt: serverNowMs() + sec * 1000 + OKR_LEAD_MS
+      });
+    });
+  }
+
+  // 画像はプレイヤーノード単位のトランザクションで書く（相手の画像を含む部屋全体の送信を避ける）。
+  function okrSubmit(roomId, slot, roundIndex, dataUrl) {
+    var rIdx = parseIntSafe(roundIndex, 1);
+    return runTxn(oekakiRelayRoomPath(roomId) + '/players/' + slot, function (p) {
+      if (!p) return p;
+      if (p.image && parseIntSafe(p.round, 0) === rIdx) return p;
+      return assign({}, p, {
+        image: String(dataUrl || ''),
+        submittedAt: serverNowMs(),
+        round: rIdx
+      });
+    });
+  }
+
+  // 判定権をCASで奪う（二重判定の防止）。勝った端末だけが true を受け取る。
+  // fromPhase: 'drawing'（通常）/ 'judging'（固まった部屋の引き取り）/ 'result'（再判定）
+  function okrClaimJudging(roomId, token, fromPhase) {
+    var tk = String(token || '');
+    var from = String(fromPhase || 'drawing');
+    return runTxn(oekakiRelayRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== from) return room;
+      if (!okrHasSubmitted(room, 'a') || !okrHasSubmitted(room, 'b')) return room;
+      return assign({}, room, { phase: 'judging', judgeToken: tk, judgingAt: serverNowMs(), result: null });
+    }).then(function (room) {
+      return !!(room && room.phase === 'judging' && String(room.judgeToken || '') === tk);
+    });
+  }
+
+  function okrWriteResult(roomId, result) {
+    return runTxn(oekakiRelayRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== 'judging') return room;
+      return assign({}, room, { phase: 'result', result: result || null });
+    });
+  }
+
+  // 再戦。直前の結果は prevResult に退避して、相手が結果を見られる状態を保ったまま次戦を用意する。
+  // 設定を決めるのも先に描くのも「申し込んだ側」（bySlot）。
+  // 申し込んだ側が描き終わってから、前回の結果と今回の挑戦状をまとめて相手に渡す流れになる
+  // （= A→B→B→A のように、採点した側がそのまま次の先攻になる）。
+  function okrRematch(roomId, settings, topic, bySlot) {
+    var s = normalizeOekakiLobbySettings(settings);
+    var by = bySlot === 'b' ? 'b' : 'a';
+    return runTxn(oekakiRelayRoomPath(roomId), function (room) {
+      if (!room) return room;
+      if (room.phase !== 'result') return room;
+
+      var players = {};
+      var src = room.players || {};
+      for (var k in src) {
+        if (!hasOwn.call(src, k)) continue;
+        var p = src[k] || {};
+        players[k] = { name: p.name || '', joinedAt: p.joinedAt || serverNowMs() };
+        if (p.isHost) players[k].isHost = true;
+      }
+
+      // 次戦の準備で players の画像を消すので、前回の結果カードが「画像なし」に
+      // ならないよう、結果のほうに絵を持たせてから退避する。
+      var prev = room.result || null;
+      if (prev && Array.isArray(prev.entries)) {
+        prev = assign({}, prev, {
+          entries: prev.entries.map(function (en) {
+            var sp = src[String((en && en.slot) || '')] || {};
+            return en && !en.image && sp.image ? assign({}, en, { image: String(sp.image) }) : en;
+          })
+        });
+      }
+
+      return assign({}, room, {
+        phase: 'drawing',
+        settings: {
+          drawSeconds: s.drawSeconds,
+          topicMode: s.topicMode,
+          topicAge: s.topicAge,
+          setBy: by
+        },
+        round: {
+          index: okrRoundIndex(room) + 1,
+          topic: String(topic || ''),
+          first: by
+        },
+        players: players,
+        prevResult: prev,
+        rematchBy: by,
+        rematchAt: serverNowMs(),
+        result: null,
+        judgeToken: null,
+        judgingAt: null
+      });
+    });
+  }
+
+  // -------------------- oekaki battle relay (AI judging) --------------------
+
+  // リレーモードは「仲の良い大人同士でけなし合って笑う」前提の煽り採点。
+  // 勝った側は全力で持ち上げ、負けた側はボロクソに言う。
+  // ただし攻撃対象は必ず「絵の出来」だけに限定する（人格・容姿・属性への攻撃はプロンプトで明確に禁止）。
+  // これは倫理面だけでなく、Geminiの安全フィルタで採点ごと落ちるのを防ぐ意味もある。
+  function okrJudgePrompt(topic) {
+    return (
+      'あなたは2人対戦「おえかきバトル」の実況審査員です。お題は「' + String(topic || '') + '」。\n' +
+      'これから2枚の絵を順番に見せます。お題らしさ・伝わりやすさ・工夫を基準に0〜100点で採点してください。\n' +
+      '必ず点差をつけ、同点にはしないこと。\n' +
+      'そのうえで、それぞれにコメントを付けます。\n' +
+      '・点数が高いほうのコメント: これでもかというくらい大げさに、全力で褒めちぎる（天才・レジェンド級の絶賛）。\n' +
+      '・点数が低いほうのコメント: 一切ためらわず、ボロクソにけなす（毒舌・煽り全開でよい）。\n' +
+      'コメントは日本語で40〜80文字程度、テンション高めのタメ口。\n' +
+      'また verdict に、勝敗を告げる煽り実況を60文字以内で書いてください。\n' +
+      '【厳守】けなす対象は「その絵の出来ばえ」だけに限定すること。' +
+      '容姿・人格・知性・性別・年齢・出身・職業など、人そのものへの攻撃や差別的表現、' +
+      '暴力的・性的な表現は絶対に使わないこと。友達同士で笑える範囲のイジりに収めること。\n' +
+      'indexは提示順の1始まりの番号です。指定されたJSONスキーマのオブジェクトのみを返してください。'
+    );
+  }
+
+  var OKR_JUDGE_SCHEMA = {
+    type: 'OBJECT',
+    properties: {
+      entries: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            index: { type: 'INTEGER' },
+            score: { type: 'INTEGER' },
+            comment: { type: 'STRING' }
+          },
+          required: ['index', 'score', 'comment']
+        }
+      },
+      verdict: { type: 'STRING' }
+    },
+    required: ['entries', 'verdict']
+  };
+
+  function okrSuspenseDelay(room) {
+    var startedAt = parseIntSafe(room && room.judgingAt, 0) || serverNowMs();
+    var waitMs = Math.max(0, OKR_JUDGE_MIN_MS - (serverNowMs() - startedAt));
+    return new Promise(function (resolve) {
+      setTimeout(resolve, waitMs);
+    });
+  }
+
+  // 判定の実行（claim勝者のみ呼ぶこと）。API失敗時も result を書いて result フェーズへ進める。
+  function okrRunJudge(roomId, room) {
+    var topic = String((room && room.round && room.round.topic) || '');
+    var roundIndex = okrRoundIndex(room);
+    var slots = ['a', 'b'];
+
+    var entries = [];
+    for (var i = 0; i < slots.length; i++) {
+      var slot = slots[i];
+      var p = okrPlayer(room, slot);
+      if (!p || parseIntSafe(p.round, 0) !== roundIndex) continue;
+      var parsed = oekakiParseDataUrl(p.image);
+      if (!parsed) continue;
+      entries.push({ slot: slot, name: okrName(room, slot), b64: parsed.b64, mime: parsed.mime });
+    }
+
+    function noScoreEntries() {
+      return entries.map(function (e) {
+        return { slot: e.slot, name: e.name, comment: '' };
+      });
+    }
+
+    if (entries.length < 2) {
+      return okrWriteResult(roomId, {
+        judgedAt: serverNowMs(),
+        round: roundIndex,
+        entries: noScoreEntries(),
+        verdict: '',
+        error: '2人ぶんの絵がそろわなかったので採点できませんでした'
+      });
+    }
+
+    return ensureGeminiKeyLoaded().then(function (apiKey) {
+      if (!apiKey) {
+        return okrWriteResult(roomId, {
+          judgedAt: serverNowMs(),
+          round: roundIndex,
+          entries: noScoreEntries(),
+          verdict: '',
+          error: 'Gemini APIキーが未設定のため、採点なしで発表します（⚙️せってい で設定できます）'
+        });
+      }
+
+      return oekakiCallGemini(apiKey, okrJudgePrompt(topic), OKR_JUDGE_SCHEMA, entries)
+        .then(function (res) {
+          var arr = res && Array.isArray(res.entries) ? res.entries : [];
+          var scored = entries.map(function (e, i2) {
+            var hit = null;
+            for (var j = 0; j < arr.length; j++) {
+              var a = arr[j];
+              if (a && parseIntSafe(a.index, -1) === i2 + 1) {
+                hit = a;
+                break;
+              }
+            }
+            return {
+              slot: e.slot,
+              name: e.name,
+              score: hit ? clamp(parseIntSafe(hit.score, 0), 0, 100) : 0,
+              comment: hit ? String(hit.comment || '').slice(0, 200) : ''
+            };
+          });
+          scored.sort(function (x, y) {
+            return (y.score || 0) - (x.score || 0);
+          });
+          var rank = 0;
+          var prevScore = null;
+          for (var k2 = 0; k2 < scored.length; k2++) {
+            if (prevScore === null || scored[k2].score !== prevScore) {
+              rank = k2 + 1;
+              prevScore = scored[k2].score;
+            }
+            scored[k2].rank = rank;
+          }
+          return okrSuspenseDelay(room).then(function () {
+            return okrWriteResult(roomId, {
+              judgedAt: serverNowMs(),
+              round: roundIndex,
+              entries: scored,
+              verdict: String((res && res.verdict) || '').slice(0, 200),
+              error: null
+            });
+          });
+        })
+        .catch(function (e) {
+          return okrWriteResult(roomId, {
+            judgedAt: serverNowMs(),
+            round: roundIndex,
+            entries: noScoreEntries(),
+            verdict: '',
+            error: 'AI採点に失敗しました: ' + String((e && e.message) || e)
+          });
+        });
     });
   }
 
@@ -9386,6 +9879,26 @@
 
   // -------------------- shared in-app confirm --------------------
   // ネイティブconfirm()はiOSのstandalone PWAで無反応になるため、アプリ内ダイアログで代替する。
+  // ロビーを抜けてホーム画面へ戻す共通処理。
+  // 端末の「参加中ロビー」を解除しないと routeHome() がロビーへ戻し続け、行き止まりになる。
+  function leaveLobbyAndGoHome(unsubFn) {
+    try {
+      if (unsubFn) unsubFn();
+    } catch (e0) {
+      // ignore
+    }
+    try {
+      setActiveLobby('', false);
+    } catch (e1) {
+      // ignore
+    }
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    setQuery(q);
+    route();
+  }
+
   // （おえかきバトルの okShowConfirm と同じ見た目。CSSは .ok-confirm を共用）
   function bbgShowConfirm(message, yesLabel, onYes) {
     try {
@@ -9724,6 +10237,11 @@
         '      <button id="homeCreateGm" class="bbg-menu-btn">\n' +
         '        <span class="bbg-menu-icon">📺</span>\n' +
         '        <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る（テーブル端末）</span><span class="bbg-menu-desc">盤面表示専用。参加者としては入りません</span></span>\n' +
+        '      </button>\n' +
+        '      <div class="bbg-sec">はなれた ひとと あそぶ</div>\n' +
+        '      <button id="homeOekakiRelay" class="bbg-menu-btn">\n' +
+        '        <span class="bbg-menu-icon">🎨</span>\n' +
+        '        <span style="min-width:0"><span class="bbg-menu-label">おえかきバトル（リレー）</span><span class="bbg-menu-desc">2人用。LINEなどでURLを渡し合って戦う投稿型</span></span>\n' +
         '      </button>\n' +
         '      <div class="center" style="margin-top:4px">\n' +
         '        <a class="btn ghost" href="?screen=setup" style="font-size:13px">⚙️ せってい</a>\n' +
@@ -10302,7 +10820,15 @@
         oekakiSetupHtml +
         '\n\n      <div class="row" style="margin-top:4px">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
         escapeHtml(gameKindLabel(selectedKind)) +
-        '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n    </div>\n  '
+        '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n' +
+        // ロビーの出口。これが無いとホスト端末はブラウザバック以外で抜けられない。
+        '\n      <hr />\n      <div class="bbg-sec">ロビーをとじる</div>\n' +
+        '      <div class="row">\n' +
+        '        <button id="lobbyHostGoHome" class="ghost" style="flex:1">🏠 ホームへ</button>\n' +
+        '        <button id="lobbyDissolve" class="danger" style="flex:1">🗑 ロビーを解散</button>\n' +
+        '      </div>\n' +
+        '      <div class="muted">「ホームへ」はロビーを残したまま抜けます（ホーム画面の一覧から「ホストでひらく」で戻れます）。「解散」はロビーを消して、参加者全員をホーム画面に戻します。</div>\n' +
+        '    </div>\n  '
     );
   }
 
@@ -10332,7 +10858,17 @@
         lobbyMembersSummaryHtml(lobby) +
         '\n\n      <div id="lobbyPlayerError" class="form-error" role="alert"></div>\n\n      <div class="row">' +
         (canGo ? '<button id="lobbyGoGame" class="primary" style="flex:1">▶ ゲームへ</button>' : '') +
-        '<a class="btn ghost" href="./">ホーム</a>\n      </div>\n    </div>\n  '
+        // 制限端末（QR参加）では routeHome() がロビーへ戻すので、押しても何も起きない
+        // 「ホーム」は出さない。抜けたいときは下の「ロビーを出る」を使ってもらう。
+        (shouldShowBackNav() ? '<a class="btn ghost" href="./">ホーム</a>' : '') +
+        '\n      </div>\n' +
+        // QR参加端末はホームへ戻れない設定（誤操作防止）なので、
+        // 明示的な「出る」だけは必ず押せるようにしておく（<a>だとstripBackNavLinksで消される）。
+        '\n      <hr />\n      <div class="row">\n' +
+        '        <button id="lobbyLeave" class="danger" style="flex:1">🚪 ロビーを出る</button>\n' +
+        '      </div>\n' +
+        '      <div class="muted">参加者一覧からあなたが消えて、ホーム画面に戻ります。同じロビーには何度でも入り直せます。</div>\n' +
+        '    </div>\n  '
     );
   }
 
@@ -12209,6 +12745,18 @@
     var btnJoin = document.getElementById('homeCreateJoin');
     var btnGm = document.getElementById('homeCreateGm');
 
+    var btnRelay = document.getElementById('homeOekakiRelay');
+    if (btnRelay) {
+      btnRelay.addEventListener('click', function () {
+        var qR = {};
+        var vR = getCacheBusterParam();
+        if (vR) qR.v = vR;
+        qR.screen = 'oekaki_relay_create';
+        setQuery(qR);
+        route();
+      });
+    }
+
     var unsubLobbies = null;
 
     function stopLobbiesWatch() {
@@ -13468,7 +14016,7 @@
     } catch (e0) {
       isTableGmDevice = false;
     }
-    var ui = { selectedKind: '', lastLobby: null };
+    var ui = { selectedKind: '', lastLobby: null, leaving: false };
     var joinUrl = makeLobbyJoinUrl(lobbyId);
 
     function drawQr(size) {
@@ -13841,6 +14389,43 @@
     function bindHostButtons(lobby) {
       function currentLobby() {
         return ui && ui.lastLobby ? ui.lastLobby : lobby;
+      }
+
+      // ロビーの出口（ホスト画面にはこれまで抜ける導線が無かった）。
+      var goHomeBtn = document.getElementById('lobbyHostGoHome');
+      if (goHomeBtn && !goHomeBtn.__lobby_bound) {
+        goHomeBtn.__lobby_bound = true;
+        goHomeBtn.addEventListener('click', function () {
+          ui.leaving = true;
+          leaveLobbyAndGoHome(unsub);
+          unsub = null;
+        });
+      }
+
+      var dissolveBtn = document.getElementById('lobbyDissolve');
+      if (dissolveBtn && !dissolveBtn.__lobby_bound) {
+        dissolveBtn.__lobby_bound = true;
+        dissolveBtn.addEventListener('click', function () {
+          bbgShowConfirm(
+            'このロビーを解散しますか？\n参加者は全員ホーム画面に戻されます。\nこの操作は取り消せません。',
+            '解散する',
+            function () {
+              dissolveBtn.disabled = true;
+              clearInlineError('lobbyHostError');
+              ui.leaving = true;
+              deleteLobby(lobbyId)
+                .then(function () {
+                  leaveLobbyAndGoHome(unsub);
+                  unsub = null;
+                })
+                .catch(function (e) {
+                  ui.leaving = false;
+                  dissolveBtn.disabled = false;
+                  setInlineError('lobbyHostError', (e && e.message) || '解散に失敗しました');
+                });
+            }
+          );
+        });
       }
 
       var copyBtn = document.getElementById('copyJoinUrl');
@@ -14420,8 +15005,13 @@
     firebaseReady()
       .then(function () {
         return subscribeLobby(lobbyId, function (lobby) {
+          // 退出/解散の処理中は、遅れて届くスナップショットで描き直さない。
+          if (ui.leaving) return;
           if (!lobby) {
-            renderError(viewEl, 'ロビーが見つかりません');
+            // 他端末が解散した／自動削除された場合も行き止まりにしない。
+            ui.leaving = true;
+            leaveLobbyAndGoHome(unsub);
+            unsub = null;
             return;
           }
 
@@ -14461,6 +15051,8 @@
   function routeLobbyPlayer(lobbyId) {
     var unsub = null;
     var mid = getOrCreateLobbyMemberId(lobbyId);
+    // 退出処理を始めたら、遅れて届くスナップショットでロビー画面を描き直さない。
+    var leaving = false;
 
     function goToCurrentGame(lobby) {
       var cg = (lobby && lobby.currentGame) || null;
@@ -14531,27 +15123,13 @@
     firebaseReady()
       .then(function () {
         return subscribeLobby(lobbyId, function (lobby) {
+          if (leaving) return;
           if (!lobby) {
-            // ロビーが消えている（自動削除など）: 参加状態を解除してホームへ戻す。
+            // ロビーが消えている（ホストが解散した／自動削除など）: 参加状態を解除してホームへ。
             // 制限端末のままだとホームに戻れず行き止まりになるため。
-            try {
-              if (unsub) {
-                unsub();
-                unsub = null;
-              }
-            } catch (eGone0) {
-              // ignore
-            }
-            try {
-              setActiveLobby('', false);
-            } catch (eGone1) {
-              // ignore
-            }
-            var qGone = {};
-            var vGone = getCacheBusterParam();
-            if (vGone) qGone.v = vGone;
-            setQuery(qGone);
-            route();
+            leaving = true;
+            leaveLobbyAndGoHome(unsub);
+            unsub = null;
             return;
           }
 
@@ -14567,6 +15145,28 @@
               if (!goToCurrentGame(lobby)) {
                 setInlineError('lobbyPlayerError', 'まだ開始されていません');
               }
+            });
+          }
+
+          var leaveBtn = document.getElementById('lobbyLeave');
+          if (leaveBtn && !leaveBtn.__lobby_bound) {
+            leaveBtn.__lobby_bound = true;
+            leaveBtn.addEventListener('click', function () {
+              bbgShowConfirm('このロビーを出ますか？\n参加者一覧から あなたが いなくなります。', '出る', function () {
+                leaveBtn.disabled = true;
+                clearInlineError('lobbyPlayerError');
+                leaving = true;
+                leaveLobbyMember(lobbyId, mid)
+                  .then(function () {
+                    leaveLobbyAndGoHome(unsub);
+                    unsub = null;
+                  })
+                  .catch(function (e) {
+                    leaving = false;
+                    leaveBtn.disabled = false;
+                    setInlineError('lobbyPlayerError', (e && e.message) || '退出に失敗しました');
+                  });
+              });
             });
           }
         });
@@ -21037,6 +21637,90 @@
     return 'おだい「<b>' + escapeHtml(topic) + '</b>」';
   }
 
+  // フルスクリーン描画画面のHTML。createOekakiDrawEngine がこのDOM（#okCanvas ほか）を前提にする。
+  // opts: { topic, ui, roundIndex, statusText }
+  function oekakiDrawFsHtml(opts) {
+    var o = opts || {};
+    var ui = o.ui || {};
+    var roundIndex = parseIntSafe(o.roundIndex, 1);
+
+    var paletteHtml = '';
+    for (var i = 0; i < OEKAKI_COLORS.length; i++) {
+      var c = OEKAKI_COLORS[i];
+      paletteHtml +=
+        '<button class="ok-color okColorBtn' +
+        (!ui.eraser && ui.color === c ? ' sel' : '') +
+        '" data-c="' +
+        escapeHtml(c) +
+        '" style="background:' +
+        escapeHtml(c) +
+        '" aria-label="いろ"></button>';
+    }
+    paletteHtml +=
+      '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="けしゴム" title="けしゴム">🧽</button>';
+
+    var stampList = oekakiStampsFor(ui, roundIndex);
+    var stampHtml = '';
+    for (var si = 0; si < stampList.length; si++) {
+      var st = stampList[si];
+      stampHtml +=
+        '<button class="ok-stampbtn okStampBtn' +
+        (ui.stamp === st ? ' sel' : '') +
+        '" data-s="' +
+        escapeHtml(st) +
+        '" aria-label="スタンプ">' +
+        st +
+        '</button>';
+    }
+
+    return (
+      '<div class="ok-fs" id="okFs">' +
+      '<div class="ok-fs-top">' +
+      '<div class="ok-fs-topic">おだい「<b>' +
+      escapeHtml(String(o.topic || '')) +
+      '</b>」</div>' +
+      // 道具はキャンバスの上に重ねず、お題と同じ帯の中央にまとめる
+      '<div class="ok-fs-tools">' +
+      '<button id="okPaletteBtn" class="ok-fs-btn" aria-label="パレット" title="パレット">🎨</button>' +
+      '<button id="okUndo" class="ok-fs-btn ok-histbtn" aria-label="もどす" title="もどす" disabled>↩︎</button>' +
+      '<button id="okRedo" class="ok-fs-btn ok-histbtn" aria-label="やりなおす" title="やりなおす" disabled>↪︎</button>' +
+      '</div>' +
+      '<div class="ok-fs-right">' +
+      '<button id="okFullscreen" class="ok-fs-btn" aria-label="ぜんがめん" title="ぜんがめん" style="display:none">⛶</button>' +
+      '<button id="okDone" class="primary ok-done-btn">かんせい！</button>' +
+      '<svg class="ok-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">' +
+      '<circle class="ok-ring-bg" cx="22" cy="22" r="18"></circle>' +
+      '<circle class="ok-ring-fg" id="okRingFg" cx="22" cy="22" r="18"></circle>' +
+      '</svg>' +
+      '</div>' +
+      '</div>' +
+      '<div class="ok-fs-canvaswrap" id="okCanvasWrap">' +
+      '<canvas id="okCanvas" width="640" height="640"></canvas>' +
+      '<div id="okPenCursor" class="ok-pen-cursor" style="display:none" aria-hidden="true"></div>' +
+      '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
+      '<div class="ok-palette">' +
+      paletteHtml +
+      '</div>' +
+      '<div class="ok-stamps">' +
+      stampHtml +
+      '</div>' +
+      '<div class="ok-pen-row">' +
+      '<div class="ok-pen-head"><span class="muted ok-pen-label">ふとさ</span>' +
+      '<span class="ok-pen-preview" aria-hidden="true"><i id="okPenPreviewDot"></i></span></div>' +
+      '<input id="okPen" type="range" min="2" max="24" step="2" value="' +
+      String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
+      '" /></div>' +
+      '<button id="okClearAll" class="danger">ぜんぶ けす</button>' +
+      '</div>' +
+      '<div class="ok-fs-status" id="okStatus">' +
+      escapeHtml(String(o.statusText || '')) +
+      '</div>' +
+      '<div id="okCountdown" class="ok-countdown" style="display:none"><span id="okCountdownNum" class="ok-count-num"></span></div>' +
+      '</div>' +
+      '</div>'
+    );
+  }
+
   function renderOekakiPlayer(viewEl, opts) {
     var room = opts.room;
     var playerId = opts.playerId;
@@ -21053,84 +21737,15 @@
     var canDraw = !!(playerId && !isTableGmDevice && me);
 
     if (phase === 'drawing' && canDraw && !meSubmitted) {
-      var paletteHtml = '';
-      for (var i = 0; i < OEKAKI_COLORS.length; i++) {
-        var c = OEKAKI_COLORS[i];
-        paletteHtml +=
-          '<button class="ok-color okColorBtn' +
-          (!ui.eraser && ui.color === c ? ' sel' : '') +
-          '" data-c="' +
-          escapeHtml(c) +
-          '" style="background:' +
-          escapeHtml(c) +
-          '" aria-label="いろ"></button>';
-      }
-      paletteHtml +=
-        '<button id="okEraser" class="ok-eraser' + (ui.eraser ? ' sel' : '') + '" aria-label="けしゴム" title="けしゴム">🧽</button>';
-
-      var stampList = oekakiStampsFor(ui, roundIndex);
-      var stampHtml = '';
-      for (var si = 0; si < stampList.length; si++) {
-        var st = stampList[si];
-        stampHtml +=
-          '<button class="ok-stampbtn okStampBtn' +
-          (ui.stamp === st ? ' sel' : '') +
-          '" data-s="' +
-          escapeHtml(st) +
-          '" aria-label="スタンプ">' +
-          st +
-          '</button>';
-      }
-
       // フルスクリーン描画レイアウト（スマホ/タブレットの画面いっぱいにキャンバスを広げる）
       render(
         viewEl,
-        '<div class="ok-fs" id="okFs">' +
-          '<div class="ok-fs-top">' +
-          '<div class="ok-fs-topic">おだい「<b>' +
-          escapeHtml(String((room.round && room.round.topic) || '')) +
-          '</b>」</div>' +
-          // 道具はキャンバスの上に重ねず、お題と同じ帯の中央にまとめる
-          '<div class="ok-fs-tools">' +
-          '<button id="okPaletteBtn" class="ok-fs-btn" aria-label="パレット" title="パレット">🎨</button>' +
-          '<button id="okUndo" class="ok-fs-btn ok-histbtn" aria-label="もどす" title="もどす" disabled>↩︎</button>' +
-          '<button id="okRedo" class="ok-fs-btn ok-histbtn" aria-label="やりなおす" title="やりなおす" disabled>↪︎</button>' +
-          '</div>' +
-          '<div class="ok-fs-right">' +
-          '<button id="okFullscreen" class="ok-fs-btn" aria-label="ぜんがめん" title="ぜんがめん" style="display:none">⛶</button>' +
-          '<button id="okDone" class="primary ok-done-btn">かんせい！</button>' +
-          '<svg class="ok-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">' +
-          '<circle class="ok-ring-bg" cx="22" cy="22" r="18"></circle>' +
-          '<circle class="ok-ring-fg" id="okRingFg" cx="22" cy="22" r="18"></circle>' +
-          '</svg>' +
-          '</div>' +
-          '</div>' +
-          '<div class="ok-fs-canvaswrap" id="okCanvasWrap">' +
-          '<canvas id="okCanvas" width="640" height="640"></canvas>' +
-          '<div id="okPenCursor" class="ok-pen-cursor" style="display:none" aria-hidden="true"></div>' +
-          '<div id="okToolPanel" class="ok-tool-panel" style="display:none">' +
-          '<div class="ok-palette">' +
-          paletteHtml +
-          '</div>' +
-          '<div class="ok-stamps">' +
-          stampHtml +
-          '</div>' +
-          '<div class="ok-pen-row">' +
-          '<div class="ok-pen-head"><span class="muted ok-pen-label">ふとさ</span>' +
-          '<span class="ok-pen-preview" aria-hidden="true"><i id="okPenPreviewDot"></i></span></div>' +
-          '<input id="okPen" type="range" min="2" max="24" step="2" value="' +
-          String(clamp(parseIntSafe(ui.penW, 6), 2, 24)) +
-          '" /></div>' +
-          '<button id="okClearAll" class="danger">ぜんぶ けす</button>' +
-          '</div>' +
-          '<div class="ok-fs-status" id="okStatus">ていしゅつ ' +
-          String(counts.submitted) +
-          '/' +
-          String(counts.total) +
-          '</div>' +
-          '<div id="okCountdown" class="ok-countdown" style="display:none"><span id="okCountdownNum" class="ok-count-num"></span></div>' +
-          '</div>' +
-          '</div>'
+        oekakiDrawFsHtml({
+          topic: String((room.round && room.round.topic) || ''),
+          ui: ui,
+          roundIndex: roundIndex,
+          statusText: 'ていしゅつ ' + String(counts.submitted) + '/' + String(counts.total)
+        })
       );
       return;
     }
@@ -21318,346 +21933,13 @@
     }
   }
 
-  function routeOekakiPlayer(roomId, isHost) {
-    var unsub = null;
-    var lobbyId = '';
-    try {
-      var q0 = parseQuery();
-      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
-    } catch (e0) {
-      lobbyId = '';
-    }
-
-    var isTableGmDevice = false;
-    try {
-      var qGm0 = parseQuery();
-      isTableGmDevice = !!(qGm0 && String(qGm0.gmdev || '') === '1');
-    } catch (eGm0) {
-      isTableGmDevice = false;
-    }
-
-    var playerId = '';
-    try {
-      var q1 = parseQuery();
-      playerId = q1 && q1.player ? String(q1.player) : '';
-    } catch (eP) {
-      playerId = '';
-    }
-    if (!playerId && !isTableGmDevice && lobbyId) {
-      try {
-        playerId = String(getOrCreateLobbyMemberId(lobbyId) || '');
-      } catch (eMid) {
-        playerId = '';
-      }
-    }
-    // テーブルGM端末は描かない（進行状況の表示のみ）。
-    if (isTableGmDevice) playerId = '';
-
-    try {
-      if (document.body && document.body.classList) document.body.classList.add('ok-player-screen');
-    } catch (eCls) {
-      // ignore
-    }
-
-    var lastRoom = null;
-    var ui = {
-      color: OEKAKI_COLORS[0],
-      penW: 6,
-      eraser: false,
-      stamp: '',
-      stamps: null,
-      stampsKey: '',
-      everDrew: false,
-      renderKey: '',
-      timerId: null,
-      submitInFlight: false,
-      judgeInFlight: false,
-      judgeToken: '',
-      lobbyReturnWatching: false,
-      lobbyUnsub: null,
-      globalHandlersBound: false,
-      teardownGlobal: null,
-      resizeTimer: null,
-      refitTimers: null,
-      resizeObs: null,
-      undoStack: null,
-      redoStack: null,
-      fitKey: '',
-      artScale: 1,
-      fsAutoTried: false,
-      autoJoinInFlight: false
-    };
-
-    function redirectToLobby() {
-      if (!lobbyId) return;
-      var q = {};
-      var v = getCacheBusterParam();
-      if (v) q.v = v;
-      q.lobby = lobbyId;
-      q.screen = isHost ? 'lobby_host' : 'lobby_player';
-      try {
-        var qx = parseQuery();
-        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
-      } catch (e) {
-        // ignore
-      }
-      setQuery(q);
-      route();
-    }
-
-    function ensureLobbyReturnWatcher() {
-      if (!lobbyId) return;
-      if (ui.lobbyReturnWatching) return;
-      ui.lobbyReturnWatching = true;
-      firebaseReady()
-        .then(function () {
-          return subscribeLobby(lobbyId, function (lobby) {
-            var cg = (lobby && lobby.currentGame) || null;
-            var kind = cg && cg.kind ? String(cg.kind) : '';
-            var rid = cg && cg.roomId ? String(cg.roomId) : '';
-            if (!cg || kind !== 'oekaki' || rid !== String(roomId || '')) {
-              try {
-                if (ui.lobbyUnsub) ui.lobbyUnsub();
-              } catch (e) {
-                // ignore
-              }
-              ui.lobbyUnsub = null;
-              redirectToLobby();
-            }
-          });
-        })
-        .then(function (u2) {
-          ui.lobbyUnsub = u2;
-        })
-        .catch(function () {
-          // ignore
-        });
-    }
-
-    function currentRoundIndex(room) {
-      return parseIntSafe(room && room.round && room.round.index, 1);
-    }
-
-    function isMeSubmitted(room) {
-      if (!playerId) return false;
-      var p = room && room.players ? room.players[playerId] : null;
-      return !!(p && p.image && parseIntSafe(p.round, 0) === currentRoundIndex(room));
-    }
-
-    function computeRenderKey(room) {
-      var c = oekakiCountSubmitted(room);
-      var ri = currentRoundIndex(room);
-      var phase = String((room && room.phase) || '');
-      if (phase === 'drawing') {
-        var canDraw = !!(playerId && !isTableGmDevice && room.players && room.players[playerId]);
-        if (canDraw && !isMeSubmitted(room)) {
-          // キャンバス表示中は再描画しない（描きかけの絵が消えるため）。提出数はupdateDynamicで更新。
-          return 'draw|' + ri;
-        }
-        return 'wait|' + ri + '|' + c.submitted + '|' + c.total + '|' + (isMeSubmitted(room) ? 1 : 0);
-      }
-      if (phase === 'judging') return 'judge|' + ri;
-      if (phase === 'result') {
-        var r = (room && room.result) || {};
-        return 'result|' + ri + '|' + String(r.judgedAt || 0) + '|' + (r.error ? 1 : 0);
-      }
-      return 'x|' + phase + '|' + ri;
-    }
-
-    function updateDynamic(room) {
-      var c = oekakiCountSubmitted(room);
-      var st = document.getElementById('okStatus');
-      if (st) st.textContent = 'ていしゅつ ' + String(c.submitted) + '/' + String(c.total);
-      var stc = document.getElementById('okStatusCount');
-      if (stc) stc.textContent = String(c.submitted) + '/' + String(c.total);
-    }
-
-    // ゲーム開始時の3カウントダウン（サーバー時刻基準なので全端末で同期する）。
-    // ラウンド開始時刻 = endsAt - drawSeconds*1000。それより前なら 3,2,1 を最前面に表示。
-    function updateCountdown(room) {
-      var el = document.getElementById('okCountdown');
-      if (!el) return;
-      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
-      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
-      var startAt = endsAt - totalSec * 1000;
-      var diff = startAt - serverNowMs();
-      var span = document.getElementById('okCountdownNum');
-      if (!span) return;
-
-      var S = OEKAKI_COUNT_STEP_MS;
-
-      // mode: 'num'（大きい数字） / 'ready'（よーい…） / 'go'（かいて！・タッチ通過）
-      function setNum(text, mode) {
-        el.classList.toggle('ok-count-go', mode === 'go');
-        el.classList.toggle('ok-count-ready', mode === 'ready');
-        if (span.textContent === text) return;
-        span.textContent = text;
-        // 数字が変わるたびにポップアニメを再トリガー
-        span.classList.remove('ok-count-pop');
-        void span.offsetWidth;
-        span.classList.add('ok-count-pop');
-      }
-
-      if (diff > 3 * S) {
-        // 3の前に「よーい…」の間を置く（読み込み遅れをここで吸収し、3を確実に見せる）
-        el.style.display = '';
-        setNum('よーい…', 'ready');
-      } else if (diff > 0) {
-        el.style.display = '';
-        setNum(String(Math.ceil(diff / S)), 'num');
-      } else if (diff > -1000) {
-        // スタートの瞬間: 「かいて！」を出す（タッチは通す）
-        el.style.display = '';
-        setNum('かいて！', 'go');
-      } else {
-        el.style.display = 'none';
-      }
-    }
-
-    // タイマー表示更新: フルスクリーン描画中は円形リング、それ以外の画面ではテキスト。
-    // 残り10秒からはキャンバス枠の赤点滅(ok-warn)も付ける。
-    var OK_RING_CIRC = 113.097; // 2π×r(18)
-    function updateTimerText(room) {
-      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
-      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
-      var remainMs = Math.max(0, endsAt - serverNowMs());
-      var remainSec = Math.max(0, Math.ceil(remainMs / 1000));
-
-      var fg = document.getElementById('okRingFg');
-      if (fg) {
-        var frac = Math.max(0, Math.min(1, remainMs / (totalSec * 1000)));
-        fg.style.strokeDashoffset = String(OK_RING_CIRC * (1 - frac));
-      }
-
-      var el = document.getElementById('okTimer');
-      if (el) el.textContent = formatMMSS(remainSec);
-
-      try {
-        var fs = document.getElementById('okFs');
-        if (fs) {
-          if (remainSec <= 10 && remainSec > 0) fs.classList.add('ok-warn');
-          else fs.classList.remove('ok-warn');
-        }
-      } catch (eWarn) {
-        // ignore
-      }
-      return remainSec;
-    }
-
-    function submitNow(isAuto) {
-      if (!playerId || isTableGmDevice) return;
-      if (ui.submitInFlight) return;
-      var room = lastRoom;
-      if (!room || room.phase !== 'drawing') return;
-      if (isMeSubmitted(room)) return;
-      if (!(room.players && room.players[playerId])) return;
-      if (isAuto && !ui.everDrew) return; // 何も描いていなければ自動提出しない（未提出扱い）
-      var cv = document.getElementById('okCanvas');
-      if (!cv) return;
-      var dataUrl = '';
-      try {
-        // 端末ごとのキャンバス縦横比を保ったまま長辺480に縮小して提出
-        var out = document.createElement('canvas');
-        var scO = 480 / Math.max(cv.width, cv.height);
-        if (scO > 1) scO = 1;
-        out.width = Math.max(1, Math.round(cv.width * scO));
-        out.height = Math.max(1, Math.round(cv.height * scO));
-        var octx = out.getContext('2d');
-        octx.fillStyle = '#ffffff';
-        octx.fillRect(0, 0, out.width, out.height);
-        octx.drawImage(cv, 0, 0, out.width, out.height);
-        dataUrl = out.toDataURL('image/jpeg', 0.7);
-      } catch (eC) {
-        dataUrl = '';
-      }
-      if (!dataUrl) return;
-      ui.submitInFlight = true;
-      oekakiSubmitImage(roomId, playerId, currentRoundIndex(room), dataUrl)
-        .catch(function (e) {
-          if (!isAuto) alert((e && e.message) || 'ていしゅつに しっぱいしました');
-        })
-        .finally(function () {
-          ui.submitInFlight = false;
-        });
-    }
-
-    function startJudging(fromPhase) {
-      ui.judgeInFlight = true;
-      ui.judgeToken = randomId(10);
-      oekakiClaimJudging(roomId, ui.judgeToken, fromPhase)
-        .then(function (won) {
-          if (!won) return null;
-          // クレーム後に最新スナップショットで判定（直前の提出を取りこぼさない）。
-          return getValueOnce(oekakiRoomPath(roomId)).then(function (fresh) {
-            if (!fresh || fresh.phase !== 'judging') return null;
-            return oekakiRunJudge(roomId, fresh);
-          });
-        })
-        .catch(function (e) {
-          try {
-            if (typeof console !== 'undefined' && console.warn) console.warn('oekaki judge failed', e);
-          } catch (e2) {
-            // ignore
-          }
-        })
-        .finally(function () {
-          ui.judgeInFlight = false;
-        });
-    }
-
-    function maybeStartJudging(room) {
-      if (!isHost) return;
-      if (!room || room.phase !== 'drawing') return;
-      if (ui.judgeInFlight) return;
-      var c = oekakiCountSubmitted(room);
-      var allSubmitted = c.total > 0 && c.submitted >= c.total;
-      var endsAt = parseIntSafe(room.round && room.round.endsAt, 0);
-      var timeUp = endsAt > 0 && serverNowMs() > endsAt + OEKAKI_JUDGE_GRACE_MS;
-      if (!allSubmitted && !timeUp) return;
-      startJudging('drawing');
-    }
-
-    function maybeRecoverJudging(room) {
-      // 判定担当端末が落ちてjudgingのまま止まった場合の再クレーム。
-      if (!isHost) return;
-      if (!room || room.phase !== 'judging') return;
-      if (ui.judgeInFlight) return;
-      var t0 = parseIntSafe(room.judgingAt, 0);
-      if (!t0 || serverNowMs() - t0 < 60000) return;
-      startJudging('judging');
-    }
-
-    function ensureTimer() {
-      if (ui.timerId) return;
-      ui.timerId = setInterval(function () {
-        var q2 = null;
-        try {
-          q2 = parseQuery();
-        } catch (e) {
-          q2 = null;
-        }
-        if (!q2 || String(q2.screen || '') !== 'oekaki_player' || String(q2.room || '') !== String(roomId || '')) {
-          clearInterval(ui.timerId);
-          ui.timerId = null;
-          if (ui.teardownGlobal) ui.teardownGlobal();
-          return;
-        }
-        var room = lastRoom;
-        if (!room) return;
-        if (room.phase === 'drawing') {
-          var remainSec = updateTimerText(room);
-          try {
-            updateCountdown(room);
-          } catch (eCd) {
-            // ignore
-          }
-          if (remainSec <= 0) submitNow(true);
-          maybeStartJudging(room);
-        } else if (room.phase === 'judging') {
-          maybeRecoverJudging(room);
-        }
-      }, 250);
-    }
+  // ==================== oekaki: 描画エンジン（共通） ====================
+  // キャンバス／ツールパネル／もどす・やりなおす／回転追従／全画面 をまとめた描画UI。
+  // おえかきバトル（同室モード）とリレーモードの両方から使う。
+  // ui: 呼び出し側が保持する状態オブジェクト（makeOekakiDrawUi() で作る）
+  // opts.onDone: 「かんせい！」を押して確認したときに呼ばれる（提出処理は呼び出し側の担当）
+  function createOekakiDrawEngine(ui, opts) {
+    var options = opts || {};
 
     function updateToolSelection() {
       var colorBtns = document.querySelectorAll('.okColorBtn');
@@ -22364,11 +22646,384 @@
         doneBtn.addEventListener('click', function () {
           setToolPanelVisible(false);
           okShowConfirm('このえで ていしゅつする？', 'ていしゅつ', function () {
-            submitNow(false);
+            if (options.onDone) options.onDone();
           });
         });
       }
     }
+    // 提出用の書き出し。端末ごとのキャンバス縦横比を保ったまま長辺480に縮小する。
+    // 取得できないときは空文字を返す（呼び出し側で提出を中止する）。
+    function captureImage() {
+      var cv = document.getElementById('okCanvas');
+      if (!cv) return '';
+      try {
+        var out = document.createElement('canvas');
+        var sc = 480 / Math.max(cv.width, cv.height);
+        if (sc > 1) sc = 1;
+        out.width = Math.max(1, Math.round(cv.width * sc));
+        out.height = Math.max(1, Math.round(cv.height * sc));
+        var octx = out.getContext('2d');
+        octx.fillStyle = '#ffffff';
+        octx.fillRect(0, 0, out.width, out.height);
+        octx.drawImage(cv, 0, 0, out.width, out.height);
+        return out.toDataURL('image/jpeg', 0.7);
+      } catch (eCap) {
+        return '';
+      }
+    }
+
+    return {
+      setup: setupCanvasAndTools,
+      capture: captureImage,
+      showConfirm: okShowConfirm,
+      refit: scheduleOkRefit,
+      teardown: function () {
+        if (ui.teardownGlobal) ui.teardownGlobal();
+      }
+    };
+  }
+
+  // 描画エンジンが読み書きする状態の初期値。extra で画面固有の項目を足せる。
+  function makeOekakiDrawUi(extra) {
+    return assign(
+      {
+        color: OEKAKI_COLORS[0],
+        penW: 6,
+        eraser: false,
+        stamp: '',
+        stamps: null,
+        stampsKey: '',
+        everDrew: false,
+        renderKey: '',
+        timerId: null,
+        submitInFlight: false,
+        globalHandlersBound: false,
+        teardownGlobal: null,
+        resizeTimer: null,
+        refitTimers: null,
+        resizeObs: null,
+        undoStack: null,
+        redoStack: null,
+        fitKey: '',
+        artScale: 1,
+        fsAutoTried: false
+      },
+      extra || {}
+    );
+  }
+
+
+  function routeOekakiPlayer(roomId, isHost) {
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (e0) {
+      lobbyId = '';
+    }
+
+    var isTableGmDevice = false;
+    try {
+      var qGm0 = parseQuery();
+      isTableGmDevice = !!(qGm0 && String(qGm0.gmdev || '') === '1');
+    } catch (eGm0) {
+      isTableGmDevice = false;
+    }
+
+    var playerId = '';
+    try {
+      var q1 = parseQuery();
+      playerId = q1 && q1.player ? String(q1.player) : '';
+    } catch (eP) {
+      playerId = '';
+    }
+    if (!playerId && !isTableGmDevice && lobbyId) {
+      try {
+        playerId = String(getOrCreateLobbyMemberId(lobbyId) || '');
+      } catch (eMid) {
+        playerId = '';
+      }
+    }
+    // テーブルGM端末は描かない（進行状況の表示のみ）。
+    if (isTableGmDevice) playerId = '';
+
+    try {
+      if (document.body && document.body.classList) document.body.classList.add('ok-player-screen');
+    } catch (eCls) {
+      // ignore
+    }
+
+    var lastRoom = null;
+    var ui = makeOekakiDrawUi({
+      judgeInFlight: false,
+      judgeToken: '',
+      lobbyReturnWatching: false,
+      lobbyUnsub: null,
+      autoJoinInFlight: false
+    });
+
+    // キャンバス・ツール一式は共通の描画エンジンに任せる。
+    var draw = createOekakiDrawEngine(ui, {
+      onDone: function () {
+        submitNow(false);
+      }
+    });
+
+    function redirectToLobby() {
+      if (!lobbyId) return;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = isHost ? 'lobby_host' : 'lobby_player';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (ui.lobbyReturnWatching) return;
+      ui.lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'oekaki' || rid !== String(roomId || '')) {
+              try {
+                if (ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
+              redirectToLobby();
+            }
+          });
+        })
+        .then(function (u2) {
+          ui.lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    function currentRoundIndex(room) {
+      return parseIntSafe(room && room.round && room.round.index, 1);
+    }
+
+    function isMeSubmitted(room) {
+      if (!playerId) return false;
+      var p = room && room.players ? room.players[playerId] : null;
+      return !!(p && p.image && parseIntSafe(p.round, 0) === currentRoundIndex(room));
+    }
+
+    function computeRenderKey(room) {
+      var c = oekakiCountSubmitted(room);
+      var ri = currentRoundIndex(room);
+      var phase = String((room && room.phase) || '');
+      if (phase === 'drawing') {
+        var canDraw = !!(playerId && !isTableGmDevice && room.players && room.players[playerId]);
+        if (canDraw && !isMeSubmitted(room)) {
+          // キャンバス表示中は再描画しない（描きかけの絵が消えるため）。提出数はupdateDynamicで更新。
+          return 'draw|' + ri;
+        }
+        return 'wait|' + ri + '|' + c.submitted + '|' + c.total + '|' + (isMeSubmitted(room) ? 1 : 0);
+      }
+      if (phase === 'judging') return 'judge|' + ri;
+      if (phase === 'result') {
+        var r = (room && room.result) || {};
+        return 'result|' + ri + '|' + String(r.judgedAt || 0) + '|' + (r.error ? 1 : 0);
+      }
+      return 'x|' + phase + '|' + ri;
+    }
+
+    function updateDynamic(room) {
+      var c = oekakiCountSubmitted(room);
+      var st = document.getElementById('okStatus');
+      if (st) st.textContent = 'ていしゅつ ' + String(c.submitted) + '/' + String(c.total);
+      var stc = document.getElementById('okStatusCount');
+      if (stc) stc.textContent = String(c.submitted) + '/' + String(c.total);
+    }
+
+    // ゲーム開始時の3カウントダウン（サーバー時刻基準なので全端末で同期する）。
+    // ラウンド開始時刻 = endsAt - drawSeconds*1000。それより前なら 3,2,1 を最前面に表示。
+    function updateCountdown(room) {
+      var el = document.getElementById('okCountdown');
+      if (!el) return;
+      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
+      var startAt = endsAt - totalSec * 1000;
+      var diff = startAt - serverNowMs();
+      var span = document.getElementById('okCountdownNum');
+      if (!span) return;
+
+      var S = OEKAKI_COUNT_STEP_MS;
+
+      // mode: 'num'（大きい数字） / 'ready'（よーい…） / 'go'（かいて！・タッチ通過）
+      function setNum(text, mode) {
+        el.classList.toggle('ok-count-go', mode === 'go');
+        el.classList.toggle('ok-count-ready', mode === 'ready');
+        if (span.textContent === text) return;
+        span.textContent = text;
+        // 数字が変わるたびにポップアニメを再トリガー
+        span.classList.remove('ok-count-pop');
+        void span.offsetWidth;
+        span.classList.add('ok-count-pop');
+      }
+
+      if (diff > 3 * S) {
+        // 3の前に「よーい…」の間を置く（読み込み遅れをここで吸収し、3を確実に見せる）
+        el.style.display = '';
+        setNum('よーい…', 'ready');
+      } else if (diff > 0) {
+        el.style.display = '';
+        setNum(String(Math.ceil(diff / S)), 'num');
+      } else if (diff > -1000) {
+        // スタートの瞬間: 「かいて！」を出す（タッチは通す）
+        el.style.display = '';
+        setNum('かいて！', 'go');
+      } else {
+        el.style.display = 'none';
+      }
+    }
+
+    // タイマー表示更新: フルスクリーン描画中は円形リング、それ以外の画面ではテキスト。
+    // 残り10秒からはキャンバス枠の赤点滅(ok-warn)も付ける。
+    var OK_RING_CIRC = 113.097; // 2π×r(18)
+    function updateTimerText(room) {
+      var endsAt = parseIntSafe(room && room.round && room.round.endsAt, 0);
+      var totalSec = clamp(parseIntSafe(room && room.settings && room.settings.drawSeconds, 90), 30, 600);
+      var remainMs = Math.max(0, endsAt - serverNowMs());
+      var remainSec = Math.max(0, Math.ceil(remainMs / 1000));
+
+      var fg = document.getElementById('okRingFg');
+      if (fg) {
+        var frac = Math.max(0, Math.min(1, remainMs / (totalSec * 1000)));
+        fg.style.strokeDashoffset = String(OK_RING_CIRC * (1 - frac));
+      }
+
+      var el = document.getElementById('okTimer');
+      if (el) el.textContent = formatMMSS(remainSec);
+
+      try {
+        var fs = document.getElementById('okFs');
+        if (fs) {
+          if (remainSec <= 10 && remainSec > 0) fs.classList.add('ok-warn');
+          else fs.classList.remove('ok-warn');
+        }
+      } catch (eWarn) {
+        // ignore
+      }
+      return remainSec;
+    }
+
+    function submitNow(isAuto) {
+      if (!playerId || isTableGmDevice) return;
+      if (ui.submitInFlight) return;
+      var room = lastRoom;
+      if (!room || room.phase !== 'drawing') return;
+      if (isMeSubmitted(room)) return;
+      if (!(room.players && room.players[playerId])) return;
+      if (isAuto && !ui.everDrew) return; // 何も描いていなければ自動提出しない（未提出扱い）
+      var dataUrl = draw.capture();
+      if (!dataUrl) return;
+      ui.submitInFlight = true;
+      oekakiSubmitImage(roomId, playerId, currentRoundIndex(room), dataUrl)
+        .catch(function (e) {
+          if (!isAuto) alert((e && e.message) || 'ていしゅつに しっぱいしました');
+        })
+        .finally(function () {
+          ui.submitInFlight = false;
+        });
+    }
+
+    function startJudging(fromPhase) {
+      ui.judgeInFlight = true;
+      ui.judgeToken = randomId(10);
+      oekakiClaimJudging(roomId, ui.judgeToken, fromPhase)
+        .then(function (won) {
+          if (!won) return null;
+          // クレーム後に最新スナップショットで判定（直前の提出を取りこぼさない）。
+          return getValueOnce(oekakiRoomPath(roomId)).then(function (fresh) {
+            if (!fresh || fresh.phase !== 'judging') return null;
+            return oekakiRunJudge(roomId, fresh);
+          });
+        })
+        .catch(function (e) {
+          try {
+            if (typeof console !== 'undefined' && console.warn) console.warn('oekaki judge failed', e);
+          } catch (e2) {
+            // ignore
+          }
+        })
+        .finally(function () {
+          ui.judgeInFlight = false;
+        });
+    }
+
+    function maybeStartJudging(room) {
+      if (!isHost) return;
+      if (!room || room.phase !== 'drawing') return;
+      if (ui.judgeInFlight) return;
+      var c = oekakiCountSubmitted(room);
+      var allSubmitted = c.total > 0 && c.submitted >= c.total;
+      var endsAt = parseIntSafe(room.round && room.round.endsAt, 0);
+      var timeUp = endsAt > 0 && serverNowMs() > endsAt + OEKAKI_JUDGE_GRACE_MS;
+      if (!allSubmitted && !timeUp) return;
+      startJudging('drawing');
+    }
+
+    function maybeRecoverJudging(room) {
+      // 判定担当端末が落ちてjudgingのまま止まった場合の再クレーム。
+      if (!isHost) return;
+      if (!room || room.phase !== 'judging') return;
+      if (ui.judgeInFlight) return;
+      var t0 = parseIntSafe(room.judgingAt, 0);
+      if (!t0 || serverNowMs() - t0 < 60000) return;
+      startJudging('judging');
+    }
+
+    function ensureTimer() {
+      if (ui.timerId) return;
+      ui.timerId = setInterval(function () {
+        var q2 = null;
+        try {
+          q2 = parseQuery();
+        } catch (e) {
+          q2 = null;
+        }
+        if (!q2 || String(q2.screen || '') !== 'oekaki_player' || String(q2.room || '') !== String(roomId || '')) {
+          clearInterval(ui.timerId);
+          ui.timerId = null;
+          if (ui.teardownGlobal) ui.teardownGlobal();
+          return;
+        }
+        var room = lastRoom;
+        if (!room) return;
+        if (room.phase === 'drawing') {
+          var remainSec = updateTimerText(room);
+          try {
+            updateCountdown(room);
+          } catch (eCd) {
+            // ignore
+          }
+          if (remainSec <= 0) submitNow(true);
+          maybeStartJudging(room);
+        } else if (room.phase === 'judging') {
+          maybeRecoverJudging(room);
+        }
+      }, 250);
+    }
+
 
     function bindResultButtons(room) {
       var replayBtn = document.getElementById('okReplay');
@@ -22440,7 +23095,7 @@
           isTableGmDevice: isTableGmDevice,
           ui: ui
         });
-        setupCanvasAndTools();
+        draw.setup();
         bindResultButtons(room);
         if (room.phase === 'drawing') {
           updateTimerText(room);
@@ -22585,6 +23240,38 @@
   function demoLog(text, extra) {
     try {
       if (typeof console !== 'undefined' && console && console.warn) console.warn('[demo] ' + String(text || ''), extra);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // ==================== oekaki battle relay (screens) ====================
+  // 画面は2つだけ:
+  //   oekaki_relay_create … ホストが設定して部屋をつくる
+  //   oekaki_relay        … 対戦本体（自分のスロットと部屋の状態から表示を切り替える）
+  // 部屋のURLは最後まで変わらないので、共有は「同じリンクを送り返す」だけでよい。
+
+  var OKR_SETTINGS_LS = 'bbg_okrelay_settings_v1';
+
+  function okrLoadSettings() {
+    var raw = '';
+    try {
+      raw = String(localStorage.getItem(OKR_SETTINGS_LS) || '');
+    } catch (e) {
+      raw = '';
+    }
+    var o = null;
+    try {
+      o = raw ? JSON.parse(raw) : null;
+    } catch (e2) {
+      o = null;
+    }
+    return normalizeOekakiLobbySettings(o);
+  }
+
+  function okrSaveSettings(settings) {
+    try {
+      localStorage.setItem(OKR_SETTINGS_LS, JSON.stringify(normalizeOekakiLobbySettings(settings)));
     } catch (e) {
       // ignore
     }
@@ -23621,6 +24308,1068 @@
     }
   }
 
+  function okrShareUrl(roomId) {
+    var q = {};
+    var v = getCacheBusterParam();
+    if (v) q.v = v;
+    q.screen = 'oekaki_relay';
+    q.room = String(roomId || '');
+    return baseUrl() + '?' + buildQuery(q);
+  }
+
+  // LINE等へ渡す。Web Share API があれば共有シート、無ければクリップボードへコピー。
+  // ※ 必ずクリック等のユーザー操作の中から呼ぶこと（navigator.share の制約）。
+  function okrShareLink(text, url, statusElId) {
+    var body = String(text || '');
+    var link = String(url || '');
+
+    function setStatus(msg) {
+      var el = statusElId ? document.getElementById(statusElId) : null;
+      if (el) el.textContent = String(msg || '');
+    }
+
+    function fallback() {
+      return copyTextToClipboard(body ? body + '\n' + link : link).then(function (ok) {
+        setStatus(ok ? '✅ コピーしました。LINEなどに貼り付けて送ってください。' : 'コピーできませんでした。下のリンクを長押しでコピーしてください。');
+        return ok;
+      });
+    }
+
+    try {
+      if (navigator && navigator.share) {
+        return navigator
+          .share({ title: 'おえかきバトル（リレー）', text: body, url: link })
+          .then(function () {
+            setStatus('');
+            return true;
+          })
+          .catch(function (e) {
+            // 共有シートを閉じただけならメッセージを出さない。
+            if (e && e.name === 'AbortError') return false;
+            return fallback();
+          });
+      }
+    } catch (e) {
+      // ignore
+    }
+    return fallback();
+  }
+
+  function okrPickTopicFor(settings, excludeTopic) {
+    var s = normalizeOekakiLobbySettings(settings);
+    if (s.topicMode === 'custom') return String(s.customTopic || '').trim();
+    return oekakiPickTopic(s.topicAge, excludeTopic || '');
+  }
+
+  // 設定フォーム（部屋作成と再戦申し込みで共用）。
+  // お題の年齢／自由記入は両方出しておき、表示の切り替えだけJSで行う（再描画で入力を失わないため）。
+  function okrSettingsFieldsHtml(settings) {
+    var s = normalizeOekakiLobbySettings(settings);
+    var timeVals = [30, 60, 90, 120, 180, 300, 420, 600];
+    var timeOptions = '';
+    for (var i = 0; i < timeVals.length; i++) {
+      var tv = timeVals[i];
+      timeOptions +=
+        '<option value="' + tv + '"' + (s.drawSeconds === tv ? ' selected' : '') + '>' + escapeHtml(oekakiFormatSeconds(tv)) + '</option>';
+    }
+    return (
+      '<div class="field">' +
+      '<label>制限時間</label>' +
+      '<select id="okrDrawSecs">' +
+      timeOptions +
+      '</select>' +
+      '</div>' +
+      '<div class="field">' +
+      '<label>お題</label>' +
+      '<select id="okrTopicMode">' +
+      '<option value="random"' + (s.topicMode === 'random' ? ' selected' : '') + '>ランダム</option>' +
+      '<option value="custom"' + (s.topicMode === 'custom' ? ' selected' : '') + '>自由記入</option>' +
+      '</select>' +
+      '</div>' +
+      '<div class="field" id="okrTopicAgeField"' + (s.topicMode === 'custom' ? ' style="display:none"' : '') + '>' +
+      '<label>お題の対象年齢</label>' +
+      '<select id="okrTopicAge">' +
+      '<option value="kids"' + (s.topicAge === 'kids' ? ' selected' : '') + '>こども（〜6さい）</option>' +
+      '<option value="school"' + (s.topicAge === 'school' ? ' selected' : '') + '>小学生</option>' +
+      '<option value="adult"' + (s.topicAge === 'adult' ? ' selected' : '') + '>おとな</option>' +
+      '</select>' +
+      '</div>' +
+      '<div class="field" id="okrCustomTopicField"' + (s.topicMode === 'custom' ? '' : ' style="display:none"') + '>' +
+      '<label>お題（自由記入・2人とも同じお題を描きます）</label>' +
+      '<input id="okrCustomTopic" placeholder="例: 二日酔い" value="' +
+      escapeHtml(s.customTopic) +
+      '" />' +
+      '</div>'
+    );
+  }
+
+  function okrSyncTopicFields() {
+    var modeEl = document.getElementById('okrTopicMode');
+    var mode = modeEl ? String(modeEl.value || 'random') : 'random';
+    var ageF = document.getElementById('okrTopicAgeField');
+    var cusF = document.getElementById('okrCustomTopicField');
+    if (ageF) ageF.style.display = mode === 'custom' ? 'none' : '';
+    if (cusF) cusF.style.display = mode === 'custom' ? '' : 'none';
+  }
+
+  function okrBindSettingsForm() {
+    var modeEl = document.getElementById('okrTopicMode');
+    if (modeEl && !modeEl.__okr_bound) {
+      modeEl.__okr_bound = true;
+      modeEl.addEventListener('change', okrSyncTopicFields);
+    }
+    okrSyncTopicFields();
+  }
+
+  function okrReadSettingsForm(fallback) {
+    var base = normalizeOekakiLobbySettings(fallback);
+    var secEl = document.getElementById('okrDrawSecs');
+    var modeEl = document.getElementById('okrTopicMode');
+    var ageEl = document.getElementById('okrTopicAge');
+    var cusEl = document.getElementById('okrCustomTopic');
+    return normalizeOekakiLobbySettings({
+      drawSeconds: secEl ? parseIntSafe(secEl.value, base.drawSeconds) : base.drawSeconds,
+      topicMode: modeEl ? String(modeEl.value || base.topicMode) : base.topicMode,
+      topicAge: ageEl ? String(ageEl.value || base.topicAge) : base.topicAge,
+      customTopic: cusEl ? String(cusEl.value || '') : base.customTopic
+    });
+  }
+
+  // -------------------- relay: 部屋づくり画面 --------------------
+
+  function renderOekakiRelayCreate(viewEl) {
+    var s = okrLoadSettings();
+    var keyNote = loadGeminiApiKey()
+      ? ''
+      : '<div class="muted">※ Gemini APIキーが未設定です。AI採点を使うには<a href="?screen=setup">せってい</a>で設定してください（未設定でも遊べますが、点数と煽りコメントは出ません）。</div>';
+
+    render(
+      viewEl,
+      '<div class="stack">' +
+        '<div class="okr-hero">' +
+        '<div class="okr-hero-emoji">🎨⚔️</div>' +
+        '<div class="okr-hero-title">おえかきバトル（リレー）</div>' +
+        '<div class="okr-hero-sub">2人で同じお題を描いて、AIに採点させる投稿型バトル</div>' +
+        '</div>' +
+        '<div class="card okr-flow">' +
+        '<div class="okr-flow-step"><span class="okr-flow-no">1</span>あなたが先に描く</div>' +
+        '<div class="okr-flow-step"><span class="okr-flow-no">2</span>LINEなどでリンクを相手に渡す</div>' +
+        '<div class="okr-flow-step"><span class="okr-flow-no">3</span>相手が描くと、その場でAIが採点</div>' +
+        '<div class="okr-flow-step"><span class="okr-flow-no">4</span>相手から結果のリンクが返ってくる</div>' +
+        '</div>' +
+        '<div class="card"><div class="stack">' +
+        '<div class="field"><label>あなたの名前</label><input id="okrHostName" placeholder="例: たろう" value="' +
+        escapeHtml(loadPersistedName() || '') +
+        '" /></div>' +
+        okrSettingsFieldsHtml(s) +
+        keyNote +
+        '<button id="okrCreateBtn" class="primary bbg-start-btn">この設定ではじめる</button>' +
+        '</div></div>' +
+        '<div id="okrCreateError" class="form-error" role="alert"></div>' +
+        '<div class="okr-warn card">😈 このモードのAIコメントは「勝った側をベタ褒め／負けた側をボロクソにけなす」設定です。けなされて笑える仲の相手とだけ遊んでください。</div>' +
+        '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+        '</div>'
+    );
+  }
+
+  function routeOekakiRelayCreate() {
+    renderOekakiRelayCreate(viewEl);
+    okrBindSettingsForm();
+    clearInlineError('okrCreateError');
+
+    var btn = document.getElementById('okrCreateBtn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      clearInlineError('okrCreateError');
+      var nameEl = document.getElementById('okrHostName');
+      var name = String((nameEl && nameEl.value) || '').trim();
+      if (!name) {
+        setInlineError('okrCreateError', '名前を入力してください。');
+        return;
+      }
+      var settings = okrReadSettingsForm(okrLoadSettings());
+      var topic = okrPickTopicFor(settings, '');
+      if (!topic) {
+        setInlineError('okrCreateError', 'お題を入力してください。');
+        return;
+      }
+
+      btn.disabled = true;
+      var roomId = makeRoomId();
+      firebaseReady()
+        .then(function () {
+          return createOekakiRelayRoom(roomId, settings, topic, name);
+        })
+        .then(function () {
+          savePersistedName(name);
+          okrSaveSettings(settings);
+          okrSaveSlot(roomId, 'a');
+          var q = {};
+          var v = getCacheBusterParam();
+          if (v) q.v = v;
+          q.screen = 'oekaki_relay';
+          q.room = roomId;
+          setQuery(q);
+          route();
+        })
+        .catch(function (e) {
+          btn.disabled = false;
+          setInlineError('okrCreateError', (e && e.message) || '作成に失敗しました');
+        });
+    });
+  }
+
+  // -------------------- relay: 対戦画面 --------------------
+
+  function okrEntriesOf(result) {
+    return result && Array.isArray(result.entries) ? result.entries : [];
+  }
+
+  // 結果カード。点数がある2人ぶんなら、上位を勝者・下位を敗者として色分けする。
+  function okrResultCardsHtml(room, result, mySlot, animate) {
+    var entries = okrEntriesOf(result);
+    var roundIndex = parseIntSafe(result && result.round, okrRoundIndex(room));
+    var decided = entries.length === 2 && entries[0] && entries[1] && entries[0].score != null && entries[0].score !== entries[1].score;
+
+    var html = '';
+    for (var i = 0; i < entries.length; i++) {
+      var en = entries[i] || {};
+      var slot = String(en.slot || '');
+      var p = okrPlayer(room, slot) || {};
+      // 前回結果（prevResult）は entries 側に絵を持っている。現ラウンドの結果は players から引く。
+      var img = en.image ? String(en.image) : p.image && parseIntSafe(p.round, 0) === roundIndex ? String(p.image) : '';
+      var hasScore = en.score != null;
+      var isWin = decided && i === 0;
+      var isLose = decided && i === entries.length - 1;
+      var badge = isWin ? '<span class="okr-badge okr-badge-win">👑 WIN</span>' : isLose ? '<span class="okr-badge okr-badge-lose">💀 LOSE</span>' : '';
+
+      html +=
+        '<div class="ok-result-card okr-card' +
+        (isWin ? ' okr-win' : '') +
+        (isLose ? ' okr-lose' : '') +
+        (animate ? ' ok-in' : '') +
+        '" style="animation-delay:' +
+        String(Math.round(i * 220) / 1000) +
+        's">' +
+        '<div class="ok-result-head">' +
+        badge +
+        '<b class="ok-result-name">' +
+        escapeHtml(String(en.name || okrName(room, slot))) +
+        (slot && slot === mySlot ? '<span class="okr-you">あなた</span>' : '') +
+        '</b>' +
+        (hasScore
+          ? '<span class="ok-score"><span class="okScoreNum" data-score="' +
+            String(clamp(parseIntSafe(en.score, 0), 0, 100)) +
+            '">0</span>点</span>'
+          : '') +
+        '</div>' +
+        (img ? '<img class="ok-result-img" src="' + escapeHtml(img) + '" alt="" />' : '<div class="muted">（画像なし）</div>') +
+        (en.comment ? '<div class="okr-comment' + (isLose ? ' okr-comment-lose' : '') + '">' + escapeHtml(String(en.comment)) + '</div>' : '') +
+        '</div>';
+    }
+    return '<div class="ok-result-cards">' + html + '</div>';
+  }
+
+  function okrVerdictHtml(result) {
+    var v = String((result && result.verdict) || '').trim();
+    if (!v) return '';
+    return '<div class="okr-verdict ok-in">📣 ' + escapeHtml(v) + '</div>';
+  }
+
+  function okrShareUrlBoxHtml(roomId) {
+    return (
+      '<div class="field" style="margin:0"><label>共有リンク（コピーして貼り付けてもOK）</label>' +
+      '<div class="code" id="okrShareUrlText">' +
+      escapeHtml(okrShareUrl(roomId)) +
+      '</div></div>'
+    );
+  }
+
+  function okrShareBoxHtml(roomId, buttonLabel, note) {
+    return (
+      '<button id="okrShareBtn" class="primary bbg-start-btn">🔗 ' + escapeHtml(String(buttonLabel || 'リンクを送る')) + '</button>' +
+      '<div class="muted center" id="okrShareStatus"></div>' +
+      (note ? '<div class="muted center">' + escapeHtml(String(note)) + '</div>' : '') +
+      okrShareUrlBoxHtml(roomId)
+    );
+  }
+
+  // 再戦の設定フォーム。申し込んだ本人が先に描くので、その順序をはっきり書いておく。
+  function okrRematchSectionHtml(room, mySlot) {
+    var s = normalizeOekakiLobbySettings(room && room.settings);
+    var otherName = okrName(room, okrOtherSlot(mySlot));
+    return (
+      '<div class="card okr-rematch"><div class="stack">' +
+      '<div class="bbg-sec">🔥 再戦の設定</div>' +
+      '<div class="muted">申し込むと、まず<b>あなたが</b>この設定で描きます。描き終わってから、前回の結果と今回の挑戦状をまとめて ' +
+      escapeHtml(otherName) +
+      ' さんに送ります。</div>' +
+      okrSettingsFieldsHtml(s) +
+      '<button id="okrRematchBtn" class="primary bbg-start-btn">この設定で描きはじめる</button>' +
+      '</div></div>'
+    );
+  }
+
+  function okrJudgingHtml(room) {
+    var roundIndex = okrRoundIndex(room);
+    var slots = ['a', 'b'];
+    var gallery = '';
+    for (var i = 0; i < slots.length; i++) {
+      var p = okrPlayer(room, slots[i]);
+      if (!p || !p.image || parseIntSafe(p.round, 0) !== roundIndex) continue;
+      gallery +=
+        '<div class="ok-judge-item ok-in" style="animation-delay:' +
+        String(Math.round(i * 120) / 1000) +
+        's"><img class="ok-judge-img" style="animation-delay:' +
+        String(Math.round(i * 300) / 1000) +
+        's" src="' +
+        escapeHtml(String(p.image)) +
+        '" alt="" /><div class="ok-judge-name">' +
+        escapeHtml(okrName(room, slots[i])) +
+        '</div></div>';
+    }
+    return (
+      '<div class="stack center">' +
+      '<div class="ok-judge-icon">✏️</div>' +
+      '<div class="big ok-pop">AI採点中<span class="ok-dots"><span>.</span><span>.</span><span>.</span></span></div>' +
+      '<div class="muted">どっちが上か、AIが決めています…</div>' +
+      (gallery ? '<div class="ok-judge-grid">' + gallery + '</div>' : '') +
+      '</div>'
+    );
+  }
+
+  function renderOekakiRelay(viewEl, opts) {
+    var room = opts.room;
+    var roomId = opts.roomId;
+    var slot = String(opts.slot || '');
+    var view = String(opts.view || '');
+    var ui = opts.ui;
+
+    var roundIndex = okrRoundIndex(room);
+    var settings = normalizeOekakiLobbySettings(room && room.settings);
+    var other = okrOtherSlot(slot);
+    var otherName = okrNameOrGeneric(room, other);
+    var roundLabel = roundIndex > 1 ? '第' + String(roundIndex) + '戦' : '第1戦';
+
+    if (view === 'join') {
+      render(
+        viewEl,
+        '<div class="stack">' +
+          '<div class="okr-hero">' +
+          '<div class="okr-hero-emoji">⚔️</div>' +
+          '<div class="okr-hero-title">おえかきバトル</div>' +
+          '<div class="okr-hero-sub">' +
+          escapeHtml(okrName(room, 'a')) +
+          ' さんからの挑戦状</div>' +
+          '</div>' +
+          '<div class="card"><div class="stack">' +
+          '<div class="kv"><span class="muted">制限時間</span><b>' +
+          escapeHtml(oekakiFormatSeconds(settings.drawSeconds)) +
+          '</b></div>' +
+          '<div class="kv"><span class="muted">お題</span><b>スタート後に表示</b></div>' +
+          '<div class="field"><label>あなたの名前</label><input id="okrJoinName" placeholder="例: はなこ" value="' +
+          escapeHtml(loadPersistedName() || '') +
+          '" /></div>' +
+          '<button id="okrJoinBtn" class="primary bbg-start-btn">挑戦を受ける</button>' +
+          '</div></div>' +
+          '<div id="okrJoinError" class="form-error" role="alert"></div>' +
+          '<div class="okr-warn card">😈 このバトルのAIコメントは「勝った側をベタ褒め／負けた側をボロクソにけなす」設定です。</div>' +
+          // 別ブラウザで開き直すと端末の記録が無くなるため、席を取り戻す導線を用意しておく。
+          '<div class="center"><button id="okrClaimA" class="ghost">わたしは ' +
+          escapeHtml(okrName(room, 'a')) +
+          '（ホスト）です</button></div>' +
+          '</div>'
+      );
+      return;
+    }
+
+    // 席を自動で割り当てたときだけ出す控えめな注意書き。
+    // ふつうは正しく当たるが、万一取り違えたときに入れ替えられるようにしておく。
+    var seatNoteHtml = '';
+    if (ui && ui.autoAssigned && okrPlayer(room, other)) {
+      seatNoteHtml =
+        '<div class="okr-seat-note muted center">この端末は <b>' +
+        escapeHtml(okrName(room, slot)) +
+        '</b> として続けています。' +
+        '<button id="okrSwapSeat" class="ghost okr-seat-swap">' +
+        escapeHtml(otherName) +
+        ' に切り替える</button></div>';
+    }
+
+    if (view === 'draw') {
+      render(
+        viewEl,
+        oekakiDrawFsHtml({
+          topic: String((room.round && room.round.topic) || ''),
+          ui: ui,
+          roundIndex: roundIndex,
+          statusText: roundLabel + ' / ' + okrName(room, slot)
+        })
+      );
+      return;
+    }
+
+    if (view === 'ready' || view === 'timeup') {
+      // 自分が設定した自由記入お題は本人には見えているので隠さない。
+      var knowsTopic = settings.topicMode === 'custom' && String((room.settings && room.settings.setBy) || 'a') === slot;
+      // 前回の結果は「受け取った側」にだけ見せる。再戦を申し込んだ本人は
+      // 直前の結果画面で見たばかりなので、ここで繰り返さない。
+      var prev = room.prevResult;
+      var iAskedRematch = String(room.rematchBy || '') === slot;
+      var prevHtml = '';
+      if (prev && !iAskedRematch && !okrHasSubmitted(room, slot) && roundIndex > 1) {
+        prevHtml =
+          '<div class="bbg-sec">前回（第' +
+          String(parseIntSafe(prev.round, roundIndex - 1)) +
+          '戦）の結果</div>' +
+          (prev.error ? '<div class="card ok-error">' + escapeHtml(String(prev.error)) + '</div>' : '') +
+          okrVerdictHtml(prev) +
+          okrResultCardsHtml(room, prev, slot, false) +
+          '<hr />';
+      }
+
+      var rematchNote = '';
+      if (roundIndex > 1) {
+        var by = String(room.rematchBy || 'b');
+        rematchNote =
+          '<div class="card okr-callout">🔥 ' +
+          escapeHtml(
+            by === slot
+              ? 'あなたが申し込んだ再戦です。まずあなたが描いて、結果と一緒に送ります。'
+              : okrName(room, okrOtherSlot(slot)) + ' さんから再戦を申し込まれています！'
+          ) +
+          '</div>';
+      }
+
+      var timeupHtml =
+        view === 'timeup'
+          ? '<div class="card ok-error">前回の持ち時間が終わってしまいました（描き終える前に画面を離れたようです）。もう一度はじめられます。</div>'
+          : '';
+
+      render(
+        viewEl,
+        '<div class="stack">' +
+          prevHtml +
+          rematchNote +
+          '<div class="okr-hero">' +
+          '<div class="okr-hero-emoji">✏️</div>' +
+          '<div class="okr-hero-title">' +
+          escapeHtml(roundLabel) +
+          ' — あなたの番</div>' +
+          '</div>' +
+          timeupHtml +
+          '<div class="card"><div class="stack">' +
+          '<div class="kv"><span class="muted">制限時間</span><b>' +
+          escapeHtml(oekakiFormatSeconds(settings.drawSeconds)) +
+          '</b></div>' +
+          '<div class="kv"><span class="muted">お題</span><b>' +
+          (knowsTopic ? escapeHtml(String((room.round && room.round.topic) || '')) : 'スタート後に表示') +
+          '</b></div>' +
+          '<div class="muted">「はじめる」を押すと3カウントのあとタイマーが動きます。途中で画面を離れると時間だけが進むので注意！</div>' +
+          '<button id="okrStartBtn" class="primary bbg-start-btn">' +
+          (view === 'timeup' ? 'もう一度はじめる' : 'はじめる') +
+          '</button>' +
+          '</div></div>' +
+          '<div id="okrError" class="form-error" role="alert"></div>' +
+          seatNoteHtml +
+          '</div>'
+      );
+      return;
+    }
+
+    if (view === 'wait') {
+      var mineSubmitted = okrHasSubmitted(room, slot);
+      var myImg = '';
+      var mine = okrPlayer(room, slot);
+      if (mineSubmitted && mine && mine.image) {
+        myImg = '<img class="ok-mythumb ok-pop" src="' + escapeHtml(String(mine.image)) + '" alt="あなたの絵" />';
+      }
+
+      if (mineSubmitted) {
+        // 自分の番が終わった直後。相手にリンクを渡すのがここでの唯一の仕事。
+        // 前回の勝敗は結果画面で見たばかりなので、ここでは繰り返さない
+        // （リンクには前回の結果も含まれることだけ文章で伝える）。
+        var seated = !!okrPlayer(room, other);
+        var sendsPrev = !!(room.prevResult && roundIndex > 1);
+
+        render(
+          viewEl,
+          '<div class="stack center">' +
+            '<div><span class="ok-stamp">かんせい！</span></div>' +
+            myImg +
+            '<div class="muted">' +
+            (!seated
+              ? 'リンクを送って、対戦相手をよびましょう。'
+              : sendsPrev
+                ? '前回の結果と、今回の挑戦状をまとめて <b>' + escapeHtml(otherName) + '</b> さんに送りましょう。'
+                : 'つぎは <b>' + escapeHtml(otherName) + '</b> さんの番です。リンクを渡してください。') +
+            '</div>' +
+            okrShareBoxHtml(
+              roomId,
+              !seated ? 'リンクを送って対戦相手をよぶ' : sendsPrev ? otherName + ' に結果と挑戦状を送る' : otherName + ' に挑戦状を送る',
+              '相手が描き終わるとAIが採点し、結果のリンクが返ってきます。'
+            ) +
+            '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+            seatNoteHtml +
+            '</div>'
+        );
+        return;
+      }
+
+      // 自分は後攻で、先攻がまだ描き終わっていない。基本は「相手の番を待つ」だけ。
+      // （先攻は描き終わってからリンクを送るので、ここに来るのは古いリンクを先に開いた場合）
+      var prevR = room.prevResult;
+      var prevBlock =
+        prevR && roundIndex > 1
+          ? '<div class="bbg-sec">前回（第' +
+            String(parseIntSafe(prevR.round, roundIndex - 1)) +
+            '戦）の結果</div>' +
+            okrVerdictHtml(prevR) +
+            okrResultCardsHtml(room, prevR, slot, false) +
+            '<hr />'
+          : '';
+
+      render(
+        viewEl,
+        '<div class="stack">' +
+          prevBlock +
+          '<div class="center stack">' +
+          '<div class="big">⏳ 相手の番です</div>' +
+          '<div class="muted">' +
+          escapeHtml(otherName + ' さんが描き終わるのを待っています。描き終わると、あなたの番のリンクが届きます。') +
+          '</div>' +
+          '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+          seatNoteHtml +
+          '</div>' +
+          '</div>'
+      );
+      return;
+    }
+
+    if (view === 'judging') {
+      render(viewEl, okrJudgingHtml(room));
+      return;
+    }
+
+    if (view === 'result') {
+      var result = room.result || {};
+      var errorHtml = result.error ? '<div class="card ok-error">' + escapeHtml(String(result.error)) + '</div>' : '';
+      var retryHtml = result.error
+        ? '<div class="row"><button id="okrRejudgeBtn" class="ghost">AI採点をやり直す</button></div>'
+        : '';
+
+      render(
+        viewEl,
+        '<div class="stack">' +
+          '<div class="big center ok-pop">' +
+          escapeHtml(roundLabel) +
+          ' 結果発表</div>' +
+          '<div class="muted center">お題「<b>' +
+          escapeHtml(String((room.round && room.round.topic) || '')) +
+          '</b>」</div>' +
+          errorHtml +
+          retryHtml +
+          okrVerdictHtml(result) +
+          okrResultCardsHtml(room, result, slot, true) +
+          '<hr />' +
+          '<div class="muted center">' +
+          escapeHtml(otherName + ' さんに結果を届けましょう。ついでに再戦を挑むこともできます。') +
+          '</div>' +
+          '<div class="row">' +
+          '<button id="okrShareBtn" class="ghost" style="flex:1">🔗 結果だけを共有する</button>' +
+          '<button id="okrRematchToggle" class="primary" style="flex:1">🔥 結果共有＋再戦を申し込む</button>' +
+          '</div>' +
+          '<div class="muted center" id="okrShareStatus"></div>' +
+          (ui && ui.rematchOpen ? okrRematchSectionHtml(room, slot) : '') +
+          okrShareUrlBoxHtml(roomId) +
+          '<div id="okrError" class="form-error" role="alert"></div>' +
+          '<div class="center"><a class="btn ghost" href="./">ホームへ</a></div>' +
+          seatNoteHtml +
+          '</div>'
+      );
+      return;
+    }
+
+    render(viewEl, '<div class="stack center"><div class="muted">よみこみ中…</div></div>');
+  }
+
+  function routeOekakiRelay(roomId) {
+    var unsub = null;
+    var lastRoom = null;
+    var slot = okrLoadSlot(roomId);
+
+    var ui = makeOekakiDrawUi({
+      view: '',
+      drawingRound: 0,
+      judgeInFlight: false,
+      judgeToken: '',
+      joinInFlight: false,
+      rematchOpen: false,
+      autoAssigned: false
+    });
+
+    var draw = createOekakiDrawEngine(ui, {
+      onDone: function () {
+        submitNow(false);
+      }
+    });
+
+    try {
+      if (document.body && document.body.classList) document.body.classList.add('ok-player-screen');
+    } catch (eCls) {
+      // ignore
+    }
+
+    function settingsOf(room) {
+      return normalizeOekakiLobbySettings(room && room.settings);
+    }
+
+    // 表示すべき画面を決める。draw に入ったあとは同じラウンドのあいだ draw を維持する
+    // （描きかけのキャンバスが再描画で消えないようにするため）。
+    function computeView(room) {
+      if (!room) return '';
+      var roundIndex = okrRoundIndex(room);
+      var stage = okrStage(room);
+
+      if (!slot) {
+        // まだ2人目がいない = これは「挑戦を受ける」ためのリンク。名前を登録してもらう。
+        if (!okrPlayer(room, 'b')) return 'join';
+
+        // 2席とも埋まっている場合、このリンクは「あなたの番が来たから」渡されたもの。
+        // 遊ぶのは2人だけなので、どちらの席かを選ばせずに自動で割り当てる。
+        // （LINE内ブラウザとSafariのように、部屋を作ったのと別のブラウザで開くと
+        //   端末に残した席の記録が読めず、以前はここで行き止まりになっていた）
+        // 割り当て先は「いま番が回っているスロット」。結果待ちの状態なら、
+        // 結果リンクを受け取るのは先攻（採点した側が相手に送る）なので first。
+        var auto = stage === 'a' || stage === 'b' ? stage : okrFirstSlot(room);
+        slot = auto;
+        okrSaveSlot(roomId, auto);
+        ui.autoAssigned = true; // 取り違えたとき用に、席を入れ替える導線を出す
+      }
+
+      if (ui.drawingRound === roundIndex && stage === slot && !okrHasSubmitted(room, slot)) return 'draw';
+
+      if (stage === 'result') return 'result';
+      if (stage === 'judging') return 'judging';
+      if (stage !== slot) return 'wait';
+
+      if (!okrHasStarted(room, slot)) return 'ready';
+      // 開始済みだが時間切れで戻ってきた（描かずに画面を離れた）場合は救済画面へ。
+      if (okrEndsAt(room, slot) <= serverNowMs()) return 'timeup';
+      return 'draw';
+    }
+
+    function renderKeyOf(room, view) {
+      var roundIndex = okrRoundIndex(room);
+      if (view === 'draw') return 'draw|' + roundIndex; // キャンバス保護のため中身では変えない
+      var r = room.result || {};
+      return [
+        view,
+        roundIndex,
+        okrFirstSlot(room),
+        okrHasSubmitted(room, 'a') ? 1 : 0,
+        okrHasSubmitted(room, 'b') ? 1 : 0,
+        okrPlayer(room, 'b') ? 1 : 0,
+        parseIntSafe(r.judgedAt, 0),
+        r.error ? 1 : 0,
+        ui.rematchOpen ? 1 : 0,
+        slot
+      ].join('|');
+    }
+
+    // ---- タイマー（自分の持ち時間。相手とは非同期なのでプレイヤーごとの endsAt を見る） ----
+    var OKR_RING_CIRC = 113.097; // 2π×r(18)
+
+    function updateTimerText(room) {
+      var endsAt = okrEndsAt(room, slot);
+      var totalSec = settingsOf(room).drawSeconds;
+      var remainMs = Math.max(0, endsAt - serverNowMs());
+      var remainSec = Math.max(0, Math.ceil(remainMs / 1000));
+
+      var fg = document.getElementById('okRingFg');
+      if (fg) {
+        var frac = Math.max(0, Math.min(1, remainMs / (totalSec * 1000)));
+        fg.style.strokeDashoffset = String(OKR_RING_CIRC * (1 - frac));
+      }
+      var el = document.getElementById('okTimer');
+      if (el) el.textContent = formatMMSS(remainSec);
+
+      try {
+        var fs = document.getElementById('okFs');
+        if (fs) {
+          if (remainSec <= 10 && remainSec > 0) fs.classList.add('ok-warn');
+          else fs.classList.remove('ok-warn');
+        }
+      } catch (eWarn) {
+        // ignore
+      }
+      return remainSec;
+    }
+
+    function updateCountdown(room) {
+      var el = document.getElementById('okCountdown');
+      var span = document.getElementById('okCountdownNum');
+      if (!el || !span) return;
+      var endsAt = okrEndsAt(room, slot);
+      var totalSec = settingsOf(room).drawSeconds;
+      var startAt = endsAt - totalSec * 1000;
+      var diff = startAt - serverNowMs();
+      var S = OEKAKI_COUNT_STEP_MS;
+
+      function setNum(text, mode) {
+        el.classList.toggle('ok-count-go', mode === 'go');
+        el.classList.toggle('ok-count-ready', mode === 'ready');
+        if (span.textContent === text) return;
+        span.textContent = text;
+        span.classList.remove('ok-count-pop');
+        void span.offsetWidth;
+        span.classList.add('ok-count-pop');
+      }
+
+      if (diff > 3 * S) {
+        el.style.display = '';
+        setNum('よーい…', 'ready');
+      } else if (diff > 0) {
+        el.style.display = '';
+        setNum(String(Math.ceil(diff / S)), 'num');
+      } else if (diff > -1000) {
+        el.style.display = '';
+        setNum('かいて！', 'go');
+      } else {
+        el.style.display = 'none';
+      }
+    }
+
+    // ---- 提出 ----
+    function submitNow(isAuto) {
+      if (!slot) return;
+      if (ui.submitInFlight) return;
+      var room = lastRoom;
+      if (!room || room.phase !== 'drawing') return;
+      if (okrHasSubmitted(room, slot)) return;
+      // リレーは相手を待たせるので、時間切れなら何も描いていなくても提出して進める。
+      var dataUrl = draw.capture();
+      if (!dataUrl) return;
+      ui.submitInFlight = true;
+      okrSubmit(roomId, slot, okrRoundIndex(room), dataUrl)
+        .then(function () {
+          ui.drawingRound = 0;
+        })
+        .catch(function (e) {
+          if (!isAuto) alert((e && e.message) || '提出に失敗しました');
+        })
+        .finally(function () {
+          ui.submitInFlight = false;
+        });
+    }
+
+    // ---- AI採点 ----
+    function startJudging(fromPhase) {
+      if (ui.judgeInFlight) return;
+      ui.judgeInFlight = true;
+      ui.judgeToken = randomId(10);
+      okrClaimJudging(roomId, ui.judgeToken, fromPhase)
+        .then(function (won) {
+          if (!won) return null;
+          return getValueOnce(oekakiRelayRoomPath(roomId)).then(function (fresh) {
+            if (!fresh || fresh.phase !== 'judging') return null;
+            return okrRunJudge(roomId, fresh);
+          });
+        })
+        .catch(function (e) {
+          try {
+            if (typeof console !== 'undefined' && console.warn) console.warn('oekaki relay judge failed', e);
+          } catch (e2) {
+            // ignore
+          }
+        })
+        .finally(function () {
+          ui.judgeInFlight = false;
+        });
+    }
+
+    // 両者提出済みなら、その場に居る端末が判定を取りに行く（通常は後攻＝bの端末）。
+    function maybeJudge(room) {
+      if (!room || ui.judgeInFlight) return;
+      if (!slot) return; // 観戦端末は採点しない（他人のAPIキー枠を使わない）
+      if (room.phase === 'drawing') {
+        if (!okrHasSubmitted(room, 'a') || !okrHasSubmitted(room, 'b')) return;
+        // 採点は後攻（結果を最初に見て、相手へ共有する側）の端末で行う。
+        // 先攻の端末がたまたま開いたままでも、共有より先に結果が出てしまわないよう少し待つ。
+        var second = okrSecondSlot(room);
+        if (slot !== second) {
+          var sp = okrPlayer(room, second);
+          var t0 = parseIntSafe(sp && sp.submittedAt, 0);
+          if (!t0 || serverNowMs() - t0 < OKR_JUDGE_TAKEOVER_MS) return;
+        }
+        startJudging('drawing');
+        return;
+      }
+      if (room.phase === 'judging') {
+        // 判定担当が落ちたまま固まっている場合だけ引き取る。
+        if (String(room.judgeToken || '') === ui.judgeToken) return;
+        var t0 = parseIntSafe(room.judgingAt, 0);
+        if (!t0 || serverNowMs() - t0 < OKR_JUDGE_TAKEOVER_MS) return;
+        startJudging('judging');
+      }
+    }
+
+    function ensureTimer() {
+      if (ui.timerId) return;
+      ui.timerId = setInterval(function () {
+        var q2 = null;
+        try {
+          q2 = parseQuery();
+        } catch (e) {
+          q2 = null;
+        }
+        if (!q2 || String(q2.screen || '') !== 'oekaki_relay' || String(q2.room || '') !== String(roomId || '')) {
+          clearInterval(ui.timerId);
+          ui.timerId = null;
+          draw.teardown();
+          return;
+        }
+        var room = lastRoom;
+        if (!room) return;
+        if (ui.view === 'draw') {
+          var remainSec = updateTimerText(room);
+          try {
+            updateCountdown(room);
+          } catch (eCd) {
+            // ignore
+          }
+          if (remainSec <= 0) submitNow(true);
+        }
+        maybeJudge(room);
+      }, 250);
+    }
+
+    // ---- 各画面のボタン ----
+    function bindButtons(room, view) {
+      // 席の取り戻し（別ブラウザで開き直して localStorage の記録が消えた場合の救済）。
+      function bindClaimSeat(btnId, seat) {
+        var b = document.getElementById(btnId);
+        if (!b || b.__okr_bound) return;
+        b.__okr_bound = true;
+        b.addEventListener('click', function () {
+          slot = seat;
+          okrSaveSlot(roomId, seat);
+          ui.renderKey = '';
+          if (lastRoom) renderNow(lastRoom);
+        });
+      }
+      bindClaimSeat('okrClaimA', 'a');
+
+      // 自動で割り当てた席が違っていたときの入れ替え。
+      var swapBtn = document.getElementById('okrSwapSeat');
+      if (swapBtn && !swapBtn.__okr_bound) {
+        swapBtn.__okr_bound = true;
+        swapBtn.addEventListener('click', function () {
+          slot = okrOtherSlot(slot);
+          okrSaveSlot(roomId, slot);
+          ui.drawingRound = 0;
+          ui.renderKey = '';
+          if (lastRoom) renderNow(lastRoom);
+        });
+      }
+
+      if (view === 'join') {
+        var joinBtn = document.getElementById('okrJoinBtn');
+        if (joinBtn && !joinBtn.__okr_bound) {
+          joinBtn.__okr_bound = true;
+          joinBtn.addEventListener('click', function () {
+            if (ui.joinInFlight) return;
+            clearInlineError('okrJoinError');
+            var el = document.getElementById('okrJoinName');
+            var nm = String((el && el.value) || '').trim();
+            if (!nm) {
+              setInlineError('okrJoinError', '名前を入力してください。');
+              return;
+            }
+            ui.joinInFlight = true;
+            joinBtn.disabled = true;
+            var token = randomId(10);
+            okrJoinChallenger(roomId, nm, token)
+              .then(function (won) {
+                ui.joinInFlight = false;
+                joinBtn.disabled = false;
+                if (!won) {
+                  setInlineError('okrJoinError', 'この勝負はすでに2人でうまっています。');
+                  ui.renderKey = ''; // 観戦モードへ切り替えるため再描画させる
+                  if (lastRoom) renderNow(lastRoom);
+                  return;
+                }
+                savePersistedName(nm);
+                slot = 'b';
+                okrSaveSlot(roomId, 'b');
+                ui.renderKey = '';
+                if (lastRoom) renderNow(lastRoom);
+              })
+              .catch(function (e) {
+                ui.joinInFlight = false;
+                joinBtn.disabled = false;
+                setInlineError('okrJoinError', (e && e.message) || '参加に失敗しました');
+              });
+          });
+        }
+        return;
+      }
+
+      if (view === 'ready' || view === 'timeup') {
+        var startBtn = document.getElementById('okrStartBtn');
+        if (startBtn && !startBtn.__okr_bound) {
+          startBtn.__okr_bound = true;
+          startBtn.addEventListener('click', function () {
+            startBtn.disabled = true;
+            var cur = lastRoom || room;
+            var rIdx = okrRoundIndex(cur);
+            var sec = settingsOf(cur).drawSeconds;
+            var fn = view === 'timeup' ? okrRestartTurn : okrStartTurn;
+            fn(roomId, slot, rIdx, sec)
+              .then(function () {
+                // 次のスナップショットで draw 画面に切り替わる。
+                ui.drawingRound = rIdx;
+              })
+              .catch(function (e) {
+                startBtn.disabled = false;
+                setInlineError('okrError', (e && e.message) || '開始に失敗しました');
+              });
+          });
+        }
+        return;
+      }
+
+      var shareBtn = document.getElementById('okrShareBtn');
+      if (shareBtn && !shareBtn.__okr_bound) {
+        shareBtn.__okr_bound = true;
+        shareBtn.addEventListener('click', function () {
+          var cur = lastRoom || room;
+          var me = okrName(cur, slot);
+          var topic = String((cur.round && cur.round.topic) || '');
+          var text = '';
+          if (cur.phase === 'result') {
+            text = '【おえかきバトル】お題「' + topic + '」の結果が出たよ。見て。';
+          } else if (okrRoundIndex(cur) > 1 && String(cur.rematchBy || '') === slot) {
+            text = '【おえかきバトル】前回の結果はこちら。あと、再戦を申し込みました。次はそっちが先攻です。';
+          } else {
+            text = '【おえかきバトル】' + me + ' が描き終わりました。同じお題で勝負しよう。';
+          }
+          okrShareLink(text, okrShareUrl(roomId), 'okrShareStatus');
+        });
+      }
+
+      var rejudgeBtn = document.getElementById('okrRejudgeBtn');
+      if (rejudgeBtn && !rejudgeBtn.__okr_bound) {
+        rejudgeBtn.__okr_bound = true;
+        rejudgeBtn.addEventListener('click', function () {
+          rejudgeBtn.disabled = true;
+          startJudging('result');
+        });
+      }
+
+      var rematchToggle = document.getElementById('okrRematchToggle');
+      if (rematchToggle && !rematchToggle.__okr_bound) {
+        rematchToggle.__okr_bound = true;
+        rematchToggle.addEventListener('click', function () {
+          ui.rematchOpen = !ui.rematchOpen;
+          ui.renderKey = '';
+          if (lastRoom) renderNow(lastRoom);
+        });
+      }
+
+      var rematchBtn = document.getElementById('okrRematchBtn');
+      if (rematchBtn && !rematchBtn.__okr_bound) {
+        rematchBtn.__okr_bound = true;
+        okrBindSettingsForm();
+        rematchBtn.addEventListener('click', function () {
+          clearInlineError('okrError');
+          var cur = lastRoom || room;
+          var settings = okrReadSettingsForm(settingsOf(cur));
+          var topic = okrPickTopicFor(settings, String((cur.round && cur.round.topic) || ''));
+          if (!topic) {
+            setInlineError('okrError', 'お題を入力してください。');
+            return;
+          }
+          rematchBtn.disabled = true;
+          okrRematch(roomId, settings, topic, slot)
+            .then(function () {
+              okrSaveSettings(settings);
+              ui.rematchOpen = false; // 次の画面（自分の描く番）へ進む
+            })
+            .catch(function (e) {
+              rematchBtn.disabled = false;
+              setInlineError('okrError', (e && e.message) || '再戦の申し込みに失敗しました');
+            });
+        });
+      }
+    }
+
+    function renderNow(room) {
+      lastRoom = room;
+      var view = computeView(room);
+      ui.view = view;
+      if (view === 'draw') ui.drawingRound = okrRoundIndex(room);
+
+      var key = renderKeyOf(room, view);
+      if (ui.renderKey !== key) {
+        ui.renderKey = key;
+        renderOekakiRelay(viewEl, { room: room, roomId: roomId, slot: slot, view: view, ui: ui });
+        if (view === 'draw') {
+          draw.setup();
+          updateTimerText(room);
+          try {
+            updateCountdown(room);
+          } catch (eCd0) {
+            // ignore
+          }
+        } else {
+          // 描画画面を離れたらキャンバス用のグローバルハンドラを外す（他画面のズームを妨げない）。
+          draw.teardown();
+        }
+        bindButtons(room, view);
+        if (view === 'result' || view === 'ready' || view === 'wait') {
+          try {
+            animateOekakiScores();
+          } catch (eAnim) {
+            // ignore
+          }
+        }
+      }
+      ensureTimer();
+    }
+
+    firebaseReady()
+      .then(function () {
+        return subscribeOekakiRelayRoom(roomId, function (room) {
+          if (!room) {
+            renderError(viewEl, 'バトルが見つかりません（古いリンクは7日で消えます）');
+            return;
+          }
+          renderNow(room);
+          try {
+            maybeJudge(room);
+          } catch (eJ) {
+            // ignore
+          }
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      if (unsub) unsub();
+      if (ui.timerId) {
+        clearInterval(ui.timerId);
+        ui.timerId = null;
+      }
+      draw.teardown();
+    });
+  }
+
   function route() {
     try {
       if (document && document.body && document.body.classList) {
@@ -23716,11 +25465,14 @@
         codenames_rejoin: 1,
         hannin_table: 1,
         hannin_player: 1,
-        oekaki_player: 1
+        oekaki_player: 1,
+        // リレーモードはロビー外の遊び。LINE等で届いたリンクは制限端末でも開けるようにする
+        // （部屋を作る側の画面 oekaki_relay_create は下のホスト系ブロックで弾かれる）。
+        oekaki_relay: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
-      if (isHost || screen === 'lobby_host' || screen === 'lobby_assign' || screen === 'lobby_login' || screen === 'lobby_create' || screen === 'create' || screen === 'setup' || screen === 'history' || screen === 'codenames_create' || screen === 'codenames_host' || screen === 'loveletter_create' || screen === 'loveletter_host' || screen === 'loveletter_extras') {
+      if (isHost || screen === 'lobby_host' || screen === 'lobby_assign' || screen === 'lobby_login' || screen === 'lobby_create' || screen === 'create' || screen === 'setup' || screen === 'history' || screen === 'codenames_create' || screen === 'codenames_host' || screen === 'loveletter_create' || screen === 'loveletter_host' || screen === 'loveletter_extras' || screen === 'oekaki_relay_create') {
         redirectRestrictedToLobbyPlayer();
         return;
       }
@@ -23837,6 +25589,13 @@
     if (screen === 'oekaki_player') {
       if (!roomId) return routeHome();
       return routeOekakiPlayer(roomId, isHost);
+    }
+
+    if (screen === 'oekaki_relay_create') return routeOekakiRelayCreate();
+
+    if (screen === 'oekaki_relay') {
+      if (!roomId) return routeHome();
+      return routeOekakiRelay(roomId);
     }
 
     if (!roomId) return routeHome();
