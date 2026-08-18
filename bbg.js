@@ -1036,7 +1036,7 @@
   function cleanupOldRooms() {
     if (!shouldRunCleanup()) return Promise.resolve();
 
-    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'oekakiRelayRooms', 'lobbies'];
+    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'oekakiRelayRooms', 'bohnanzaRooms', 'lobbies'];
     var cutoff = nowMs() - CLEANUP_MAX_AGE_MS;
 
     return firebaseReady()
@@ -9899,6 +9899,1982 @@
     });
   }
 
+  // -------------------- bohnanza (ボーナンザ) --------------------
+  // 対面プレイ補助。交渉は口頭で行い、アプリは「カード・畑・コイン」の管理だけを受け持つ。
+  // DBパス: bohnanzaRooms/<roomId>（RTDBルールの追記が必要）。
+  // 進行: plant（先頭を1〜2枚うえる）→ trade（2まいめくって こうかん）→ plantAll（もらった豆をうえる）→ ひく（自動）
+  var BZ_START_HAND = 5;
+  var BZ_LOG_MAX = 40;
+
+  // 豆の定義。meter は [1金/2金/3金/4金 に必要な枚数]（0 = その段は無い）。
+  var BOHNANZA_BEAN_DEFS = {
+    blue: { name: 'あおまめ', count: 20, meter: [4, 6, 8, 10], color: '#3b82f6', emoji: '🔵' },
+    chili: { name: 'チリまめ', count: 18, meter: [3, 6, 8, 9], color: '#ef4444', emoji: '🌶️' },
+    stink: { name: 'そらまめ', count: 16, meter: [3, 5, 7, 8], color: '#a16207', emoji: '🫛' },
+    green: { name: 'みどりまめ', count: 14, meter: [3, 5, 6, 7], color: '#22c55e', emoji: '🟢' },
+    soy: { name: 'だいず', count: 12, meter: [2, 4, 6, 7], color: '#eab308', emoji: '🌱' },
+    blackeye: { name: 'くろめまめ', count: 10, meter: [2, 4, 5, 6], color: '#6b7280', emoji: '👁️' },
+    red: { name: 'あかまめ', count: 8, meter: [2, 3, 4, 5], color: '#dc2626', emoji: '❤️' },
+    garden: { name: 'にわまめ', count: 6, meter: [0, 2, 3, 0], color: '#16a34a', emoji: '🪴' }
+  };
+
+  var BZ_BEAN_KEYS = ['blue', 'chili', 'stink', 'green', 'soy', 'blackeye', 'red', 'garden'];
+
+  // 画像が無い豆を覚えておく（スナップショットのたびに404を出さないため）。
+  var bzImgMissing = {};
+
+  function bzRoomPath(roomId) {
+    return 'bohnanzaRooms/' + roomId;
+  }
+
+  function subscribeBohnanzaRoom(roomId, cb) {
+    return onValue(bzRoomPath(roomId), cb);
+  }
+
+  function bzBeanDef(key) {
+    var k = String(key || '');
+    return BOHNANZA_BEAN_DEFS[k] || { name: k || '-', count: 0, meter: [0, 0, 0, 0], color: '#6b7280', emoji: '❔' };
+  }
+
+  function bzBeanName(key) {
+    return String(bzBeanDef(key).name || key || '-');
+  }
+
+  function bzShuffle(list) {
+    var a = Array.isArray(list) ? list.slice() : [];
+    for (var i = a.length - 1; i > 0; i--) {
+      var r = randomInt(i + 1);
+      var t = a[i];
+      a[i] = a[r];
+      a[r] = t;
+    }
+    return a;
+  }
+
+  function bzBuildDeck() {
+    var pool = [];
+    for (var i = 0; i < BZ_BEAN_KEYS.length; i++) {
+      var key = BZ_BEAN_KEYS[i];
+      var n = parseIntSafe(bzBeanDef(key).count, 0) || 0;
+      for (var k = 0; k < n; k++) pool.push(String(key));
+    }
+    return bzShuffle(pool);
+  }
+
+  // 豆メーター。畑の枚数から もらえるコインを返す（どの段にも届かなければ0）。
+  function bzCoinsFor(bean, count) {
+    var c = parseIntSafe(count, 0) || 0;
+    if (c <= 0) return 0;
+    var m = bzBeanDef(bean).meter || [];
+    for (var tier = 4; tier >= 1; tier--) {
+      var need = parseIntSafe(m[tier - 1], 0) || 0;
+      if (need > 0 && c >= need) return tier;
+    }
+    return 0;
+  }
+
+  // 人数から「はじめの畑の数」を出す（3人は3つ・4〜5人は2つ）。
+  function bzBaseFieldCount(playerCount) {
+    var n = parseIntSafe(playerCount, 0) || 0;
+    return n > 0 && n <= 3 ? 3 : 2;
+  }
+
+  // RTDBは空配列がキーごと消える／配列内nullが詰められるので、読むときに必ず整える。
+  function bzNormFields(fields, playerCount) {
+    var base = bzBaseFieldCount(playerCount);
+    var out = [];
+    var src = Array.isArray(fields) ? fields : [];
+    for (var i = 0; i < src.length; i++) {
+      var f = src[i] || {};
+      out.push({ bean: String(f.bean || ''), count: parseIntSafe(f.count, 0) || 0 });
+    }
+    while (out.length < base) out.push({ bean: '', count: 0 });
+    return out;
+  }
+
+  function bzNormHand(hand) {
+    var out = [];
+    var src = Array.isArray(hand) ? hand : [];
+    for (var i = 0; i < src.length; i++) {
+      var v = String(src[i] || '');
+      if (v) out.push(v);
+    }
+    return out;
+  }
+
+  function bzNormPending(pending) {
+    var out = [];
+    var src = Array.isArray(pending) ? pending : [];
+    for (var i = 0; i < src.length; i++) {
+      var e = src[i];
+      if (!e) continue;
+      var b = String(e.bean || '');
+      if (!b) continue;
+      out.push({ bean: b, from: String(e.from || '') });
+    }
+    return out;
+  }
+
+  function bzNormFaceUp(faceUp) {
+    var out = [];
+    var src = Array.isArray(faceUp) ? faceUp : [];
+    for (var i = 0; i < src.length; i++) {
+      var e = src[i];
+      if (!e) continue;
+      var b = String(e.bean || '');
+      if (!b) continue;
+      out.push({ bean: b, takenBy: String(e.takenBy || '') });
+    }
+    return out;
+  }
+
+  function bzPlayerOf(room, mid) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var p = (room && room.players && room.players[String(mid || '')]) || {};
+    return {
+      name: String(p.name || ''),
+      hand: bzNormHand(p.hand),
+      fields: bzNormFields(p.fields, order.length),
+      coins: parseIntSafe(p.coins, 0) || 0,
+      pending: bzNormPending(p.pending)
+    };
+  }
+
+  function bzName(room, mid) {
+    try {
+      var nm = String((room && room.players && room.players[String(mid || '')] && room.players[String(mid || '')].name) || '');
+      return nm || String(mid || '');
+    } catch (e) {
+      return String(mid || '');
+    }
+  }
+
+  function bzTurnMid(room) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    if (!order.length) return '';
+    var i = parseIntSafe(room && room.turnIdx, 0) || 0;
+    if (i < 0 || i >= order.length) i = 0;
+    return String(order[i] || '');
+  }
+
+  function bzPhaseLabel(phase) {
+    var p = String(phase || '');
+    if (p === 'plant') return 'うえる';
+    if (p === 'trade') return 'めくって こうかん';
+    if (p === 'plantAll') return 'もらった豆を うえる';
+    if (p === 'result') return 'けっか';
+    return p;
+  }
+
+  // ルーム全体を安全な形にコピーする（トランザクション内の作業用）。
+  function bzCloneRoom(room) {
+    var st = assign({}, room || {});
+    st.phase = String((room && room.phase) || '');
+    st.order = Array.isArray(room && room.order) ? room.order.slice() : [];
+    st.deck = Array.isArray(room && room.deck) ? room.deck.slice() : [];
+    st.discard = Array.isArray(room && room.discard) ? room.discard.slice() : [];
+    st.log = Array.isArray(room && room.log) ? room.log.slice() : [];
+    st.turnIdx = parseIntSafe(room && room.turnIdx, 0) || 0;
+    st.turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
+    st.reshuffles = parseIntSafe(room && room.reshuffles, 0) || 0;
+    st.plantedThisTurn = parseIntSafe(room && room.plantedThisTurn, 0) || 0;
+    var fu = bzNormFaceUp(room && room.faceUp);
+    st.faceUp = fu.length ? fu : null;
+
+    var players = {};
+    var src = room && room.players && typeof room.players === 'object' ? room.players : {};
+    var keys = Object.keys(src);
+    for (var k = 0; k < keys.length; k++) {
+      var pid = String(keys[k] || '');
+      if (!pid) continue;
+      var p = src[pid] || {};
+      players[pid] = {
+        name: String(p.name || ''),
+        hand: bzNormHand(p.hand),
+        fields: bzNormFields(p.fields, st.order.length),
+        coins: parseIntSafe(p.coins, 0) || 0,
+        pending: bzNormPending(p.pending)
+      };
+    }
+    st.players = players;
+    return st;
+  }
+
+  function bzPushLog(st, line) {
+    var text = String(line || '');
+    if (!text) return;
+    var log = Array.isArray(st.log) ? st.log.slice() : [];
+    log.push(text);
+    if (log.length > BZ_LOG_MAX) log = log.slice(log.length - BZ_LOG_MAX);
+    st.log = log;
+  }
+
+  // 山札から n 枚。尽きたら捨て札をまぜて山札にする（ゲーム中2回まで）。
+  // 3回目に尽きたら ended:true を返す（呼び出し側でゲーム終了処理へ）。
+  function bzDrawFromDeck(st, n) {
+    var out = [];
+    var need = parseIntSafe(n, 0) || 0;
+    for (var i = 0; i < need; i++) {
+      if (!Array.isArray(st.deck)) st.deck = [];
+      if (!st.deck.length) {
+        var disc = Array.isArray(st.discard) ? st.discard.slice() : [];
+        var rs = parseIntSafe(st.reshuffles, 0) || 0;
+        // 3回目に尽きた（もうまぜられない）ときだけ「3かいめ」。
+        if (rs >= 2) return { cards: out, ended: true, thirdTime: true };
+        // すてふだが1枚もないときは まぜられないので、ここで終了（まぜた回数は増やさない）。
+        if (!disc.length) return { cards: out, ended: true, thirdTime: false };
+        st.reshuffles = rs + 1;
+        st.deck = bzShuffle(disc);
+        st.discard = [];
+        bzPushLog(st, 'やまふだが なくなったので すてふだを まぜました（' + String(st.reshuffles) + 'かいめ）');
+      }
+      out.push(String(st.deck.shift() || ''));
+    }
+    return { cards: out, ended: false, thirdTime: false };
+  }
+
+  // 1枚しかない畑は、2枚以上の畑があるあいだ収穫できない。0枚の畑も収穫できない。
+  function bzCanHarvest(fields, idx) {
+    var list = Array.isArray(fields) ? fields : [];
+    var i = parseIntSafe(idx, -1);
+    if (i < 0 || i >= list.length) return false;
+    var cnt = parseIntSafe(list[i] && list[i].count, 0) || 0;
+    if (cnt < 1) return false;
+    if (cnt >= 2) return true;
+    for (var j = 0; j < list.length; j++) {
+      if (j === i) continue;
+      if ((parseIntSafe(list[j] && list[j].count, 0) || 0) >= 2) return false;
+    }
+    return true;
+  }
+
+  // 収穫。もらったコインの枚数ぶんはゲームから除外し、残りは捨て札へ。
+  function bzDoHarvest(st, mid, idx, force) {
+    var pid = String(mid || '');
+    var players = assign({}, st.players || {});
+    var p = players[pid];
+    if (!p) return false;
+    var fields = bzNormFields(p.fields, (st.order || []).length);
+    var i = parseIntSafe(idx, -1);
+    if (i < 0 || i >= fields.length) return false;
+    var cnt = parseIntSafe(fields[i].count, 0) || 0;
+    if (cnt < 1) return false;
+    if (!force && !bzCanHarvest(fields, i)) return false;
+
+    var bean = String(fields[i].bean || '');
+    var gain = bzCoinsFor(bean, cnt);
+    var toDiscard = cnt - gain;
+    if (toDiscard < 0) toDiscard = 0;
+    var disc = Array.isArray(st.discard) ? st.discard.slice() : [];
+    for (var d = 0; d < toDiscard; d++) disc.push(bean);
+    st.discard = disc;
+
+    var nextFields = fields.slice();
+    nextFields[i] = { bean: '', count: 0 };
+    players[pid] = assign({}, p, { fields: nextFields, coins: (parseIntSafe(p.coins, 0) || 0) + gain });
+    st.players = players;
+    bzPushLog(st, bzName(st, pid) + 'が ' + bzBeanName(bean) + 'を ' + String(cnt) + 'まい しゅうかく（+' + String(gain) + 'きん）');
+    return true;
+  }
+
+  // 畑にうえる（空 or 同種のみ）。
+  function bzPlantBean(st, mid, bean, fieldIdx) {
+    var pid = String(mid || '');
+    var b = String(bean || '');
+    if (!b) return false;
+    var players = assign({}, st.players || {});
+    var p = players[pid];
+    if (!p) return false;
+    var fields = bzNormFields(p.fields, (st.order || []).length);
+    var i = parseIntSafe(fieldIdx, -1);
+    if (i < 0 || i >= fields.length) return false;
+    var cur = fields[i];
+    var curCount = parseIntSafe(cur.count, 0) || 0;
+    var curBean = String(cur.bean || '');
+    if (curCount > 0 && curBean !== b) return false;
+
+    var nextFields = fields.slice();
+    nextFields[i] = { bean: b, count: curCount + 1 };
+    players[pid] = assign({}, p, { fields: nextFields });
+    st.players = players;
+    return true;
+  }
+
+  // ホスト救済で使う自動うえ。同種の畑 → 空き畑 → いちばん多い畑を収穫してから、の順。
+  function bzAutoPlant(st, mid, bean) {
+    var pid = String(mid || '');
+    var b = String(bean || '');
+    if (!b) return false;
+    var p = st.players && st.players[pid];
+    if (!p) return false;
+    var fields = bzNormFields(p.fields, (st.order || []).length);
+
+    var i;
+    for (i = 0; i < fields.length; i++) {
+      if ((parseIntSafe(fields[i].count, 0) || 0) > 0 && String(fields[i].bean || '') === b) {
+        return bzPlantBean(st, pid, b, i);
+      }
+    }
+    for (i = 0; i < fields.length; i++) {
+      if ((parseIntSafe(fields[i].count, 0) || 0) === 0) return bzPlantBean(st, pid, b, i);
+    }
+    var bestIdx = 0;
+    var bestCount = -1;
+    for (i = 0; i < fields.length; i++) {
+      var c = parseIntSafe(fields[i].count, 0) || 0;
+      if (c > bestCount) {
+        bestCount = c;
+        bestIdx = i;
+      }
+    }
+    if (!bzDoHarvest(st, pid, bestIdx, true)) return false;
+    return bzPlantBean(st, pid, b, bestIdx);
+  }
+
+  // ゲーム終了処理。全員の畑を自動収穫（保護ルールは適用外）してコインを確定する。
+  function bzFinishGame(st) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    var players = assign({}, st.players || {});
+    var rows = [];
+    for (var i = 0; i < order.length; i++) {
+      var pid = String(order[i] || '');
+      if (!pid) continue;
+      var p = players[pid];
+      if (!p) continue;
+      var fields = bzNormFields(p.fields, order.length);
+      var coins = parseIntSafe(p.coins, 0) || 0;
+      var nextFields = [];
+      for (var f = 0; f < fields.length; f++) {
+        var cnt = parseIntSafe(fields[f].count, 0) || 0;
+        if (cnt > 0) coins += bzCoinsFor(fields[f].bean, cnt);
+        nextFields.push({ bean: '', count: 0 });
+      }
+      players[pid] = assign({}, p, { fields: nextFields, coins: coins, hand: [], pending: [] });
+      rows.push({ mid: pid, name: String(p.name || pid), coins: coins, rank: 0 });
+    }
+
+    rows.sort(function (a, b) {
+      return (b.coins || 0) - (a.coins || 0);
+    });
+    for (var r = 0; r < rows.length; r++) {
+      if (r > 0 && rows[r].coins === rows[r - 1].coins) rows[r].rank = rows[r - 1].rank;
+      else rows[r].rank = r + 1;
+    }
+
+    st.players = players;
+    st.phase = 'result';
+    st.faceUp = null;
+    st.result = { ranking: rows };
+    bzPushLog(st, 'ゲームしゅうりょう！ さいごの畑を ぜんぶ しゅうかくしました');
+    return true;
+  }
+
+  // 手番プレイヤーが3枚ひいて、次の人の うえる フェーズへ。
+  function bzStartNextTurn(st) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    if (!order.length) return false;
+    var cur = bzTurnMid(st);
+    var res = bzDrawFromDeck(st, 3);
+    if (res.cards.length && cur) {
+      var players = assign({}, st.players || {});
+      var p = players[cur];
+      if (p) {
+        players[cur] = assign({}, p, { hand: bzNormHand(p.hand).concat(res.cards) });
+        st.players = players;
+      }
+    }
+    if (res.ended) {
+      bzPushLog(st, res.thirdTime ? 'やまふだが 3かいめに つきました' : 'やまふだも すてふだも なくなりました');
+      bzFinishGame(st);
+      return true;
+    }
+
+    var idx = parseIntSafe(st.turnIdx, 0) || 0;
+    if (idx < 0 || idx >= order.length) idx = 0;
+    st.turnIdx = (idx + 1) % order.length;
+    st.turnCount = (parseIntSafe(st.turnCount, 0) || 0) + 1;
+    st.phase = 'plant';
+    st.plantedThisTurn = 0;
+    st.faceUp = null;
+    bzPushLog(st, bzName(st, bzTurnMid(st)) + 'の ばん');
+    return true;
+  }
+
+  // plantAll フェーズで 全員の pending が空になったら、そのまま ひく→手番前進 まで進める。
+  function bzMaybeAdvanceAfterPlantAll(st) {
+    if (String(st.phase || '') !== 'plantAll') return false;
+    var order = Array.isArray(st.order) ? st.order : [];
+    for (var i = 0; i < order.length; i++) {
+      var pid = String(order[i] || '');
+      if (!pid) continue;
+      var p = st.players && st.players[pid];
+      var pend = bzNormPending(p && p.pending);
+      if (pend.length) return false;
+    }
+    return bzStartNextTurn(st);
+  }
+
+  // めくり本体（plant → trade）。
+  function bzRevealInto(st) {
+    var res = bzDrawFromDeck(st, 2);
+    var fu = [];
+    for (var i = 0; i < res.cards.length; i++) fu.push({ bean: String(res.cards[i] || ''), takenBy: '' });
+    st.faceUp = fu.length ? fu : null;
+    st.phase = 'trade';
+    if (fu.length) {
+      var names = [];
+      for (var k = 0; k < fu.length; k++) names.push(bzBeanName(fu[k].bean));
+      bzPushLog(st, '2まい めくりました（' + names.join('・') + '）');
+    }
+    if (res.ended) {
+      bzPushLog(st, res.thirdTime ? 'やまふだが 3かいめに つきました' : 'やまふだも すてふだも なくなりました');
+      bzFinishGame(st);
+    }
+    return true;
+  }
+
+  // こうかん終了（trade → plantAll）。めくり残りは手番プレイヤーの「うえる待ち」へ。
+  function bzEndTradeInto(st) {
+    var turnMid = bzTurnMid(st);
+    var fu = bzNormFaceUp(st.faceUp);
+    var players = assign({}, st.players || {});
+    var tp = players[turnMid];
+    if (tp) {
+      var pend = bzNormPending(tp.pending);
+      for (var i = 0; i < fu.length; i++) {
+        if (String(fu[i].takenBy || '')) continue;
+        pend.push({ bean: String(fu[i].bean || ''), from: 'deck' });
+      }
+      players[turnMid] = assign({}, tp, { pending: pend });
+      st.players = players;
+    }
+    st.faceUp = null;
+    st.phase = 'plantAll';
+    bzPushLog(st, bzName(st, turnMid) + 'が こうかんを おわりました');
+    bzMaybeAdvanceAfterPlantAll(st);
+    return true;
+  }
+
+  // 共通トランザクション。fn が false を返したら room をそのまま返す（no-op）。
+  // out を渡すと out.applied に「実際に書き換わったか」が入る。
+  // 再試行ごとに山札のまぜ直し結果が変わるので、途中経過はローカルに反映しない（applyLocally=false）。
+  function bzTxn(roomId, fn, out) {
+    return dbRef(bzRoomPath(roomId))
+      .then(function (ref) {
+        return ref.transaction(
+          function (room) {
+            if (out) out.applied = false;
+            if (!room) return room;
+            if (String(room.phase || '') === 'result') return room;
+            var st = bzCloneRoom(room);
+            var ok = false;
+            try {
+              ok = fn(st);
+            } catch (e) {
+              ok = false;
+            }
+            if (!ok) return room;
+            if (out) out.applied = true;
+            return st;
+          },
+          undefined,
+          false
+        );
+      })
+      .then(function (res) {
+        return res.snapshot.val();
+      });
+  }
+
+  function createBohnanzaRoom(roomId, lobbyId, members) {
+    var list = Array.isArray(members) ? members : [];
+    var order = [];
+    var names = {};
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i] || {};
+      var mid = String(m.mid || '');
+      if (!mid) continue;
+      if (names[mid] !== undefined) continue;
+      order.push(mid);
+      var nm = String(m.name || '').trim();
+      names[mid] = nm || '-';
+    }
+    if (order.length < 3) return Promise.reject(new Error('ボーナンザは3人からです'));
+    if (order.length > 5) return Promise.reject(new Error('ボーナンザは5人までです'));
+
+    var deck = bzBuildDeck();
+    var baseFields = bzBaseFieldCount(order.length);
+    var players = {};
+    for (var pi = 0; pi < order.length; pi++) {
+      var pid = order[pi];
+      var hand = [];
+      for (var h = 0; h < BZ_START_HAND; h++) hand.push(String(deck.shift() || ''));
+      var fields = [];
+      for (var f = 0; f < baseFields; f++) fields.push({ bean: '', count: 0 });
+      players[pid] = { name: names[pid], hand: hand, fields: fields, coins: 0, pending: [] };
+    }
+
+    var room = {
+      createdAt: serverNowMs(),
+      lobbyId: String(lobbyId || ''),
+      phase: 'plant',
+      order: order,
+      turnIdx: 0,
+      turnCount: 1,
+      deck: deck,
+      discard: [],
+      reshuffles: 0,
+      faceUp: null,
+      plantedThisTurn: 0,
+      players: players,
+      result: null,
+      log: ['ゲームかいし！ ' + String(names[order[0]] || '') + 'の ばん']
+    };
+    return setValue(bzRoomPath(roomId), room);
+  }
+
+  // 手札の先頭を畑にうえる（うえるフェーズ・最大2枚）。
+  function bzPlantFromHand(roomId, mid, fieldIdx) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'plant') return false;
+      var pid = String(mid || '');
+      if (!pid || pid !== bzTurnMid(st)) return false;
+      if ((parseIntSafe(st.plantedThisTurn, 0) || 0) >= 2) return false;
+      var p = st.players && st.players[pid];
+      if (!p) return false;
+      var hand = bzNormHand(p.hand);
+      if (!hand.length) return false;
+      var bean = String(hand[0] || '');
+      if (!bzPlantBean(st, pid, bean, fieldIdx)) return false;
+
+      var players = assign({}, st.players || {});
+      players[pid] = assign({}, players[pid], { hand: hand.slice(1) });
+      st.players = players;
+      st.plantedThisTurn = (parseIntSafe(st.plantedThisTurn, 0) || 0) + 1;
+      bzPushLog(st, bzName(st, pid) + 'が ' + bzBeanName(bean) + 'を うえました');
+      return true;
+    });
+  }
+
+  // 2まい めくる（うえる → こうかん）。
+  function bzRevealTwo(roomId, mid) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'plant') return false;
+      var pid = String(mid || '');
+      if (!pid || pid !== bzTurnMid(st)) return false;
+      var p = st.players && st.players[pid];
+      if (!p) return false;
+      var hand = bzNormHand(p.hand);
+      var planted = parseIntSafe(st.plantedThisTurn, 0) || 0;
+      if (planted < 1 && hand.length > 0) return false;
+      return bzRevealInto(st);
+    });
+  }
+
+  // めくれ札を だれかに わたす（手番プレイヤーのみ操作。自分も選べる）。
+  function bzGiveFaceUp(roomId, actorMid, faceUpIdx, toMid) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'trade') return false;
+      var actor = String(actorMid || '');
+      if (!actor || actor !== bzTurnMid(st)) return false;
+      var to = String(toMid || '');
+      var order = Array.isArray(st.order) ? st.order : [];
+      if (order.indexOf(to) < 0) return false;
+
+      var fu = bzNormFaceUp(st.faceUp);
+      var i = parseIntSafe(faceUpIdx, -1);
+      if (i < 0 || i >= fu.length) return false;
+      if (String(fu[i].takenBy || '')) return false;
+
+      var bean = String(fu[i].bean || '');
+      fu[i] = { bean: bean, takenBy: to };
+      st.faceUp = fu;
+
+      var players = assign({}, st.players || {});
+      var tp = players[to];
+      if (!tp) return false;
+      players[to] = assign({}, tp, { pending: bzNormPending(tp.pending).concat([{ bean: bean, from: 'deck' }]) });
+      st.players = players;
+      bzPushLog(st, 'めくれた ' + bzBeanName(bean) + 'を ' + bzName(st, to) + 'へ');
+      return true;
+    });
+  }
+
+  // めくれ札由来の「うえる待ち」を もどす（こうかん中のみ）。
+  function bzReturnPending(roomId, mid, pendingIdx) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'trade') return false;
+      var pid = String(mid || '');
+      var p = st.players && st.players[pid];
+      if (!p) return false;
+      var pend = bzNormPending(p.pending);
+      var i = parseIntSafe(pendingIdx, -1);
+      if (i < 0 || i >= pend.length) return false;
+      if (String(pend[i].from || '') !== 'deck') return false;
+
+      var bean = String(pend[i].bean || '');
+      var fu = bzNormFaceUp(st.faceUp);
+      var found = -1;
+      for (var k = 0; k < fu.length; k++) {
+        if (String(fu[k].bean || '') === bean && String(fu[k].takenBy || '') === pid) {
+          found = k;
+          break;
+        }
+      }
+      if (found < 0) return false;
+      fu[found] = { bean: bean, takenBy: '' };
+      st.faceUp = fu;
+
+      pend.splice(i, 1);
+      var players = assign({}, st.players || {});
+      players[pid] = assign({}, p, { pending: pend });
+      st.players = players;
+      bzPushLog(st, bzName(st, pid) + 'が ' + bzBeanName(bean) + 'を もどしました');
+      return true;
+    });
+  }
+
+  // 手札の好きな1枚を わたす（非手番は手番プレイヤーにだけ）。
+  function bzGiveFromHand(roomId, fromMid, handIdx, toMid) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'trade') return false;
+      var from = String(fromMid || '');
+      var to = String(toMid || '');
+      if (!from || !to || from === to) return false;
+      var order = Array.isArray(st.order) ? st.order : [];
+      if (order.indexOf(from) < 0 || order.indexOf(to) < 0) return false;
+      var turnMid = bzTurnMid(st);
+      if (from !== turnMid && to !== turnMid) return false;
+
+      var players = assign({}, st.players || {});
+      var fp = players[from];
+      var tp = players[to];
+      if (!fp || !tp) return false;
+      var hand = bzNormHand(fp.hand);
+      var i = parseIntSafe(handIdx, -1);
+      if (i < 0 || i >= hand.length) return false;
+      var bean = String(hand[i] || '');
+      hand.splice(i, 1);
+      players[from] = assign({}, fp, { hand: hand });
+      players[to] = assign({}, players[to], { pending: bzNormPending(tp.pending).concat([{ bean: bean, from: from }]) });
+      st.players = players;
+      bzPushLog(st, bzName(st, from) + 'が ' + bzBeanName(bean) + 'を ' + bzName(st, to) + 'へ');
+      return true;
+    });
+  }
+
+  // 「うえる待ち」を畑にうえる（こうかん中でも うえる待ちフェーズでも可）。
+  function bzPlantPending(roomId, mid, pendingIdx, fieldIdx) {
+    return bzTxn(roomId, function (st) {
+      var phase = String(st.phase || '');
+      if (phase !== 'trade' && phase !== 'plantAll') return false;
+      var pid = String(mid || '');
+      var p = st.players && st.players[pid];
+      if (!p) return false;
+      var pend = bzNormPending(p.pending);
+      var i = parseIntSafe(pendingIdx, -1);
+      if (i < 0 || i >= pend.length) return false;
+      var bean = String(pend[i].bean || '');
+      if (!bzPlantBean(st, pid, bean, fieldIdx)) return false;
+
+      pend.splice(i, 1);
+      var players = assign({}, st.players || {});
+      players[pid] = assign({}, players[pid], { pending: pend });
+      st.players = players;
+      bzPushLog(st, bzName(st, pid) + 'が ' + bzBeanName(bean) + 'を うえました');
+      bzMaybeAdvanceAfterPlantAll(st);
+      return true;
+    });
+  }
+
+  // こうかん おわり。
+  function bzEndTrade(roomId, mid) {
+    return bzTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'trade') return false;
+      var pid = String(mid || '');
+      if (!pid || pid !== bzTurnMid(st)) return false;
+      return bzEndTradeInto(st);
+    });
+  }
+
+  // しゅうかく（いつでも・自分の畑だけ）。
+  function bzHarvest(roomId, mid, fieldIdx) {
+    return bzTxn(roomId, function (st) {
+      var pid = String(mid || '');
+      if (!st.players || !st.players[pid]) return false;
+      return bzDoHarvest(st, pid, fieldIdx, false);
+    });
+  }
+
+  // 3つめの畑を買う（4〜5人プレイのみ・3きん）。
+  function bzBuyThirdField(roomId, mid) {
+    return bzTxn(roomId, function (st) {
+      var pid = String(mid || '');
+      var order = Array.isArray(st.order) ? st.order : [];
+      if (order.length < 4) return false;
+      var players = assign({}, st.players || {});
+      var p = players[pid];
+      if (!p) return false;
+      var fields = bzNormFields(p.fields, order.length);
+      if (fields.length !== 2) return false;
+      var coins = parseIntSafe(p.coins, 0) || 0;
+      if (coins < 3) return false;
+      players[pid] = assign({}, p, { coins: coins - 3, fields: fields.concat([{ bean: '', count: 0 }]) });
+      st.players = players;
+      bzPushLog(st, bzName(st, pid) + 'が 3つめの畑を かいました（-3きん）');
+      return true;
+    });
+  }
+
+  // ホスト救済：本人が操作できなくなったときに、代理でフェーズを進める。
+  function bzHostForce(roomId) {
+    var out = { applied: false };
+    return bzTxn(roomId, function (st) {
+      var phase = String(st.phase || '');
+      var turnMid = bzTurnMid(st);
+      if (phase === 'plant') {
+        var p = st.players && st.players[turnMid];
+        if (!p) return false;
+        var hand = bzNormHand(p.hand);
+        var planted = parseIntSafe(st.plantedThisTurn, 0) || 0;
+        if (planted < 1 && hand.length) {
+          var bean = String(hand[0] || '');
+          if (!bzAutoPlant(st, turnMid, bean)) return false;
+          var players = assign({}, st.players || {});
+          players[turnMid] = assign({}, players[turnMid], { hand: bzNormHand(players[turnMid].hand).slice(1) });
+          st.players = players;
+          st.plantedThisTurn = planted + 1;
+          bzPushLog(st, '（だいり）' + bzName(st, turnMid) + 'が ' + bzBeanName(bean) + 'を うえました');
+        }
+        return bzRevealInto(st);
+      }
+      if (phase === 'trade') {
+        bzPushLog(st, '（だいり）こうかんを おわりにしました');
+        return bzEndTradeInto(st);
+      }
+      if (phase === 'plantAll') {
+        var order = Array.isArray(st.order) ? st.order : [];
+        var moved = false;
+        for (var i = 0; i < order.length; i++) {
+          var pid = String(order[i] || '');
+          if (!pid) continue;
+          var pp = st.players && st.players[pid];
+          if (!pp) continue;
+          var pend = bzNormPending(pp.pending);
+          while (pend.length) {
+            var b = String(pend[0].bean || '');
+            if (!bzAutoPlant(st, pid, b)) break;
+            pend.shift();
+            moved = true;
+            var pls = assign({}, st.players || {});
+            pls[pid] = assign({}, pls[pid], { pending: pend.slice() });
+            st.players = pls;
+            bzPushLog(st, '（だいり）' + bzName(st, pid) + 'が ' + bzBeanName(b) + 'を うえました');
+          }
+        }
+        if (!moved) return false;
+        bzMaybeAdvanceAfterPlantAll(st);
+        return true;
+      }
+      return false;
+    }, out).then(function () {
+      return !!out.applied;
+    });
+  }
+
+  // -------------------- bohnanza: 表示部品 --------------------
+
+  function bzBeanMeterHtml(bean) {
+    var m = bzBeanDef(bean).meter || [];
+    var out = '';
+    for (var i = 0; i < 4; i++) {
+      var need = parseIntSafe(m[i], 0) || 0;
+      if (!need) continue;
+      out += '<span class="bz-meter-cell"><i>' + escapeHtml(String(need)) + '</i><b>' + escapeHtml(String(i + 1)) + '</b></span>';
+    }
+    return '<span class="bz-meter">' + out + '</span>';
+  }
+
+  function bzCardImgSrc(bean) {
+    var src = './assets/bohnanza/' + String(bean || '') + '.png';
+    try {
+      var v = getCacheBusterParam();
+      if (v) src += '?v=' + encodeURIComponent(String(v));
+    } catch (e) {
+      // ignore
+    }
+    return src;
+  }
+
+  // カード1枚。プレースホルダー（豆色枠+絵文字+名前+枚数+豆メーター）の上に画像を重ねる。
+  // 画像が無い豆は bzImgMissing に記録して、以後 img 自体を出さない。
+  function bzCardHtml(bean, extraCls, cornerHtml) {
+    var key = String(bean || '');
+    var def = bzBeanDef(key);
+    var img = '';
+    if (key && !bzImgMissing[key]) {
+      img =
+        '<img class="bz-card-img" data-bz-img="' + escapeHtml(key) + '" alt="' + escapeHtml(String(def.name || key)) + '" src="' + escapeHtml(bzCardImgSrc(key)) + '" />';
+    }
+    return (
+      '<div class="bz-card ' + escapeHtml(String(extraCls || '')) + '" style="--bz-bean:' + escapeHtml(String(def.color || '#6b7280')) + '">' +
+      '<div class="bz-card-ph">' +
+      '<div class="bz-card-emoji">' + escapeHtml(String(def.emoji || '')) + '</div>' +
+      '<div class="bz-card-name">' + escapeHtml(String(def.name || key)) + '</div>' +
+      '<div class="bz-card-total">ぜんぶ ' + escapeHtml(String(def.count || 0)) + 'まい</div>' +
+      bzBeanMeterHtml(key) +
+      '</div>' +
+      img +
+      (cornerHtml || '') +
+      '</div>'
+    );
+  }
+
+  // render 後に呼ぶ。画像の load/error を見て表示を切り替える（インライン onerror は使わない）。
+  function bzBindCardImages(rootEl) {
+    try {
+      var imgs = rootEl && rootEl.querySelectorAll ? rootEl.querySelectorAll('img.bz-card-img') : [];
+      for (var i = 0; i < imgs.length; i++) {
+        (function (im) {
+          if (!im || im.__bz_img_bound) return;
+          im.__bz_img_bound = true;
+          var key = String(im.getAttribute('data-bz-img') || '');
+          function markMissing() {
+            if (key) bzImgMissing[key] = true;
+            try {
+              if (im.parentNode) im.parentNode.removeChild(im);
+            } catch (e1) {
+              // ignore
+            }
+          }
+          if (im.complete) {
+            if (im.naturalWidth > 0) {
+              try {
+                if (im.classList) im.classList.add('is-loaded');
+              } catch (e2) {
+                // ignore
+              }
+              return;
+            }
+            markMissing();
+            return;
+          }
+          im.addEventListener('load', function () {
+            try {
+              if (im.classList) im.classList.add('is-loaded');
+            } catch (e3) {
+              // ignore
+            }
+          });
+          im.addEventListener('error', markMissing);
+        })(imgs[i]);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 畑1つ分のタイル。
+  function bzFieldTileHtml(field, idx, opts) {
+    var o = opts || {};
+    var bean = String((field && field.bean) || '');
+    var cnt = parseIntSafe(field && field.count, 0) || 0;
+    var def = bzBeanDef(bean);
+    var gain = cnt > 0 ? bzCoinsFor(bean, cnt) : 0;
+    var inner = '';
+    if (cnt > 0) {
+      inner =
+        '<div class="bz-field-bean"><span class="bz-field-emoji">' + escapeHtml(String(def.emoji || '')) + '</span>' +
+        '<span class="bz-field-name">' + escapeHtml(String(def.name || bean)) + '</span></div>' +
+        '<div class="bz-field-count">' + escapeHtml(String(cnt)) + 'まい</div>' +
+        '<div class="bz-field-gain">いま ' + escapeHtml(String(gain)) + 'きん</div>' +
+        bzBeanMeterHtml(bean);
+    } else {
+      inner = '<div class="bz-field-empty">あき畑</div>';
+    }
+    return (
+      '<div class="bz-field' + (cnt > 0 ? '' : ' bz-field--empty') + '" style="--bz-bean:' + escapeHtml(String(def.color || '#31405f')) + '">' +
+      '<div class="bz-field-no">畑' + escapeHtml(String((parseIntSafe(idx, 0) || 0) + 1)) + '</div>' +
+      inner +
+      (o.actionsHtml || '') +
+      '</div>'
+    );
+  }
+
+  // その豆を おける畑が あるか（空き畑 or 同種の畑）。
+  function bzHasPlantableField(fields, bean) {
+    var list = Array.isArray(fields) ? fields : [];
+    var b = String(bean || '');
+    for (var i = 0; i < list.length; i++) {
+      var c = parseIntSafe(list[i].count, 0) || 0;
+      if (c === 0) return true;
+      if (String(list[i].bean || '') === b) return true;
+    }
+    return false;
+  }
+
+  // 他プレイヤーのコンパクト表示（手札・pending は枚数だけ）。
+  function bzOtherRowHtml(room, mid, turnMid) {
+    var p = bzPlayerOf(room, mid);
+    var chips = '';
+    for (var i = 0; i < p.fields.length; i++) {
+      var f = p.fields[i];
+      var cnt = parseIntSafe(f.count, 0) || 0;
+      var def = bzBeanDef(f.bean);
+      if (cnt > 0) {
+        chips +=
+          '<span class="bz-mini" style="--bz-bean:' + escapeHtml(String(def.color)) + '">' +
+          escapeHtml(String(def.emoji || '')) + escapeHtml(String(def.name || '')) + ' ' + escapeHtml(String(cnt)) +
+          '<em>' + escapeHtml(String(bzCoinsFor(f.bean, cnt))) + 'きん</em></span>';
+      } else {
+        chips += '<span class="bz-mini bz-mini--empty">あき</span>';
+      }
+    }
+    return (
+      '<div class="bz-other' + (String(turnMid || '') === String(mid) ? ' bz-other--turn' : '') + '">' +
+      '<div class="bz-other-head">' +
+      '<span class="bz-other-name">' + escapeHtml(p.name || String(mid)) + '</span>' +
+      '<span class="bz-coins">🪙' + escapeHtml(String(p.coins)) + '</span>' +
+      '<span class="bz-other-cnt">手札' + escapeHtml(String(p.hand.length)) + ' / まち' + escapeHtml(String(p.pending.length)) + '</span>' +
+      '</div>' +
+      '<div class="bz-mini-row">' + chips + '</div>' +
+      '</div>'
+    );
+  }
+
+  function bzLogHtml(room, maxLines) {
+    var log = Array.isArray(room && room.log) ? room.log : [];
+    var n = parseIntSafe(maxLines, 6) || 6;
+    var recent = log.length > n ? log.slice(log.length - n) : log.slice();
+    if (!recent.length) return '';
+    var out = '';
+    for (var i = 0; i < recent.length; i++) out += '<div class="bz-log-line">' + escapeHtml(String(recent[i] || '')) + '</div>';
+    return '<div class="bz-log">' + out + '</div>';
+  }
+
+  function bzRankingHtml(room, meMid) {
+    var r = (room && room.result && Array.isArray(room.result.ranking)) ? room.result.ranking : [];
+    if (!r.length) return '';
+    var out = '';
+    for (var i = 0; i < r.length; i++) {
+      var row = r[i] || {};
+      var rank = parseIntSafe(row.rank, i + 1) || i + 1;
+      var medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '　';
+      var isMe = meMid && String(row.mid || '') === String(meMid);
+      out +=
+        '<div class="bz-rank-row' + (rank === 1 ? ' bz-rank-row--top' : '') + (isMe ? ' bz-rank-row--me' : '') + '">' +
+        '<span class="bz-rank-no">' + escapeHtml(String(medal)) + String(rank) + 'い</span>' +
+        '<span class="bz-rank-name">' + escapeHtml(String(row.name || row.mid || '')) + (isMe ? '<em>あなた</em>' : '') + '</span>' +
+        '<span class="bz-rank-coins">🪙' + escapeHtml(String(parseIntSafe(row.coins, 0) || 0)) + '</span>' +
+        '</div>';
+    }
+    return '<div class="bz-rank">' + out + '</div>';
+  }
+
+  function bzDeckInfoHtml(room) {
+    var deck = Array.isArray(room && room.deck) ? room.deck.length : 0;
+    var disc = Array.isArray(room && room.discard) ? room.discard.length : 0;
+    var rs = parseIntSafe(room && room.reshuffles, 0) || 0;
+    return (
+      '<div class="bz-deckinfo">' +
+      '<span>やまふだ <b>' + escapeHtml(String(deck)) + '</b></span>' +
+      '<span>すてふだ <b>' + escapeHtml(String(disc)) + '</b></span>' +
+      '<span>まぜた <b>' + escapeHtml(String(rs)) + '</b>/2</span>' +
+      '</div>'
+    );
+  }
+
+  // -------------------- bohnanza: プレイヤー画面 --------------------
+
+  function renderBohnanzaPlayer(viewEl, opts) {
+    var room = opts.room;
+    var playerId = opts.playerId ? String(opts.playerId) : '';
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var isHost = !!opts.isHost;
+    var ui = opts.ui || {};
+    var isTableGmDevice = !!opts.isTableGmDevice;
+    var canOperate = !isTableGmDevice;
+
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var phase = String((room && room.phase) || '');
+    var turnMid = bzTurnMid(room);
+    var isMyTurn = !!(playerId && String(turnMid) === playerId);
+    var me = bzPlayerOf(room, playerId);
+    var inGame = !!(playerId && room && room.players && room.players[playerId]);
+    var faceUp = bzNormFaceUp(room && room.faceUp);
+    var planted = parseIntSafe(room && room.plantedThisTurn, 0) || 0;
+
+    if (phase === 'result') {
+      var backHtml = lobbyId && isHost ? '<button id="bzNextToLobby" class="primary">ロビーへもどる</button>' : '';
+      render(
+        viewEl,
+        '<div class="stack bz-screen">' +
+        '<div class="bbg-title-row"><div class="big">🫘 けっか</div></div>' +
+        bzRankingHtml(room, playerId) +
+        '<div class="card">' + bzLogHtml(room, 8) + '</div>' +
+        (backHtml ? '<div class="row">' + backHtml + '</div>' : '') +
+        '</div>'
+      );
+      return;
+    }
+
+    if (!inGame) {
+      render(
+        viewEl,
+        '<div class="stack bz-screen">' +
+        '<div class="big">🫘 ボーナンザ</div>' +
+        '<div class="card muted">このゲームに さんかしていません。</div>' +
+        bzLogHtml(room, 6) +
+        '</div>'
+      );
+      return;
+    }
+
+    // ---- 上部ステータス
+    var statusHtml =
+      '<div class="card bz-top">' +
+      '<div class="bz-top-row">' +
+      '<span class="bz-phase">' + escapeHtml(bzPhaseLabel(phase)) + '</span>' +
+      '<span class="bz-turn' + (isMyTurn ? ' bz-turn--me' : '') + '">' + escapeHtml(bzName(room, turnMid)) + 'の ばん</span>' +
+      '<span class="bz-coins">🪙' + escapeHtml(String(me.coins)) + '</span>' +
+      '</div>' +
+      bzDeckInfoHtml(room) +
+      bbgFxToggleHtml() +
+      '</div>';
+
+    // ---- 自分の畑
+    var canBuy = order.length >= 4 && me.fields.length === 2 && me.coins >= 3;
+    var fieldsHtml = '';
+    for (var fi = 0; fi < me.fields.length; fi++) {
+      var f = me.fields[fi];
+      var cnt = parseIntSafe(f.count, 0) || 0;
+      var acts = '';
+      if (canOperate && cnt > 0) {
+        var ok = bzCanHarvest(me.fields, fi);
+        acts =
+          '<button type="button" class="ghost bz-btn bzHarvestBtn" data-bz-field="' + escapeHtml(String(fi)) + '"' +
+          (ok ? '' : ' disabled') + '>しゅうかく</button>' +
+          (ok ? '' : '<div class="bz-note">1まいの畑は しゅうかくできません</div>');
+      }
+      fieldsHtml += bzFieldTileHtml(f, fi, { actionsHtml: acts ? '<div class="bz-field-acts">' + acts + '</div>' : '' });
+    }
+    var myFieldsHtml =
+      '<div class="card bz-mine">' +
+      '<div class="bz-sec-title">あなたの畑</div>' +
+      '<div class="bz-fields">' + fieldsHtml + '</div>' +
+      (canOperate && canBuy ? '<div class="row"><button type="button" id="bzBuyField" class="ghost bz-btn">3つめの畑を かう（-3きん）</button></div>' : '') +
+      '</div>';
+
+    // ---- 畑えらびボタン（うえる用）
+    function fieldPickHtml(bean, kind, pendIdx) {
+      var out = '';
+      for (var i = 0; i < me.fields.length; i++) {
+        var ff = me.fields[i];
+        var c = parseIntSafe(ff.count, 0) || 0;
+        var same = c > 0 && String(ff.bean || '') === String(bean || '');
+        var okPlant = c === 0 || same;
+        var label = c === 0 ? '畑' + String(i + 1) + '（あき）' : '畑' + String(i + 1) + '（' + bzBeanName(ff.bean) + String(c) + '）';
+        out +=
+          '<button type="button" class="ghost bz-btn ' + (kind === 'hand' ? 'bzPlantHandBtn' : 'bzPlantPendBtn') + '"' +
+          ' data-bz-field="' + escapeHtml(String(i)) + '"' +
+          (kind === 'pend' ? ' data-bz-pidx="' + escapeHtml(String(pendIdx)) + '"' : '') +
+          (okPlant ? '' : ' disabled') + '>' + escapeHtml(label) + '</button>';
+      }
+      return '<div class="bz-pick">' + out + '</div>';
+    }
+
+    // ---- うえるフェーズ
+    var actionHtml = '';
+    if (phase === 'plant') {
+      if (isMyTurn) {
+        var canPlantMore = planted < 2 && me.hand.length > 0;
+        var canReveal = planted >= 1 || me.hand.length === 0;
+        var head = me.hand.length === 0
+          ? '手札が ないので そのまま めくれます'
+          : (planted === 0 ? '手札の さきあたまを かならず 1まい うえます' : 'もう1まい うえても いいです（' + String(planted) + '/2）');
+        actionHtml =
+          '<div class="card bz-act">' +
+          '<div class="bz-sec-title">うえる</div>' +
+          '<div class="bz-hint">' + escapeHtml(head) + '</div>' +
+          (canPlantMore
+            ? '<div class="bz-plantnow">' + bzCardHtml(me.hand[0], 'bz-card--lead') +
+              (canOperate ? '<div class="bz-plantnow-pick">' + fieldPickHtml(me.hand[0], 'hand', -1) + '</div>' : '') +
+              '</div>'
+            : '') +
+          (canPlantMore && !bzHasPlantableField(me.fields, me.hand[0])
+            ? '<div class="bz-note bz-note--warn">おける畑が ありません。さきに どれかの畑を しゅうかくしてください。</div>'
+            : '') +
+          (canOperate && canReveal ? '<div class="row"><button type="button" id="bzRevealBtn" class="primary bz-btn">2まい めくる</button></div>' : '') +
+          '</div>';
+      } else {
+        actionHtml = '<div class="card bz-act muted">' + escapeHtml(bzName(room, turnMid)) + 'が うえています' + bbgWaitDotsHtml() + '</div>';
+      }
+    }
+
+    // ---- こうかんフェーズ
+    if (phase === 'trade') {
+      var fuHtml = '';
+      for (var ui0 = 0; ui0 < faceUp.length; ui0++) {
+        var e = faceUp[ui0];
+        var taken = String(e.takenBy || '');
+        var sel = parseIntSafe(ui.bzSelFaceUp, -1) === ui0;
+        var corner = taken ? '<div class="bz-card-tag">→' + escapeHtml(bzName(room, taken)) + '</div>' : '';
+        fuHtml +=
+          '<div class="bz-fu-item' + (sel ? ' bz-fu-item--sel' : '') + (taken ? ' bz-fu-item--taken' : '') + '"' +
+          ' data-bz-fu="' + escapeHtml(String(ui0)) + '">' + bzCardHtml(e.bean, 'bz-card--sm', corner) + '</div>';
+      }
+      var giveTargets = '';
+      if (canOperate && isMyTurn && parseIntSafe(ui.bzSelFaceUp, -1) >= 0) {
+        for (var gi = 0; gi < order.length; gi++) {
+          var gm = String(order[gi] || '');
+          if (!gm) continue;
+          giveTargets +=
+            '<button type="button" class="ghost bz-btn bzGiveFuBtn" data-bz-to="' + escapeHtml(gm) + '">' +
+            escapeHtml(bzName(room, gm)) + (gm === playerId ? '（じぶん）' : '') + '</button>';
+        }
+        giveTargets =
+          '<div class="bz-give"><div class="bz-hint">だれに わたす？</div><div class="bz-pick">' + giveTargets +
+          '<button type="button" id="bzGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
+      }
+
+      actionHtml +=
+        '<div class="card bz-act">' +
+        '<div class="bz-sec-title">めくれた カード</div>' +
+        (faceUp.length ? '<div class="bz-fu">' + fuHtml + '</div>' : '<div class="muted">（なし）</div>') +
+        (canOperate && isMyTurn ? '<div class="bz-hint">カードを タップして わたす あいてを えらびます</div>' : '<div class="bz-hint">こうかんは くちで そうだんして、' + escapeHtml(bzName(room, turnMid)) + 'が そうさします</div>') +
+        giveTargets +
+        (canOperate && isMyTurn ? '<div class="row"><button type="button" id="bzEndTradeBtn" class="primary bz-btn">こうかん おわり</button></div>' : '') +
+        '</div>';
+    }
+
+    if (phase === 'plantAll') {
+      var waiting = [];
+      for (var wi = 0; wi < order.length; wi++) {
+        var wm = String(order[wi] || '');
+        if (!wm) continue;
+        if (bzPlayerOf(room, wm).pending.length) waiting.push(bzName(room, wm));
+      }
+      actionHtml +=
+        '<div class="card bz-act">' +
+        '<div class="bz-sec-title">もらった豆を うえる</div>' +
+        '<div class="bz-hint">' + (waiting.length ? 'まっている人：' + escapeHtml(waiting.join('、')) + bbgWaitDotsHtml() : 'ぜんいん おわりました') + '</div>' +
+        '</div>';
+    }
+
+    // ---- うえる待ち（pending）
+    var pendingHtml = '';
+    if (me.pending.length) {
+      var rows = '';
+      for (var pi2 = 0; pi2 < me.pending.length; pi2++) {
+        var pe = me.pending[pi2];
+        var fromLabel = String(pe.from || '') === 'deck' ? 'めくれ札' : bzName(room, pe.from) + 'から';
+        rows +=
+          '<div class="bz-pend-item">' +
+          bzCardHtml(pe.bean, 'bz-card--sm') +
+          '<div class="bz-pend-body">' +
+          '<div class="bz-hint">' + escapeHtml(fromLabel) + '</div>' +
+          (canOperate ? fieldPickHtml(pe.bean, 'pend', pi2) : '') +
+          (canOperate && phase === 'trade' && String(pe.from || '') === 'deck'
+            ? '<button type="button" class="ghost bz-btn bzReturnBtn" data-bz-pidx="' + escapeHtml(String(pi2)) + '">もどす</button>'
+            : '') +
+          (!bzHasPlantableField(me.fields, pe.bean) ? '<div class="bz-note bz-note--warn">おける畑が ありません。さきに しゅうかくしてください。</div>' : '') +
+          '</div>' +
+          '</div>';
+      }
+      pendingHtml = '<div class="card bz-pend"><div class="bz-sec-title">うえる まちの 豆</div>' + rows + '</div>';
+    }
+
+    // ---- 自分の手札（順番は変えられない・先頭だけ強調）
+    var handHtml = '';
+    for (var hi2 = 0; hi2 < me.hand.length; hi2++) {
+      var selH = parseIntSafe(ui.bzSelHand, -1) === hi2;
+      handHtml +=
+        '<div class="bz-hand-item' + (hi2 === 0 ? ' bz-hand-item--lead' : '') + (selH ? ' bz-hand-item--sel' : '') + '"' +
+        ' data-bz-hidx="' + escapeHtml(String(hi2)) + '">' +
+        bzCardHtml(me.hand[hi2], 'bz-card--sm', hi2 === 0 ? '<div class="bz-card-tag bz-card-tag--lead">さきあたま</div>' : '') +
+        '</div>';
+    }
+    var handGive = '';
+    if (canOperate && phase === 'trade' && parseIntSafe(ui.bzSelHand, -1) >= 0) {
+      var targets = '';
+      for (var ti = 0; ti < order.length; ti++) {
+        var tm = String(order[ti] || '');
+        if (!tm || tm === playerId) continue;
+        if (!isMyTurn && tm !== turnMid) continue;
+        targets += '<button type="button" class="ghost bz-btn bzGiveHandBtn" data-bz-to="' + escapeHtml(tm) + '">' + escapeHtml(bzName(room, tm)) + 'に わたす</button>';
+      }
+      handGive =
+        '<div class="bz-give"><div class="bz-hint">えらんだ 手札を わたします（とりけしできません）</div>' +
+        '<div class="bz-pick">' + targets + '<button type="button" id="bzHandGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
+    }
+    var myHandHtml =
+      '<div class="card bz-handbox">' +
+      '<div class="bz-sec-title">あなたの 手札（' + escapeHtml(String(me.hand.length)) + 'まい・ならびかえ できません）</div>' +
+      (me.hand.length ? '<div class="bz-hand" id="bzHand">' + handHtml + '</div>' : '<div class="muted">（からっぽ）</div>') +
+      (canOperate && phase === 'trade' && me.hand.length ? '<div class="bz-hint">カードを タップすると わたせます</div>' : '') +
+      handGive +
+      '</div>';
+
+    // ---- ほかの人
+    var othersHtml = '';
+    for (var oi = 0; oi < order.length; oi++) {
+      var om = String(order[oi] || '');
+      if (!om || om === playerId) continue;
+      othersHtml += bzOtherRowHtml(room, om, turnMid);
+    }
+    othersHtml = othersHtml ? '<div class="card bz-others"><div class="bz-sec-title">ほかの人</div>' + othersHtml + '</div>' : '';
+
+    render(
+      viewEl,
+      '<div class="stack bz-screen">' +
+      statusHtml +
+      actionHtml +
+      pendingHtml +
+      myFieldsHtml +
+      myHandHtml +
+      othersHtml +
+      '<div class="card">' + bzLogHtml(room, 6) + '</div>' +
+      '</div>'
+    );
+  }
+
+  function routeBohnanzaPlayer(roomId, isHost) {
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (e0) {
+      lobbyId = '';
+    }
+
+    var isTableGmDevice = false;
+    try {
+      var qGm = parseQuery();
+      isTableGmDevice = !!(qGm && String(qGm.gmdev || '') === '1');
+    } catch (eGm) {
+      isTableGmDevice = false;
+    }
+
+    var playerId = '';
+    try {
+      var q1 = parseQuery();
+      playerId = q1 && q1.player ? String(q1.player) : '';
+    } catch (eP) {
+      playerId = '';
+    }
+    if (!playerId && lobbyId) {
+      try {
+        playerId = String(getOrCreateLobbyMemberId(lobbyId) || '');
+      } catch (eMid) {
+        playerId = '';
+      }
+    }
+
+    var lastRoom = null;
+    var ui = {
+      bzSelFaceUp: -1,
+      bzSelHand: -1,
+      inFlight: false,
+      cancelled: false,
+      fxReady: false,
+      lastTurnKey: '',
+      lastResultKey: '',
+      lobbyReturnWatching: false,
+      lobbyUnsub: null
+    };
+
+    function redirectToLobby() {
+      if (!lobbyId) return;
+      // setQuery() は pushState なので popstate が起きない。遷移前に自分で購読を解除する。
+      ui.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = isHost ? 'lobby_host' : 'lobby_player';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (ui.lobbyReturnWatching) return;
+      ui.lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'bohnanza' || rid !== String(roomId || '')) {
+              try {
+                if (ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
+              redirectToLobby();
+            }
+          });
+        })
+        .then(function (u2) {
+          ui.lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    // 選択状態は「相手の操作で先に進んだ」ときに古くなる。毎スナップショットで突き合わせて捨てる。
+    function bzDropStale(room) {
+      try {
+        var phase0 = String((room && room.phase) || '');
+        var me0 = bzPlayerOf(room, playerId);
+        var fu0 = bzNormFaceUp(room && room.faceUp);
+        var turnMid0 = bzTurnMid(room);
+
+        var selFu = parseIntSafe(ui.bzSelFaceUp, -1);
+        if (selFu >= 0) {
+          if (phase0 !== 'trade' || String(turnMid0) !== String(playerId) || selFu >= fu0.length || String(fu0[selFu].takenBy || '')) {
+            ui.bzSelFaceUp = -1;
+          }
+        }
+        var selHand = parseIntSafe(ui.bzSelHand, -1);
+        if (selHand >= 0) {
+          if (phase0 !== 'trade' || selHand >= me0.hand.length) ui.bzSelHand = -1;
+        }
+      } catch (e) {
+        ui.bzSelFaceUp = -1;
+        ui.bzSelHand = -1;
+      }
+    }
+
+    function done() {
+      ui.inFlight = false;
+    }
+
+    function fail(e) {
+      bbgShowToast((e && e.message) || 'できませんでした');
+    }
+
+    function renderNow(room) {
+      lastRoom = room;
+      bzDropStale(room);
+      try {
+        if (lobbyId) ensureLobbyReturnWatcher();
+      } catch (eLW) {
+        // ignore
+      }
+
+      renderBohnanzaPlayer(viewEl, {
+        roomId: roomId,
+        room: room,
+        playerId: playerId,
+        lobbyId: lobbyId,
+        isHost: isHost,
+        ui: ui,
+        isTableGmDevice: isTableGmDevice
+      });
+      bzBindCardImages(viewEl);
+      bindBbgFxToggle();
+
+      var phase = String((room && room.phase) || '');
+      var turnMid = bzTurnMid(room);
+
+      // 手番が変わったら1回だけオーバーレイ
+      try {
+        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
+        if (ui.fxReady && phase !== 'result' && turnKey !== ui.lastTurnKey) {
+          bbgShowTurnOverlay(String(turnMid) === String(playerId) ? 'あなたの ばん！' : bzName(room, turnMid) + 'の ばん');
+        }
+        ui.lastTurnKey = turnKey;
+      } catch (eT) {
+        // ignore
+      }
+
+      try {
+        var rKey = room && room.result && Array.isArray(room.result.ranking) ? String(room.result.ranking.length) + '|' + phase : '';
+        if (ui.fxReady && phase === 'result' && rKey && rKey !== ui.lastResultKey) {
+          bbgFx.win();
+        }
+        ui.lastResultKey = rKey;
+      } catch (eR) {
+        // ignore
+      }
+      ui.fxReady = true;
+
+      if (isTableGmDevice) return;
+
+      bindPlayerActions();
+    }
+
+    function bindPlayerActions() {
+      function bindAll(selector, fn) {
+        var els = viewEl && viewEl.querySelectorAll ? viewEl.querySelectorAll(selector) : [];
+        for (var k = 0; k < els.length; k++) {
+          (function (el) {
+            if (!el || el.__bz_bound) return;
+            el.__bz_bound = true;
+            el.addEventListener('click', function (ev) {
+              if (ev && ev.preventDefault) ev.preventDefault();
+              fn(el, ev);
+            });
+          })(els[k]);
+        }
+      }
+
+      // 手札のカードをタップ（こうかん中のみ選択できる）
+      bindAll('.bz-hand-item', function (el) {
+        if (String((lastRoom && lastRoom.phase) || '') !== 'trade') return;
+        var idx = parseIntSafe(el.getAttribute('data-bz-hidx'), -1);
+        if (idx < 0) return;
+        ui.bzSelHand = parseIntSafe(ui.bzSelHand, -1) === idx ? -1 : idx;
+        ui.bzSelFaceUp = -1;
+        bbgFx.tap();
+        renderNow(lastRoom);
+      });
+
+      // めくれ札をタップ
+      bindAll('.bz-fu-item', function (el) {
+        if (String((lastRoom && lastRoom.phase) || '') !== 'trade') return;
+        if (String(bzTurnMid(lastRoom)) !== String(playerId)) return;
+        var idx = parseIntSafe(el.getAttribute('data-bz-fu'), -1);
+        if (idx < 0) return;
+        var fu = bzNormFaceUp(lastRoom && lastRoom.faceUp);
+        if (idx >= fu.length || String(fu[idx].takenBy || '')) return;
+        ui.bzSelFaceUp = parseIntSafe(ui.bzSelFaceUp, -1) === idx ? -1 : idx;
+        ui.bzSelHand = -1;
+        bbgFx.tap();
+        renderNow(lastRoom);
+      });
+
+      var cancelFu = document.getElementById('bzGiveCancel');
+      if (cancelFu && !cancelFu.__bz_bound) {
+        cancelFu.__bz_bound = true;
+        cancelFu.addEventListener('click', function () {
+          ui.bzSelFaceUp = -1;
+          renderNow(lastRoom);
+        });
+      }
+
+      var cancelHand = document.getElementById('bzHandGiveCancel');
+      if (cancelHand && !cancelHand.__bz_bound) {
+        cancelHand.__bz_bound = true;
+        cancelHand.addEventListener('click', function () {
+          ui.bzSelHand = -1;
+          renderNow(lastRoom);
+        });
+      }
+
+      // めくれ札を わたす
+      bindAll('.bzGiveFuBtn', function (el) {
+        var to = String(el.getAttribute('data-bz-to') || '');
+        var idx = parseIntSafe(ui.bzSelFaceUp, -1);
+        if (!to || idx < 0 || ui.inFlight) return;
+        var nm = bzName(lastRoom, to);
+        if (!bbgConfirmClick(el, 'このカードを ' + nm + ' に わたしますか？', 'わたす')) return;
+        ui.inFlight = true;
+        ui.bzSelFaceUp = -1;
+        bbgFx.play();
+        bzGiveFaceUp(roomId, playerId, idx, to).catch(fail).then(done, done);
+      });
+
+      // 手札を わたす（とりけし不可）
+      bindAll('.bzGiveHandBtn', function (el) {
+        var to = String(el.getAttribute('data-bz-to') || '');
+        var idx = parseIntSafe(ui.bzSelHand, -1);
+        if (!to || idx < 0 || ui.inFlight) return;
+        var nm2 = bzName(lastRoom, to);
+        if (!bbgConfirmClick(el, '手札の カードを ' + nm2 + ' に わたします。\nとりけしは できません。', 'わたす')) return;
+        ui.inFlight = true;
+        ui.bzSelHand = -1;
+        bbgFx.play();
+        bzGiveFromHand(roomId, playerId, idx, to).catch(fail).then(done, done);
+      });
+
+      // 手札の先頭を うえる
+      bindAll('.bzPlantHandBtn', function (el) {
+        if (ui.inFlight) return;
+        var fidx = parseIntSafe(el.getAttribute('data-bz-field'), -1);
+        if (fidx < 0) return;
+        ui.inFlight = true;
+        bbgFx.play();
+        bzPlantFromHand(roomId, playerId, fidx).catch(fail).then(done, done);
+      });
+
+      // うえる待ちを うえる
+      bindAll('.bzPlantPendBtn', function (el) {
+        if (ui.inFlight) return;
+        var fidx2 = parseIntSafe(el.getAttribute('data-bz-field'), -1);
+        var pidx = parseIntSafe(el.getAttribute('data-bz-pidx'), -1);
+        if (fidx2 < 0 || pidx < 0) return;
+        ui.inFlight = true;
+        bbgFx.play();
+        bzPlantPending(roomId, playerId, pidx, fidx2).catch(fail).then(done, done);
+      });
+
+      // もどす
+      bindAll('.bzReturnBtn', function (el) {
+        if (ui.inFlight) return;
+        var pidx2 = parseIntSafe(el.getAttribute('data-bz-pidx'), -1);
+        if (pidx2 < 0) return;
+        if (!bbgConfirmClick(el, 'このカードを めくれ札に もどしますか？', 'もどす')) return;
+        ui.inFlight = true;
+        bzReturnPending(roomId, playerId, pidx2).catch(fail).then(done, done);
+      });
+
+      // しゅうかく
+      bindAll('.bzHarvestBtn', function (el) {
+        if (ui.inFlight) return;
+        var fidx3 = parseIntSafe(el.getAttribute('data-bz-field'), -1);
+        if (fidx3 < 0) return;
+        var me2 = bzPlayerOf(lastRoom, playerId);
+        if (fidx3 >= me2.fields.length) return;
+        var fld = me2.fields[fidx3];
+        var gain = bzCoinsFor(fld.bean, fld.count);
+        var msg = bzBeanName(fld.bean) + ' ' + String(fld.count) + 'まいを しゅうかくします。\n' + String(gain) + 'きん もらえます。' + (gain === 0 ? '\n（0きんです！）' : '');
+        if (!bbgConfirmClick(el, msg, 'しゅうかく')) return;
+        ui.inFlight = true;
+        bbgFx.reveal();
+        bzHarvest(roomId, playerId, fidx3).catch(fail).then(done, done);
+      });
+
+      var revealBtn = document.getElementById('bzRevealBtn');
+      if (revealBtn && !revealBtn.__bz_bound) {
+        revealBtn.__bz_bound = true;
+        revealBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          ui.inFlight = true;
+          bbgFx.reveal();
+          bzRevealTwo(roomId, playerId).catch(fail).then(done, done);
+        });
+      }
+
+      var endTradeBtn = document.getElementById('bzEndTradeBtn');
+      if (endTradeBtn && !endTradeBtn.__bz_bound) {
+        endTradeBtn.__bz_bound = true;
+        endTradeBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          if (!bbgConfirmClick(endTradeBtn, 'こうかんを おわりますか？\nのこった めくれ札は あなたが うえます。', 'おわる')) return;
+          ui.inFlight = true;
+          bzEndTrade(roomId, playerId).catch(fail).then(done, done);
+        });
+      }
+
+      var buyBtn = document.getElementById('bzBuyField');
+      if (buyBtn && !buyBtn.__bz_bound) {
+        buyBtn.__bz_bound = true;
+        buyBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          if (!bbgConfirmClick(buyBtn, '3きん はらって 3つめの畑を かいますか？\nはらった コインは ゲームから なくなります。', 'かう')) return;
+          ui.inFlight = true;
+          bzBuyThirdField(roomId, playerId).catch(fail).then(done, done);
+        });
+      }
+
+      var nextBtn = document.getElementById('bzNextToLobby');
+      if (nextBtn && !nextBtn.__bz_bound) {
+        nextBtn.__bz_bound = true;
+        nextBtn.addEventListener('click', function () {
+          if (!lobbyId) return;
+          nextBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobby();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              nextBtn.disabled = false;
+            });
+        });
+      }
+    }
+
+    firebaseReady()
+      .then(function () {
+        if (lobbyId) ensureLobbyReturnWatcher();
+        return subscribeBohnanzaRoom(roomId, function (room) {
+          if (ui.cancelled) return;
+          if (!room) {
+            renderError(viewEl, '部屋が見つかりません');
+            return;
+          }
+          renderNow(room);
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐに解除する。
+        if (ui.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      ui.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (e0p) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (e1p) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
+    });
+  }
+
+  // -------------------- bohnanza: テーブル画面 --------------------
+
+  function renderBohnanzaTable(viewEl, opts) {
+    var room = opts.room;
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var isHost = !!opts.isHost;
+
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var phase = String((room && room.phase) || '');
+    var turnMid = bzTurnMid(room);
+    var faceUp = bzNormFaceUp(room && room.faceUp);
+
+    if (phase === 'result') {
+      render(
+        viewEl,
+        '<div class="stack bz-screen bz-table">' +
+        '<div class="bbg-title-row"><div class="big">🫘 ボーナンザ けっか</div></div>' +
+        bzRankingHtml(room, '') +
+        '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
+        (lobbyId ? '<div class="row"><button type="button" id="bzNextToLobby" class="primary">ロビーへもどる</button></div>' : '') +
+        '</div>'
+      );
+      return;
+    }
+
+    var seats = '';
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var p = bzPlayerOf(room, mid);
+      var fieldsHtml = '';
+      for (var f = 0; f < p.fields.length; f++) fieldsHtml += bzFieldTileHtml(p.fields[f], f, null);
+      seats +=
+        '<div class="card bz-seat' + (mid === turnMid ? ' bz-seat--turn' : '') + '">' +
+        '<div class="bz-seat-head">' +
+        '<span class="bz-seat-name">' + (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + '</span>' +
+        '<span class="bz-coins">🪙' + escapeHtml(String(p.coins)) + '</span>' +
+        '</div>' +
+        '<div class="bz-seat-cnt">手札 ' + escapeHtml(String(p.hand.length)) + 'まい / うえるまち ' + escapeHtml(String(p.pending.length)) + 'まい</div>' +
+        '<div class="bz-fields">' + fieldsHtml + '</div>' +
+        '</div>';
+    }
+
+    var fuHtml = '';
+    for (var k = 0; k < faceUp.length; k++) {
+      var tag = String(faceUp[k].takenBy || '') ? '<div class="bz-card-tag">→' + escapeHtml(bzName(room, faceUp[k].takenBy)) + '</div>' : '';
+      fuHtml += bzCardHtml(faceUp[k].bean, 'bz-card--sm', tag);
+    }
+
+    render(
+      viewEl,
+      '<div class="stack bz-screen bz-table">' +
+      '<div class="card bz-top">' +
+      '<div class="bz-top-row">' +
+      '<span class="bz-phase">' + escapeHtml(bzPhaseLabel(phase)) + '</span>' +
+      '<span class="bz-turn bz-turn--me">' + escapeHtml(bzName(room, turnMid)) + 'の ばん</span>' +
+      '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'てばんめ</span>' +
+      '</div>' +
+      bzDeckInfoHtml(room) +
+      bbgFxToggleHtml() +
+      '</div>' +
+      (phase === 'trade'
+        ? '<div class="card"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' + (fuHtml || '<span class="muted">（なし）</span>') + '</div></div>'
+        : '') +
+      '<div class="bz-seats">' + seats + '</div>' +
+      '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
+      (isHost
+        ? '<div class="row"><button type="button" id="bzHostForce" class="ghost">⚠ すすめる（だいり）</button>' +
+          (lobbyId ? '<button type="button" id="bzAbortToLobby" class="ghost">ロビーへもどる</button>' : '') +
+          '</div>'
+        : '') +
+      '</div>'
+    );
+  }
+
+  function routeBohnanzaTable(roomId, isHost) {
+    try {
+      if (document && document.body && document.body.classList) {
+        document.body.classList.remove('ll-player-screen');
+        document.body.classList.add('ll-table-screen');
+      }
+    } catch (e0) {
+      // ignore
+    }
+
+    // ホスト以外がURLを直打ちしたらプレイヤー画面へ回す（hannin_table と同じ）。
+    if (!isHost) {
+      var qx0 = {};
+      var vx0 = getCacheBusterParam();
+      if (vx0) qx0.v = vx0;
+      qx0.room = roomId;
+      try {
+        var qq0 = parseQuery();
+        if (qq0 && qq0.lobby) qx0.lobby = String(qq0.lobby);
+        if (qq0 && qq0.player) qx0.player = String(qq0.player);
+      } catch (e0x) {
+        // ignore
+      }
+      qx0.screen = 'bohnanza_player';
+      setQuery(qx0);
+      route();
+      return;
+    }
+
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (eQ) {
+      lobbyId = '';
+    }
+
+    var tUi = { cancelled: false, fxReady: false, lastTurnKey: '', lastResultKey: '', inFlight: false };
+    var lobbyReturnWatching = false;
+    var lobbyUnsub = null;
+
+    function redirectToLobbyHost() {
+      if (!lobbyId) return;
+      tUi.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      lobbyUnsub = null;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = 'lobby_host';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (lobbyReturnWatching) return;
+      lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'bohnanza' || rid !== String(roomId || '')) {
+              try {
+                if (lobbyUnsub) lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              lobbyUnsub = null;
+              redirectToLobbyHost();
+            }
+          });
+        })
+        .then(function (u2) {
+          lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    function renderTableNow(room) {
+      renderBohnanzaTable(viewEl, { roomId: roomId, room: room, isHost: isHost, lobbyId: lobbyId });
+      bzBindCardImages(viewEl);
+      bindBbgFxToggle();
+
+      var phase = String((room && room.phase) || '');
+      var turnMid = bzTurnMid(room);
+      try {
+        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
+        if (tUi.fxReady && phase !== 'result' && turnKey !== tUi.lastTurnKey) {
+          bbgShowTurnOverlay(bzName(room, turnMid) + 'の ばん');
+        }
+        tUi.lastTurnKey = turnKey;
+      } catch (eT) {
+        // ignore
+      }
+      try {
+        var rKey = phase === 'result' ? 'result' : '';
+        if (tUi.fxReady && rKey && rKey !== tUi.lastResultKey) bbgFx.win();
+        tUi.lastResultKey = rKey;
+      } catch (eR) {
+        // ignore
+      }
+      tUi.fxReady = true;
+
+      var forceBtn = document.getElementById('bzHostForce');
+      if (forceBtn && !forceBtn.__bz_bound) {
+        forceBtn.__bz_bound = true;
+        forceBtn.addEventListener('click', function () {
+          if (tUi.inFlight) return;
+          if (!bbgConfirmClick(forceBtn, 'だいりで すすめますか？\nうえる豆は じどうで えらばれます。', 'すすめる')) return;
+          tUi.inFlight = true;
+          forceBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return bzHostForce(roomId);
+            })
+            .then(function (applied) {
+              bbgShowToast(applied ? 'だいりで すすめました' : 'いまは すすめられませんでした');
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              tUi.inFlight = false;
+              forceBtn.disabled = false;
+            });
+        });
+      }
+
+      var abortBtn = document.getElementById('bzAbortToLobby');
+      if (abortBtn && !abortBtn.__bz_bound) {
+        abortBtn.__bz_bound = true;
+        abortBtn.addEventListener('click', function () {
+          if (!bbgConfirmClick(abortBtn, 'ゲームを ちゅうだんして\nぜんいん ロビーに もどります。', 'ロビーに戻る')) return;
+          if (!lobbyId) return;
+          abortBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobbyHost();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              abortBtn.disabled = false;
+            });
+        });
+      }
+
+      var nextBtn = document.getElementById('bzNextToLobby');
+      if (nextBtn && !nextBtn.__bz_bound) {
+        nextBtn.__bz_bound = true;
+        nextBtn.addEventListener('click', function () {
+          if (!lobbyId) return;
+          nextBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobbyHost();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              nextBtn.disabled = false;
+            });
+        });
+      }
+    }
+
+    firebaseReady()
+      .then(function () {
+        if (lobbyId) ensureLobbyReturnWatcher();
+        return subscribeBohnanzaRoom(roomId, function (room) {
+          if (tUi.cancelled) return;
+          if (!room) {
+            renderError(viewEl, '部屋が見つかりません');
+            return;
+          }
+          renderTableNow(room);
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+        if (tUi.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      tUi.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (e0p) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (e1p) {
+        // ignore
+      }
+      lobbyUnsub = null;
+    });
+  }
+
   // -------------------- UI --------------------
   var HEADER_LOBBY_ID = '';
 
@@ -10501,7 +12477,8 @@
     loveletter: { label: 'ラブレター', emoji: '💌', min: 2 },
     codenames: { label: 'コードネーム', emoji: '🕵️', min: 4 },
     hannin: { label: '犯人は踊る', emoji: '🃏', min: 3 },
-    oekaki: { label: 'おえかきバトル', emoji: '🎨', min: 1 }
+    oekaki: { label: 'おえかきバトル', emoji: '🎨', min: 1 },
+    bohnanza: { label: 'ボーナンザ', emoji: '🫘', min: 3 }
   };
 
   function gameKindLabel(kind) {
@@ -10793,7 +12770,7 @@
         ' をあそび中</span></div>'
       : '';
 
-    var gameKinds = ['wordwolf', 'codenames', 'loveletter', 'hannin', 'oekaki'];
+    var gameKinds = ['wordwolf', 'codenames', 'loveletter', 'hannin', 'oekaki', 'bohnanza'];
     var gameGridHtml = '';
     for (var gi = 0; gi < gameKinds.length; gi++) {
       var gk = gameKinds[gi];
@@ -10805,7 +12782,7 @@
         '" aria-pressed="' +
         (isSel ? 'true' : 'false') +
         '"' +
-        (gi === gameKinds.length - 1 ? ' style="grid-column:1/-1"' : '') +
+        (gi === gameKinds.length - 1 && gameKinds.length % 2 === 1 ? ' style="grid-column:1/-1"' : '') +
         '>' +
         '<span class="bbg-game-emoji">' +
         (gm.emoji || '🎲') +
@@ -14706,12 +16683,21 @@
             else if (kind === 'codenames') min = 4;
             else if (kind === 'hannin') min = 3;
             else if (kind === 'oekaki') min = 1; // 一人でもOK（採点のみ）
+            else if (kind === 'bohnanza') min = 3;
             else min = 3; // wordwolf
 
             if (n0 < min) {
               clearInlineError('lobbyHostError');
               var gameLabel = gameKindLabel(kind) || 'ゲーム';
               setInlineError('lobbyHostError', '参加者が足りません（' + gameLabel + 'は' + String(min) + '人以上必要です）');
+              return;
+            }
+
+            // ボーナンザは基本ルールの3〜5人のみ（6人以上は未対応）。
+            if (kind === 'bohnanza' && n0 > 5) {
+              clearInlineError('lobbyHostError');
+              setInlineError('lobbyHostError', 'ボーナンザは5人までです（いまは' + String(n0) + '人）');
+              bbgShowToast('ボーナンザは 3〜5人で あそべます');
               return;
             }
           } catch (eMin) {
@@ -14729,7 +16715,7 @@
           }
 
           // Wordwolf requires the legacy settings screen.
-          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin' && kind !== 'oekaki') {
+          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin' && kind !== 'oekaki' && kind !== 'bohnanza') {
             var qWw = {};
             var vWw = getCacheBusterParam();
             if (vWw) qWw.v = vWw;
@@ -14765,6 +16751,7 @@
           // Used for hannin redirect after room creation (needs to survive promise chain).
           var hostPidH = '';
           var hostPidO = '';
+          var hostPidB = '';
           firebaseReady()
             .then(function () {
               if (kind === 'codenames') {
@@ -14921,6 +16908,24 @@
                     return;
                   });
               }
+
+              if (kind === 'bohnanza') {
+                // ボーナンザは room 内にロビーフェーズを持たない。配札済みの初期状態を一括で作る。
+                var orderB = normalizeOrder(lobby);
+                var membersB = (lobby && lobby.members) || {};
+                var listB = [];
+                for (var bA = 0; bA < orderB.length; bA++) {
+                  var pidB = String(orderB[bA] || '');
+                  if (!pidB) continue;
+                  var nmB = membersB && membersB[pidB] && membersB[pidB].name ? String(membersB[pidB].name) : '';
+                  listB.push({ mid: pidB, name: nmB || '-' });
+                }
+                hostPidB = isTableGm ? '' : String(mid || '');
+                if (hostPidB && orderB.indexOf(hostPidB) === -1) hostPidB = '';
+                return createBohnanzaRoom(roomId, lobbyId, listB).then(function () {
+                  return;
+                });
+              }
               return;
             })
             .then(function () {
@@ -14956,6 +16961,11 @@
                 q.host = '1';
                 if (!isTableGm && hostPidO) q.player = String(hostPidO);
                 q.screen = 'oekaki_player';
+              } else if (kind === 'bohnanza') {
+                q.host = '1';
+                // GM端末(テーブル表示)は player を持たせない（hannin と同じ理由）。
+                if (!isTableGm && hostPidB) q.player = String(hostPidB);
+                q.screen = isTableGm ? 'bohnanza_table' : 'bohnanza_player';
               }
               setQuery(q);
               route();
@@ -15115,6 +17125,10 @@
         q.player = String(mid);
       } else if (kind === 'oekaki') {
         q.screen = 'oekaki_player';
+        if (isHostDevice) q.host = '1';
+        q.player = String(mid);
+      } else if (kind === 'bohnanza') {
+        q.screen = 'bohnanza_player';
         if (isHostDevice) q.host = '1';
         q.player = String(mid);
       } else {
@@ -25596,6 +27610,8 @@
         hannin_table: 1,
         hannin_player: 1,
         oekaki_player: 1,
+        // ボーナンザはプレイヤー画面のみ許可（テーブル画面はホスト端末専用）。
+        bohnanza_player: 1,
         // リレーモードはロビー外の遊び。LINE等で届いたリンクは制限端末でも開けるようにする
         // （部屋を作る側の画面 oekaki_relay_create は下のホスト系ブロックで弾かれる）。
         oekaki_relay: 1,
@@ -25722,6 +27738,16 @@
     if (screen === 'oekaki_player') {
       if (!roomId) return routeHome();
       return routeOekakiPlayer(roomId, isHost);
+    }
+
+    if (screen === 'bohnanza_table') {
+      if (!roomId) return routeHome();
+      return routeBohnanzaTable(roomId, isHost);
+    }
+
+    if (screen === 'bohnanza_player') {
+      if (!roomId) return routeHome();
+      return routeBohnanzaPlayer(roomId, isHost);
     }
 
     if (screen === 'oekaki_relay_create') return routeOekakiRelayCreate();

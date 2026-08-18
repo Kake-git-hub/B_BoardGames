@@ -10,6 +10,7 @@
 - 犯人は踊る（Hannin）
 - おえかきバトル（Oekaki）… AI判定にGemini APIを使用（後述）
 - おえかきバトル リレーモード（Oekaki Relay）… 2人用・非同期。ロビーを使わず、URLをLINE等で渡し合って遊ぶ
+- ボーナンザ（Bohnanza）
 
 このアプリは「静的ファイル + Firebase Realtime Database」で動きます。
 
@@ -117,6 +118,7 @@ Realtime Database を使い、複数端末で同じ状態を共有します。
 - 犯人は踊る: `hanninRooms/<roomId>`
 - おえかきバトル: `oekakiRooms/<roomId>`
 - おえかきバトル（リレー）: `oekakiRelayRooms/<roomId>`
+- ボーナンザ: `bohnanzaRooms/<roomId>`
 
 いずれも「ホストが作成 → 参加者がjoin → 以降はroomの状態遷移で全画面が追従」という流れです。
 （リレーモードだけはロビーを経由せず、URLを人づてに渡して非同期に進めます。§6.6参照）
@@ -270,6 +272,17 @@ UI
 - 画面テキストは、同室モード＝ひらがな中心（子供向け）／リレーモード＝**通常の日本語**（大人向け）と使い分けている。描画画面だけは共通なのでひらがな表記のまま
 - Gemini呼び出しは `oekakiCallGemini(apiKey, prompt, schema, entries)` にプロンプトとスキーマを渡す形
 
+### 6.7 ボーナンザ
+
+- 対応人数: **3〜5人**（基本ゲーム準拠）
+- **交渉・値付けは口頭で行う**。アプリはあくまで「合意済みのカード移動」（渡す/受け取る操作と確認ダイアログ）だけを肩代わりする
+- **手札は並び替え禁止**（常に入手順の列）。植えられるのは手札の先頭のみ、引いたカードは末尾に追加される
+- フェーズ進行: うえる（plant）→ めくって こうかん（trade）→ もらった豆を うえる（plantAll）→ ひく（draw・自動）を手番ごとに繰り返す
+- **収穫はいつでも可能**（誰の手番中でも、自分の畑を選んで収穫しコイン化できる）
+- 山札は捨て札をシャッフルして最大2回まで再利用し、**3回目に尽きた瞬間ゲーム終了**（全員の畑を自動収穫してコイン確定・最多コインが勝ち）
+- カード画像は `assets/bohnanza/<key>.png` を置くだけで（次回リロード時から）自動的にプレースホルダーから切り替わる。**画像が無い間はプレースホルダー**（豆色の枠+絵文字+名前+豆メーター）で識別可能
+- 詳細な仕様は `BOHNANZA_DESIGN.md` を参照
+
 ---
 
 ## 7) Firebase セットアップ
@@ -299,12 +312,13 @@ UI
     "loveletterRooms": { ".read": true, ".write": true },
     "hanninRooms": { ".read": true, ".write": true },
     "oekakiRooms": { ".read": true, ".write": true },
-    "oekakiRelayRooms": { ".read": true, ".write": true }
+    "oekakiRelayRooms": { ".read": true, ".write": true },
+    "bohnanzaRooms": { ".read": true, ".write": true }
   }
 }
 ```
 
-※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。
+※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。同様に、ボーナンザを追加した場合は `bohnanzaRooms` のルール追記が必要です（下記参照）。
 
 #### ⚠ リレーモードを使う前に（既存プロジェクトでの1回だけの作業）
 
@@ -341,6 +355,42 @@ DBルールはアプリのソースではなく Firebase Console 側の設定な
 いずれの場合も、直前の行の末尾に**カンマ**が要る点に注意してください。リレーモードがアクセスするのは `oekakiRelayRooms/<部屋ID>` とその配下だけなので、パターンAのワイルドカードで過不足なく動きます。
 
 確認方法: ホーム画面 →「おえかきバトル（リレー）」→ 名前を入れて「この設定ではじめる」で、エラーにならず描画画面の手前（「はじめる」ボタン）まで進めばOKです。
+
+#### ⚠ ボーナンザを使う前に（既存プロジェクトでの1回だけの作業）
+
+ボーナンザは新しいパス `bohnanzaRooms` を使います。**このルールを足していないと「ゲーム開始」で PERMISSION_DENIED になり、ルームが作れません**（既存ゲームには影響しません）。
+
+手順はリレーモードのときと同じです。
+
+1. Firebase Console → 対象プロジェクト → **Realtime Database → ルール**
+2. **`"rules"` の中（`oekakiRooms` などと同じ階層）に** `bohnanzaRooms` を追記する。既存のルールは消さない
+   - ⚠ 一番外側の `}` の**後ろ**ではなく、必ず `"rules": { ... }` の**内側**に入れること
+   - ⚠ 書き方は既存のルールと同じ形式に合わせる（下記2パターン）
+3. **公開（Publish）** を押す。反映は即時で、アプリ側の再デプロイは不要
+
+**パターンA: 既存が `$roomId` ワイルドカード形式の場合**（本番はこちら）
+
+```json
+"oekakiRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+"bohnanzaRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+```
+
+**パターンB: 既存がトップレベル許可のフラット形式の場合**
+
+```json
+"oekakiRooms": { ".read": true, ".write": true },
+"bohnanzaRooms": { ".read": true, ".write": true },
+```
+
+いずれの場合も、直前の行の末尾に**カンマ**が要る点に注意してください。
+
+確認方法: ホーム画面 → ロビー作成 →「ボーナンザ」を選んで「ゲーム開始」で、エラーにならずゲーム画面まで進めばOKです。
 
 ※ 現在の本番ルールは「`lobbies/$id` 単位の許可」になっており、`lobbies` や `rooms` などの**トップレベル一括読み取りは拒否**されます。このため `cleanupOldRooms()`（7日超の部屋の自動削除）は毎回 permission_denied で空振りしています。自動削除を効かせたい場合は、上記のようにトップレベルに `.read` を付ける（＋`.indexOn: ["createdAt"]` 推奨）ようConsoleでルールを変更してください。ホームのロビー一覧は `lobbies/_index` を使うため、**ルール変更なしでも動作します**。
 
