@@ -10813,12 +10813,12 @@
     return false;
   }
 
-  // 他プレイヤーのコンパクト表示（手札・pending は枚数だけ）。
-  function bzOtherRowHtml(room, mid, turnMid) {
-    var p = bzPlayerOf(room, mid);
+  // 畑をミニチップ1行で表す（ほかの人・テーブル席で共用）。
+  function bzMiniFieldsHtml(p) {
+    var list = (p && Array.isArray(p.fields)) ? p.fields : [];
     var chips = '';
-    for (var i = 0; i < p.fields.length; i++) {
-      var f = p.fields[i];
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i];
       var cnt = parseIntSafe(f.count, 0) || 0;
       var def = bzBeanDef(f.bean);
       if (cnt > 0) {
@@ -10830,25 +10830,30 @@
         chips += '<span class="bz-mini bz-mini--empty">あき</span>';
       }
     }
+    return '<span class="bz-mini-row">' + chips + '</span>';
+  }
+
+  // 他プレイヤーのコンパクト表示（手札・pending は枚数だけ・畑はミニチップ）。
+  function bzOtherRowHtml(room, mid, turnMid) {
+    var p = bzPlayerOf(room, mid);
     return (
       '<div class="bz-other' + (String(turnMid || '') === String(mid) ? ' bz-other--turn' : '') + '">' +
-      '<div class="bz-other-head">' +
       '<span class="bz-other-name">' + escapeHtml(p.name || String(mid)) + '</span>' +
       '<span class="bz-coins">🪙' + escapeHtml(String(p.coins)) + '</span>' +
       '<span class="bz-other-cnt">手札' + escapeHtml(String(p.hand.length)) + ' / まち' + escapeHtml(String(p.pending.length)) + '</span>' +
-      '</div>' +
-      '<div class="bz-mini-row">' + chips + '</div>' +
+      bzMiniFieldsHtml(p) +
       '</div>'
     );
   }
 
+  // ログは新しい行がいつも見えるように、DOMは新しい順・表示は column-reverse で古い順に並べる。
   function bzLogHtml(room, maxLines) {
     var log = Array.isArray(room && room.log) ? room.log : [];
     var n = parseIntSafe(maxLines, 6) || 6;
     var recent = log.length > n ? log.slice(log.length - n) : log.slice();
     if (!recent.length) return '';
     var out = '';
-    for (var i = 0; i < recent.length; i++) out += '<div class="bz-log-line">' + escapeHtml(String(recent[i] || '')) + '</div>';
+    for (var i = recent.length - 1; i >= 0; i--) out += '<div class="bz-log-line">' + escapeHtml(String(recent[i] || '')) + '</div>';
     return '<div class="bz-log">' + out + '</div>';
   }
 
@@ -11126,14 +11131,20 @@
 
     render(
       viewEl,
-      '<div class="stack bz-screen">' +
+      '<div class="stack bz-screen bbg-wide">' +
+      '<div class="bbg-2col">' +
+      '<div class="bbg-col">' +
       statusHtml +
       actionHtml +
       pendingHtml +
       myFieldsHtml +
+      '</div>' +
+      '<div class="bbg-col">' +
       myHandHtml +
       othersHtml +
-      '<div class="card">' + bzLogHtml(room, 6) + '</div>' +
+      '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' +
+      '</div>' +
+      '</div>' +
       '</div>'
     );
   }
@@ -11589,16 +11600,14 @@
       var mid = String(order[i] || '');
       if (!mid) continue;
       var p = bzPlayerOf(room, mid);
-      var fieldsHtml = '';
-      for (var f = 0; f < p.fields.length; f++) fieldsHtml += bzFieldTileHtml(p.fields[f], f, null);
       seats +=
         '<div class="card bz-seat' + (mid === turnMid ? ' bz-seat--turn' : '') + '">' +
         '<div class="bz-seat-head">' +
         '<span class="bz-seat-name">' + (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + '</span>' +
         '<span class="bz-coins">🪙' + escapeHtml(String(p.coins)) + '</span>' +
         '</div>' +
-        '<div class="bz-seat-cnt">手札 ' + escapeHtml(String(p.hand.length)) + 'まい / うえるまち ' + escapeHtml(String(p.pending.length)) + 'まい</div>' +
-        '<div class="bz-fields">' + fieldsHtml + '</div>' +
+        '<div class="bz-seat-cnt">手札 ' + escapeHtml(String(p.hand.length)) + ' / うえるまち ' + escapeHtml(String(p.pending.length)) + '</div>' +
+        bzMiniFieldsHtml(p) +
         '</div>';
     }
 
@@ -11611,20 +11620,20 @@
     render(
       viewEl,
       '<div class="stack bz-screen bz-table">' +
-      '<div class="card bz-top">' +
+      '<div class="card bz-top bz-top--bar">' +
       '<div class="bz-top-row">' +
       '<span class="bz-phase">' + escapeHtml(bzPhaseLabel(phase)) + '</span>' +
       '<span class="bz-turn bz-turn--me">' + escapeHtml(bzName(room, turnMid)) + 'の ばん</span>' +
       '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'てばんめ</span>' +
-      '</div>' +
       bzDeckInfoHtml(room) +
+      '</div>' +
       bbgFxToggleHtml() +
       '</div>' +
       (phase === 'trade'
-        ? '<div class="card"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' + (fuHtml || '<span class="muted">（なし）</span>') + '</div></div>'
+        ? '<div class="card bz-fubox"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' + (fuHtml || '<span class="muted">（なし）</span>') + '</div></div>'
         : '') +
       '<div class="bz-seats">' + seats + '</div>' +
-      '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
+      '<div class="card bz-logbox">' + bzLogHtml(room, 10) + '</div>' +
       (isHost
         ? '<div class="row"><button type="button" id="bzHostForce" class="ghost">⚠ すすめる（だいり）</button>' +
           (lobbyId ? '<button type="button" id="bzAbortToLobby" class="ghost">ロビーへもどる</button>' : '') +
@@ -12222,30 +12231,34 @@
 
     render(
       viewEl,
-      '\n    <div class="stack">\n' +
+      '\n    <div class="stack bbg-wide bbg-home">\n' +
         '      <div class="bbg-hero">\n' +
         '        <div class="bbg-hero-logo">🎲</div>\n' +
-        '        <div class="bbg-hero-title">B_BoardGames</div>\n' +
-        '        <div class="bbg-hero-sub">あつまって みんなで あそぶ ボードゲーム</div>\n' +
-        '        ' + (verHtml || '') + '\n' +
+        '        <div class="bbg-hero-text">\n' +
+        '          <div class="bbg-hero-title">B_BoardGames</div>\n' +
+        '          <div class="bbg-hero-sub">あつまって みんなで あそぶ ボードゲーム</div>\n' +
+        '          ' + (verHtml || '') + '\n' +
+        '        </div>\n' +
         '      </div>\n' +
         '      <div id="homeLobbies" class="stack"></div>\n' +
-        '      <div class="bbg-sec">あたらしく はじめる</div>\n' +
-        '      <button id="homeCreateJoin" class="bbg-menu-btn">\n' +
-        '        <span class="bbg-menu-icon">🎮</span>\n' +
-        '        <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る</span><span class="bbg-menu-desc">この端末もゲームに参加します</span></span>\n' +
-        '      </button>\n' +
-        '      <button id="homeCreateGm" class="bbg-menu-btn">\n' +
-        '        <span class="bbg-menu-icon">📺</span>\n' +
-        '        <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る（テーブル端末）</span><span class="bbg-menu-desc">盤面表示専用。参加者としては入りません</span></span>\n' +
-        '      </button>\n' +
-        '      <div class="bbg-sec">はなれた ひとと あそぶ</div>\n' +
-        '      <button id="homeOekakiRelay" class="bbg-menu-btn">\n' +
-        '        <span class="bbg-menu-icon">🎨</span>\n' +
-        '        <span style="min-width:0"><span class="bbg-menu-label">おえかきバトル（リレー）</span><span class="bbg-menu-desc">2人用。LINEなどでURLを渡し合って戦う投稿型</span></span>\n' +
-        '      </button>\n' +
-        '      <div class="center" style="margin-top:4px">\n' +
-        '        <a class="btn ghost" href="?screen=setup" style="font-size:13px">⚙️ せってい</a>\n' +
+        '      <div class="bbg-menu-grid">\n' +
+        '        <div class="bbg-sec bbg-span2">あたらしく はじめる</div>\n' +
+        '        <button id="homeCreateJoin" class="bbg-menu-btn">\n' +
+        '          <span class="bbg-menu-icon">🎮</span>\n' +
+        '          <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る</span><span class="bbg-menu-desc">この端末もゲームに参加します</span></span>\n' +
+        '        </button>\n' +
+        '        <button id="homeCreateGm" class="bbg-menu-btn">\n' +
+        '          <span class="bbg-menu-icon">📺</span>\n' +
+        '          <span style="min-width:0"><span class="bbg-menu-label">ロビーを作る（テーブル端末）</span><span class="bbg-menu-desc">盤面表示専用。参加者としては入りません</span></span>\n' +
+        '        </button>\n' +
+        '        <div class="bbg-sec bbg-span2">はなれた ひとと あそぶ</div>\n' +
+        '        <button id="homeOekakiRelay" class="bbg-menu-btn">\n' +
+        '          <span class="bbg-menu-icon">🎨</span>\n' +
+        '          <span style="min-width:0"><span class="bbg-menu-label">おえかきバトル（リレー）</span><span class="bbg-menu-desc">2人用。LINEなどでURLを渡し合って戦う投稿型</span></span>\n' +
+        '        </button>\n' +
+        '        <div class="center bbg-home-setup">\n' +
+        '          <a class="btn ghost" href="?screen=setup" style="font-size:13px">⚙️ せってい</a>\n' +
+        '        </div>\n' +
         '      </div>\n' +
         '    </div>\n  '
     );
@@ -12316,7 +12329,7 @@
       return;
     }
 
-    var html = '<div class="bbg-sec">いま ひらいているロビー</div>';
+    var html = '';
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       var entry = it.entry || {};
@@ -12367,7 +12380,8 @@
         '</div>' +
         '</div>';
     }
-    box.innerHTML = html;
+    // 一覧は上限付きの内部スクロール。見出しは外に置いてスクロールで消えないようにする。
+    box.innerHTML = '<div class="bbg-sec">いま ひらいているロビー</div><div class="bbg-lobbylist">' + html + '</div>';
   }
 
   function pad4(n) {
@@ -12548,19 +12562,19 @@
         if (!nm) nm = '（無名）';
 
         listHtml +=
-          '<div class="row" style="align-items:center; gap:8px">' +
-          '<div class="muted" style="min-width:18px">' +
+          '<div class="bbg-assign-row">' +
+          '<span class="muted bbg-assign-no">' +
           (i + 1) +
-          '</div>' +
-          '<div style="flex:1"><b>' +
+          '</span>' +
+          '<b class="bbg-assign-name">' +
           escapeHtml(nm) +
-          '</b></div>' +
-          '<button class="ghost lobbyOrderUp" data-mid="' +
+          '</b>' +
+          '<button class="ghost bbg-ord-btn lobbyOrderUp" data-mid="' +
           escapeHtml(mid) +
           '" ' +
           (i === 0 ? 'disabled' : '') +
           '>↑</button>' +
-          '<button class="ghost lobbyOrderDown" data-mid="' +
+          '<button class="ghost bbg-ord-btn lobbyOrderDown" data-mid="' +
           escapeHtml(mid) +
           '" ' +
           (i === order.length - 1 ? 'disabled' : '') +
@@ -12570,12 +12584,11 @@
       if (!listHtml) listHtml = '<div class="muted">参加者がいません。</div>';
 
       loveletterSetupHtml =
-        '<hr />' +
-        '<div class="stack">' +
+        '<div class="stack bbg-setup">' +
         '<div class="bbg-sec">💌 順番決め（ラブレター）</div>' +
-        listHtml +
+        '<div class="bbg-assign">' + listHtml + '</div>' +
         '<div class="row">' +
-        '<button id="lobbyShuffle" class="ghost">シャッフル</button>' +
+        '<button id="lobbyShuffle" class="ghost bbg-setup-btn">シャッフル</button>' +
         '</div>' +
         '</div>';
     }
@@ -12591,19 +12604,19 @@
         if (!nmH) nmH = '（無名）';
 
         listHtmlH +=
-          '<div class="row" style="align-items:center; gap:8px">' +
-          '<div class="muted" style="min-width:18px">' +
+          '<div class="bbg-assign-row">' +
+          '<span class="muted bbg-assign-no">' +
           (iH + 1) +
-          '</div>' +
-          '<div style="flex:1"><b>' +
+          '</span>' +
+          '<b class="bbg-assign-name">' +
           escapeHtml(nmH) +
-          '</b></div>' +
-          '<button class="ghost lobbyOrderUp" data-mid="' +
+          '</b>' +
+          '<button class="ghost bbg-ord-btn lobbyOrderUp" data-mid="' +
           escapeHtml(midH) +
           '" ' +
           (iH === 0 ? 'disabled' : '') +
           '>↑</button>' +
-          '<button class="ghost lobbyOrderDown" data-mid="' +
+          '<button class="ghost bbg-ord-btn lobbyOrderDown" data-mid="' +
           escapeHtml(midH) +
           '" ' +
           (iH === order.length - 1 ? 'disabled' : '') +
@@ -12613,12 +12626,11 @@
       if (!listHtmlH) listHtmlH = '<div class="muted">参加者がいません。</div>';
 
       hanninSetupHtml =
-        '<hr />' +
-        '<div class="stack">' +
+        '<div class="stack bbg-setup">' +
         '<div class="bbg-sec">🃏 順番決め（犯人は踊る）</div>' +
-        listHtmlH +
+        '<div class="bbg-assign">' + listHtmlH + '</div>' +
         '<div class="row">' +
-        '<button id="lobbyShuffle" class="ghost">シャッフル</button>' +
+        '<button id="lobbyShuffle" class="ghost bbg-setup-btn">シャッフル</button>' +
         '</div>' +
         '</div>';
     }
@@ -12640,11 +12652,10 @@
         var role = String((a2 && a2.role) || '');
 
         rows +=
-          '<div class="stack" style="gap:6px">' +
-          '<b>' +
+          '<div class="bbg-assign-row">' +
+          '<b class="bbg-assign-name">' +
           escapeHtml(nm2) +
           '</b>' +
-          '<div class="row" style="gap:8px">' +
           '<select class="cnAssignTeam" data-mid="' +
           escapeHtml(mid2) +
           '">' +
@@ -12671,18 +12682,16 @@
           (role === 'operative' ? 'selected' : '') +
           '>諜報員</option>' +
           '</select>' +
-          '</div>' +
           '</div>';
       }
       if (!rows) rows = '<div class="muted">参加者がいません。</div>';
 
       codenamesSetupHtml =
-        '<hr />' +
-        '<div class="stack">' +
+        '<div class="stack bbg-setup">' +
         '<div class="bbg-sec">🕵️ 役職決め（コードネーム）</div>' +
-        rows +
+        '<div class="bbg-assign">' + rows + '</div>' +
         '<div class="row">' +
-        '<button id="cnAssignShuffle" class="ghost">シャッフル</button>' +
+        '<button id="cnAssignShuffle" class="ghost bbg-setup-btn">シャッフル</button>' +
         '</div>' +
         '</div>';
     }
@@ -12707,8 +12716,7 @@
           '</option>';
       }
       oekakiSetupHtml =
-        '<hr />' +
-        '<div class="stack">' +
+        '<div class="stack bbg-setup">' +
         '<div class="bbg-sec">🎨 せってい（おえかきバトル）</div>' +
         '<div class="field">' +
         '<label>せいげんじかん</label>' +
@@ -12798,20 +12806,24 @@
 
     render(
       viewEl,
-      '\n    <div class="stack">\n      <div class="bbg-title-row">\n        <div class="big">ロビー</div>\n        <span class="bbg-code">' +
+      '\n    <div class="stack bbg-wide bbg-lobbyhost">\n      <div class="bbg-title-row">\n        <div class="big">ロビー</div>\n        <span class="bbg-code">' +
         escapeHtml(lobbyId) +
         '</span>\n      </div>\n      ' +
         currentStatusHtml +
-        '\n\n      <div class="card bbg-qr-card">\n        <div class="muted" style="font-size:12px">QRを読み取るか、同じアプリ・URLをひらいて「さんかする」でも参加できます</div>\n        <div class="center" id="qrWrap" style="min-width:168px">\n          <canvas id="qr" width="160" height="160"></canvas>\n        </div>\n        <div class="muted center" id="qrError"></div>\n        <div class="field" style="margin:0;align-self:stretch;text-align:left">\n          <label>参加URL（スマホ以外はこちら）</label>\n          <div class="code" id="joinUrlText">' +
+        '\n\n      <div class="bbg-2col">\n' +
+        '      <div class="bbg-col">\n' +
+        '      <div class="card bbg-qr-card">\n        <div class="muted bbg-qr-note">QRを読み取るか、同じアプリ・URLをひらいて「さんかする」でも参加できます</div>\n        <div class="center" id="qrWrap">\n          <canvas id="qr" width="160" height="160"></canvas>\n        </div>\n        <div class="muted center" id="qrError"></div>\n        <div class="bbg-joinurl">\n          <span class="bbg-joinurl-label">参加URL</span>\n          <div class="code" id="joinUrlText">' +
         escapeHtml(joinUrl || '') +
-        '</div>\n          <div class="row">\n            <button id="copyJoinUrl" class="ghost">コピー</button>\n          </div>\n          <div class="muted" id="copyStatus"></div>\n        </div>\n      </div>\n\n      <div class="bbg-sec">参加者<span class="badge">' +
+        '</div>\n          <button id="copyJoinUrl" class="ghost bbg-joinurl-btn">コピー</button>\n        </div>\n        <div class="muted" id="copyStatus"></div>\n      </div>\n\n      <div class="bbg-sec">参加者<span class="badge">' +
         memberCount +
-        '人</span></div>\n      ' +
+        '人</span></div>\n      <div class="bbg-memberbox">' +
         lobbyMembersSummaryHtml(lobby) +
-        '\n      ' +
+        '</div>\n      ' +
         (tableGmNoteHtml || '') +
         (isTableGmDevice ? '' : '\n      ' + gmNameCardHtml) +
-        '\n\n      <div class="bbg-sec">ゲームをえらぶ</div>\n      <input type="hidden" id="lobbyGameKind" value="' +
+        '\n      </div>\n' +
+        '      <div class="bbg-col">\n' +
+        '      <div class="bbg-sec">ゲームをえらぶ</div>\n      <input type="hidden" id="lobbyGameKind" value="' +
         escapeHtml(selectedKind) +
         '" />\n      <div class="bbg-game-grid">' +
         gameGridHtml +
@@ -12820,16 +12832,18 @@
         hanninSetupHtml +
         codenamesSetupHtml +
         oekakiSetupHtml +
-        '\n\n      <div class="row" style="margin-top:4px">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
+        '\n\n      <div class="row">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
         escapeHtml(gameKindLabel(selectedKind)) +
         '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n' +
         // ロビーの出口。これが無いとホスト端末はブラウザバック以外で抜けられない。
-        '\n      <hr />\n      <div class="bbg-sec">ロビーをとじる</div>\n' +
+        '\n      <div class="bbg-sec">ロビーをとじる</div>\n' +
         '      <div class="row">\n' +
         '        <button id="lobbyHostGoHome" class="ghost" style="flex:1">🏠 ホームへ</button>\n' +
         '        <button id="lobbyDissolve" class="danger" style="flex:1">🗑 ロビーを解散</button>\n' +
         '      </div>\n' +
-        '      <div class="muted">「ホームへ」はロビーを残したまま抜けます（ホーム画面の一覧から「ホストでひらく」で戻れます）。「解散」はロビーを消して、参加者全員をホーム画面に戻します。</div>\n' +
+        '      <div class="muted bbg-close-note">「ホームへ」はロビーを残したまま抜けます（ホーム画面の一覧から「ホストでひらく」で戻れます）。「解散」はロビーを消して、参加者全員をホーム画面に戻します。</div>\n' +
+        '      </div>\n' +
+        '      </div>\n' +
         '    </div>\n  '
     );
   }
