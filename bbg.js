@@ -12553,64 +12553,49 @@
     }
   }
 
-  // 3つの場。call/croc 中は「いま出た」場、flip 中は「つぎ ここ」の場を強調する。
+  // 3つの場。いま出たカードの場だけ うっすら強調する（文字の情報は出さない）。
   function ddPilesHtml(room) {
     var piles = ddNormPiles(room && room.piles);
     var phase = String((room && room.phase) || '');
     var pi = parseIntSafe(room && room.pileIdx, 0) || 0;
     if (pi < 0 || pi > 2) pi = 0;
     var lastPile = (pi + 2) % 3;
-    var showLast = phase === 'call' || phase === 'croc' || phase === 'crocResult';
+    var showLast = phase === 'call' || phase === 'croc';
     var out = '';
     for (var i = 0; i < 3; i++) {
       var top = piles[i].length ? String(piles[i][piles[i].length - 1] || '') : '';
       var isLast = showLast && i === lastPile && piles[i].length > 0;
-      var isNext = phase === 'flip' && i === pi;
       out +=
-        '<div class="dd-pile' + (isLast ? ' dd-pile--last' : '') + (isNext ? ' dd-pile--next' : '') + '">' +
-        (top ? ddCardHtml(top, '') : '<div class="dd-card dd-card--empty"><div class="dd-card-ph"><div class="dd-card-emoji">…</div></div></div>') +
-        '<div class="dd-pile-info">やま' + escapeHtml(String(i + 1)) + '・' + escapeHtml(String(piles[i].length)) + 'まい</div>' +
-        (isNext ? '<div class="dd-pile-tag">つぎ ここ</div>' : '') +
-        (isLast ? '<div class="dd-pile-tag dd-pile-tag--new">いま出た</div>' : '') +
+        '<div class="dd-pile' + (isLast ? ' dd-pile--last' : '') + '">' +
+        (top ? ddCardHtml(top, '') : '<div class="dd-card dd-card--empty"></div>') +
         '</div>';
     }
     return '<div class="dd-piles">' + out + '</div>';
   }
 
-  // 正解の表示（大きなコール + 内訳チップ）。
-  function ddAnswerHtml(room) {
-    var call = ddComputeCall(room && room.piles);
-    var chips = '';
-    if (call.colorHit) {
-      var cd = DD_COLOR_DEFS[call.colorHit] || { name: call.colorHit, color: '#6b7280' };
-      chips += '<span class="dd-chip" style="--dd-col:' + escapeHtml(String(cd.color)) + '">' + escapeHtml(String(cd.name)) + ' ×' + escapeHtml(String(call.colorN)) + '</span>';
-    }
-    if (call.animalHit) {
-      var ad = DD_ANIMAL_DEFS[call.animalHit] || { name: call.animalHit, emoji: '' };
-      chips += '<span class="dd-chip">' + escapeHtml(String(ad.emoji || '')) + escapeHtml(String(ad.name)) + ' ×' + escapeHtml(String(call.animalN)) + '</span>';
-    }
-    if (call.turtles) {
-      chips += '<span class="dd-chip dd-chip--turtle">🐢カメ ×' + escapeHtml(String(call.turtles)) + ' → あたまに「オー」</span>';
-    }
-    if (!chips) chips = '<span class="dd-chip dd-chip--none">そろい なし</span>';
-    return '<div class="dd-answer">' + escapeHtml(call.text) + '</div><div class="dd-chiprow">' + chips + '</div>';
-  }
-
-  // のこり枚数チップ（プレイヤー画面・テーブルで共用）。
-  function ddOthersHtml(room, meMid) {
-    var order = Array.isArray(room && room.order) ? room.order : [];
+  // 一行の合図（プレイヤー画面・テーブルで共用）。meMid が空ならテーブル向けの言い回し。
+  function ddLineHtml(room, meMid) {
+    var phase = String((room && room.phase) || '');
     var turnMid = ddTurnMid(room);
-    var out = '';
-    for (var i = 0; i < order.length; i++) {
-      var mid = String(order[i] || '');
-      if (!mid) continue;
-      var p = ddPlayerOf(room, mid);
-      out +=
-        '<span class="dd-other' + (mid === turnMid ? ' dd-other--turn' : '') + '">' +
-        (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + (meMid && mid === String(meMid) ? '（あなた）' : '') +
-        ' <b>' + escapeHtml(String(p.deck.length)) + '</b>まい</span>';
+    var me = String(meMid || '');
+    var text = '';
+    var cls = '';
+    if (phase === 'flip' || phase === 'call') {
+      var mine = !!(me && String(turnMid) === me);
+      text = mine ? 'あなたの ばん' : escapeHtml(ddName(room, turnMid)) + 'の ばん';
+      if (mine && phase === 'flip') cls = ' dd-line--me';
+    } else if (phase === 'croc') {
+      var taps = ddNormTaps(room && room.croc && room.croc.taps);
+      var tapped = !!(me && taps[me] !== undefined);
+      text = tapped ? 'たたいた！' : '🐊 たたけ！';
+      if (!tapped) cls = ' dd-line--croc';
+    } else if (phase === 'crocResult') {
+      var cr = (room && room.crocResult) || {};
+      var loserMe = !!(me && String(cr.loserMid || '') === me);
+      text = (loserMe ? 'あなた' : escapeHtml(ddName(room, cr.loserMid))) + 'が ひきとり';
+      if (loserMe) cls = ' dd-line--me';
     }
-    return '<div class="dd-others">' + out + '</div>';
+    return '<div class="dd-line' + cls + '">' + text + '</div>';
   }
 
   // けっか（のこり枚数ランキング・共用HUDの .bz-rank を再利用）。
@@ -12634,25 +12619,9 @@
     return '<div class="bz-rank">' + out + '</div>';
   }
 
-  // ワニのタップ状況（croc中）とけっか（crocResult）の共通部品。
-  function ddCrocListHtml(room) {
-    var cr = (room && room.crocResult) || {};
-    var rows = Array.isArray(cr.ranking) ? cr.ranking : [];
-    var out = '';
-    for (var i = 0; i < rows.length; i++) {
-      var rr = rows[i] || {};
-      var isLoser = String(rr.mid || '') === String(cr.loserMid || '');
-      out +=
-        '<div class="dd-crocrow' + (isLoser ? ' dd-crocrow--loser' : '') + '">' +
-        '<span class="dd-crocrow-no">' + escapeHtml(String(i + 1)) + '</span>' +
-        '<span class="dd-crocrow-name">' + escapeHtml(ddName(room, rr.mid)) + '</span>' +
-        '<span class="dd-crocrow-ms">' + (rr.tapped ? escapeHtml(ddMsLabel(rr.ms)) : 'たたけず…') + (isLoser ? ' 🐊ひきとり' : '') + '</span>' +
-        '</div>';
-    }
-    return '<div class="dd-croclist">' + out + '</div>';
-  }
-
   // -------------------- dodelido: プレイヤー画面 --------------------
+  // プレイ中の情報は最低限（3つの場・自分ののこり枚数・一行の合図）。
+  // コールの正解・ログ・ほかの人の枚数・説明文は出さない（必要なことは口頭で確認するベース）。
 
   function renderDodelidoPlayer(viewEl, opts) {
     var room = opts.room;
@@ -12662,19 +12631,9 @@
     var isTableGmDevice = !!opts.isTableGmDevice;
     var canOperate = !isTableGmDevice;
 
-    var order = Array.isArray(room && room.order) ? room.order : [];
     var phase = String((room && room.phase) || '');
-    var turnMid = ddTurnMid(room);
-    var isMyTurn = !!(playerId && String(turnMid) === playerId);
     var me = ddPlayerOf(room, playerId);
     var inGame = !!(playerId && room && room.players && room.players[playerId]);
-    var nextMid = '';
-    if (order.length) {
-      var ti0 = parseIntSafe(room && room.turnIdx, 0) || 0;
-      if (ti0 < 0 || ti0 >= order.length) ti0 = 0;
-      nextMid = String(order[(ti0 + 1) % order.length] || '');
-    }
-    var isNextMe = !!(playerId && nextMid === playerId);
 
     if (phase === 'result') {
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
@@ -12685,7 +12644,6 @@
         '<div class="bbg-title-row"><div class="big">🦩 けっか</div></div>' +
         (winnerMid ? '<div class="dd-winline">🏆 ' + escapeHtml(ddName(room, winnerMid)) + 'の かち！</div>' : '') +
         ddRankingHtml(room, playerId) +
-        '<div class="card">' + bzLogHtml(room, 8) + '</div>' +
         (backHtml ? '<div class="row">' + backHtml + '</div>' : '') +
         '</div>'
       );
@@ -12698,121 +12656,22 @@
         '<div class="stack bz-screen dd-screen">' +
         '<div class="big">🦩 ドデリド</div>' +
         '<div class="card muted">このゲームに さんかしていません。</div>' +
-        bzLogHtml(room, 6) +
         '</div>'
       );
       return;
     }
 
-    // ---- 上部ステータス
-    var statusHtml =
-      '<div class="card bz-top">' +
-      '<div class="bz-top-row">' +
-      '<span class="bz-phase">' + escapeHtml(ddPhaseLabel(phase)) + '</span>' +
-      '<span class="bz-turn' + (isMyTurn ? ' bz-turn--me' : '') + '">' + escapeHtml(ddName(room, turnMid)) + 'の ばん</span>' +
-      '<span class="dd-remain">🎴のこり ' + escapeHtml(String(me.deck.length)) + 'まい</span>' +
-      '</div>' +
-      bbgFxToggleHtml() +
-      '</div>';
-
-    // ---- 3つの場
-    var pilesCard = '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>';
-
-    // ---- アクション（操作はぜんぶ「がめんのどこでもタップ/ながおし」。ここは案内の表示だけ）
-    var actionHtml = '';
-    if (phase === 'flip') {
-      if (isMyTurn && canOperate) {
-        actionHtml =
-          '<div class="card dd-act">' +
-          '<div class="dd-prompt">👉 がめんの どこでも<br>タップで めくる！</div>' +
-          '<div class="bz-hint">めくったら すぐ こえに だして コール！（まちがい・言いよどみ・3びょう こえたら おてつき）</div>' +
-          '</div>';
-      } else {
-        actionHtml = '<div class="card dd-act muted">' + escapeHtml(ddName(room, turnMid)) + 'の タップまち' + bbgWaitDotsHtml() + '</div>';
-      }
-    }
-
-    if (phase === 'call') {
-      if (playerId && isMyTurn) {
-        // コールした本人には こたえを見せない（口頭で答え合わせするため）。
-        actionHtml =
-          '<div class="card dd-act">' +
-          '<div class="dd-prompt">📣 こえに だして コール！</div>' +
-          '<div class="bz-hint">みんなが こうとうで こたえあわせ。まちがえていたら <b>がめんを ながおし</b>して 場のカードを ひきとり</div>' +
-          '</div>';
-      } else if (canOperate && inGame) {
-        actionHtml =
-          '<div class="card dd-act">' +
-          ddAnswerHtml(room) +
-          (isNextMe
-            ? '<div class="dd-prompt dd-prompt--sub">あっていたら 👉 タップで じぶんの ばん！（そのまま めくれます）</div>'
-            : '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'の コールを こうとうで たしかめよう。まちがいなら 本人が ながおしで ひきとり</div>') +
-          '</div>';
-      } else {
-        // テーブル端末・観戦: こたえは出さない（コール中の人に見えてしまうため）。
-        actionHtml =
-          '<div class="card dd-act">' +
-          '<div class="dd-answer dd-answer--hidden">❓</div>' +
-          '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（こたえは 各プレイヤーの がめんに）</div>' +
-          '</div>';
-      }
-    }
-
-    if (phase === 'croc') {
-      var taps = ddNormTaps(room && room.croc && room.croc.taps);
-      var myMs = playerId && taps[playerId] !== undefined ? taps[playerId] : -1;
-      var tapLine = '';
-      for (var ci = 0; ci < order.length; ci++) {
-        var cm = String(order[ci] || '');
-        if (!cm) continue;
-        var doneTap = taps[cm] !== undefined;
-        tapLine +=
-          '<span class="dd-tap ' + (doneTap ? 'dd-tap--done' : 'dd-tap--wait') + '">' +
-          escapeHtml(ddName(room, cm)) + (doneTap ? ' ' + escapeHtml(ddMsLabel(taps[cm])) : ' まだ…') + '</span>';
-      }
-      actionHtml =
-        '<div class="card dd-act">' +
-        (canOperate && inGame && myMs < 0
-          ? '<div class="dd-prompt dd-prompt--croc">🐊 がめんを たたけ！！</div>'
-          : myMs >= 0
-            ? '<div class="dd-croc-done">たたいた！（' + escapeHtml(ddMsLabel(myMs)) + '）</div>'
-            : '<div class="bz-hint">ぜんいんが 🐊を たたくのを まっています' + bbgWaitDotsHtml() + '</div>') +
-        '<div class="dd-tapline">' + tapLine + '</div>' +
-        (canOperate ? '<div class="row"><button type="button" id="ddCrocCloseBtn" class="ghost bz-btn">うちきる（たたけない人が いるとき）</button></div>' : '') +
-        '</div>';
-    }
-
-    if (phase === 'crocResult') {
-      var cr = (room && room.crocResult) || {};
-      var isLoserMe = !!(playerId && String(cr.loserMid || '') === playerId);
-      actionHtml =
-        '<div class="card dd-act">' +
-        '<div class="bz-sec-title">🐊 ワニの けっか</div>' +
-        ddCrocListHtml(room) +
-        (isLoserMe && canOperate
-          ? '<div class="dd-prompt dd-prompt--sub">👉 タップで さいかい（あなたから・そのまま めくれます）</div>'
-          : '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が 場のカードを ひきとりました。' + escapeHtml(ddName(room, cr.loserMid)) + 'の タップで さいかい</div>') +
-        '</div>';
-    }
-
-    // ---- のこり枚数 + ログ
-    var othersCard = '<div class="card"><div class="bz-sec-title">のこり まいすう</div>' + ddOthersHtml(room, playerId) + '</div>';
-    var logCard = '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>';
-
+    // 3つの場 / 自分ののこり枚数 / 一行の合図。操作はぜんぶ「がめんのどこでもタップ/ながおし」。
     render(
       viewEl,
-      '<div class="stack bz-screen dd-screen bbg-wide">' +
-      '<div class="bbg-2col">' +
-      '<div class="bbg-col">' +
-      statusHtml +
-      pilesCard +
-      actionHtml +
-      '</div>' +
-      '<div class="bbg-col">' +
-      othersCard +
-      logCard +
-      '</div>' +
-      '</div>' +
+      '<div class="stack bz-screen dd-screen dd-simple">' +
+      '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
+      '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
+      '<div class="dd-count"><span>のこり</span><b>' + escapeHtml(String(me.deck.length)) + '</b><span>まい</span></div>' +
+      ddLineHtml(room, playerId) +
+      (phase === 'croc' && canOperate
+        ? '<div class="dd-rescue"><button type="button" id="ddCrocCloseBtn" class="ghost">うちきる</button></div>'
+        : '') +
       '</div>'
     );
   }
@@ -13307,67 +13166,40 @@
         '<div class="bbg-title-row"><div class="big">🦩 ドデリド けっか</div></div>' +
         (winnerMid ? '<div class="dd-winline">🏆 ' + escapeHtml(ddName(room, winnerMid)) + 'の かち！</div>' : '') +
         ddRankingHtml(room, '') +
-        '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
         (lobbyId ? '<div class="row"><button type="button" id="ddNextToLobby" class="primary">ロビーへもどる</button></div>' : '') +
         '</div>'
       );
       return;
     }
 
+    // 席: 名前と のこり枚数だけ（ワニ中は たたいたか、決着後は ひきとり役の印）。
     var seats = '';
     var taps = phase === 'croc' ? ddNormTaps(room && room.croc && room.croc.taps) : null;
+    var crT = phase === 'crocResult' ? ((room && room.crocResult) || {}) : null;
     for (var i = 0; i < order.length; i++) {
       var mid = String(order[i] || '');
       if (!mid) continue;
       var p = ddPlayerOf(room, mid);
-      var sub = '';
-      if (taps) {
-        sub = taps[mid] !== undefined ? '🐊 ' + escapeHtml(ddMsLabel(taps[mid])) : 'まだ たたいていない…';
-      }
+      var mark = '';
+      if (taps) mark = taps[mid] !== undefined ? '✓' : '…';
+      if (crT && String(crT.loserMid || '') === mid) mark = '🐊 ひきとり';
       seats +=
         '<div class="card bz-seat' + (mid === turnMid ? ' bz-seat--turn' : '') + '">' +
         '<div class="bz-seat-head">' +
         '<span class="bz-seat-name">' + (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + '</span>' +
+        (mark ? '<span class="bz-seat-cnt">' + mark + '</span>' : '') +
         '<span class="dd-remain">' + escapeHtml(String(p.deck.length)) + 'まい</span>' +
         '</div>' +
-        (sub ? '<div class="bz-seat-cnt">' + sub + '</div>' : '') +
         '</div>';
-    }
-
-    var centerHtml = '';
-    if (phase === 'flip') {
-      centerHtml = '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'の タップまち' + bbgWaitDotsHtml() + '</div>';
-    } else if (phase === 'call') {
-      // テーブルには こたえを出さない（コール中の人に見えてしまうため）。
-      centerHtml =
-        '<div class="dd-answer dd-answer--hidden">❓</div>' +
-        '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（こたえは 各プレイヤーの がめんに。まちがいなら 本人が ながおしで ひきとり）</div>';
-    } else if (phase === 'croc') {
-      centerHtml = '<div class="dd-answer">🐊 がめんを たたけ！！</div>';
-    } else if (phase === 'crocResult') {
-      var cr = (room && room.crocResult) || {};
-      centerHtml =
-        ddCrocListHtml(room) +
-        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が ひきとりました。' + escapeHtml(ddName(room, cr.loserMid)) + 'の タップで さいかい</div>';
     }
 
     render(
       viewEl,
-      '<div class="stack bz-screen dd-screen bz-table">' +
-      '<div class="card bz-top bz-top--bar">' +
-      '<div class="bz-top-row">' +
-      '<span class="bz-phase">' + escapeHtml(ddPhaseLabel(phase)) + '</span>' +
-      '<span class="bz-turn bz-turn--me">' + escapeHtml(ddName(room, turnMid)) + 'の ばん</span>' +
-      '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'ラウンドめ</span>' +
-      '<span class="bz-deckinfo"><span>場に <b>' + escapeHtml(String(ddFieldCount(room))) + '</b>まい</span></span>' +
-      '</div>' +
-      bbgFxToggleHtml() +
-      '</div>' +
-      // crocResult 中は場が必ず空（ひきとり済み）なので、テーブルでは場を省いて順位リストの高さにあてる。
-      (phase === 'crocResult' ? '' : '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>') +
-      '<div class="card dd-act">' + centerHtml + '</div>' +
+      '<div class="stack bz-screen dd-screen dd-simple bz-table">' +
+      '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
+      '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
+      ddLineHtml(room, '') +
       '<div class="bz-seats">' + seats + '</div>' +
-      '<div class="card bz-logbox">' + bzLogHtml(room, 10) + '</div>' +
       (isHost
         ? '<div class="row"><button type="button" id="ddHostForce" class="ghost">⚠ すすめる（だいり）</button>' +
           (lobbyId ? '<button type="button" id="ddAbortToLobby" class="ghost">ロビーへもどる</button>' : '') +
