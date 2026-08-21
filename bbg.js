@@ -12597,7 +12597,8 @@
   }
 
   // ワニのタップ順（croc 中は途中経過をはやい順に、crocResult は確定順。最遅に🐊印）。
-  function ddCrocOrderHtml(room) {
+  // extraHtml は同じ行の末尾に足すもの（プレイヤー画面の小さな「うちきる」）。
+  function ddCrocOrderHtml(room, extraHtml) {
     var phase = String((room && room.phase) || '');
     var rows = [];
     var loserMid = '';
@@ -12637,7 +12638,7 @@
         (isLoser ? '🐊' : '') +
         '</span>';
     }
-    return '<div class="dd-order">' + out + '</div>';
+    return '<div class="dd-order">' + out + (extraHtml || '') + '</div>';
   }
 
   // けっか（のこり枚数ランキング・共用HUDの .bz-rank を再利用）。
@@ -12741,18 +12742,19 @@
       }
     }
 
+    // 並び: 番手（カードの上）→ 3つの場 → 正方形のタップエリア → のこり枚数 → ワニのタップ順
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple">' +
       '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
+      ddLineHtml(room, playerId) +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       '<div class="dd-tapzone' + zoneCls + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
       '<div class="dd-count"><span>のこり</span><b>' + escapeHtml(String(me.deck.length)) + '</b><span>まい</span></div>' +
-      ddLineHtml(room, playerId) +
-      ddCrocOrderHtml(room) +
-      (phase === 'croc' && canOperate
-        ? '<div class="dd-rescue"><button type="button" id="ddCrocCloseBtn" class="ghost">うちきる</button></div>'
-        : '') +
+      ddCrocOrderHtml(
+        room,
+        phase === 'croc' && canOperate ? '<button type="button" id="ddCrocCloseBtn" class="ghost dd-ord-btn">うちきる</button>' : ''
+      ) +
       '</div>'
     );
   }
@@ -13280,8 +13282,8 @@
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple bz-table">' +
       '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
-      '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       ddLineHtml(room, '') +
+      '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       ddCrocOrderHtml(room) +
       '<div class="bz-seats">' + seats + '</div>' +
       (isHost
