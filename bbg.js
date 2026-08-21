@@ -1036,7 +1036,7 @@
   function cleanupOldRooms() {
     if (!shouldRunCleanup()) return Promise.resolve();
 
-    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'oekakiRelayRooms', 'bohnanzaRooms', 'lobbies'];
+    var paths = ['rooms', 'codenamesRooms', 'loveletterRooms', 'hanninRooms', 'oekakiRooms', 'oekakiRelayRooms', 'bohnanzaRooms', 'dodelidoRooms', 'lobbies'];
     var cutoff = nowMs() - CLEANUP_MAX_AGE_MS;
 
     return firebaseReady()
@@ -11884,6 +11884,1600 @@
     });
   }
 
+  // -------------------- dodelido (ドデリド) --------------------
+  // 対面プレイ補助。コール（宣言）は口頭で行い、アプリは「カード・3つの場・正解表示・ワニの反射しょうぶ」を受け持つ。
+  // DBパス: dodelidoRooms/<roomId>（RTDBルールの追記が必要）。
+  // 進行: flip（手番が1まいめくる）→ call（口頭コール→こたえあわせ→せいかい/おてつき）
+  //       └ ワニが出たら croc（全員が🐊ボタンをたたく）→ crocResult（いちばん遅い人が全ひきとり）
+  // せいかいなら つぎの人へ。おてつき/ワニひきとりの人が あたらしいラウンドを はじめる（公式ルール準拠）。
+  // ステータスバー/ログ/ランキングは bohnanza の共用HUDクラス（.bz-top/.bz-log/.bz-rank 等）を再利用する。
+  var DD_LOG_MAX = 40;
+  var DD_CROC_COPIES = 5; // ワニは全部で5まい
+  var DD_COPIES_PER_CARD = 4; // 各「いろ×どうぶつ」は4まいずつ（5色×5種×4=100 + ワニ5 = 105まい）
+
+  var DD_ANIMAL_DEFS = {
+    flamingo: { name: 'フラミンゴ', emoji: '🦩' },
+    penguin: { name: 'ペンギン', emoji: '🐧' },
+    turtle: { name: 'カメ', emoji: '🐢' },
+    camel: { name: 'ラクダ', emoji: '🐫' },
+    zebra: { name: 'シマウマ', emoji: '🦓' }
+  };
+  var DD_ANIMAL_KEYS = ['flamingo', 'penguin', 'turtle', 'camel', 'zebra'];
+
+  var DD_COLOR_DEFS = {
+    white: { name: 'しろ', color: '#e8eaf0' },
+    pink: { name: 'ピンク', color: '#f472b6' },
+    yellow: { name: 'きいろ', color: '#facc15' },
+    blue: { name: 'あお', color: '#3b82f6' },
+    green: { name: 'みどり', color: '#22c55e' }
+  };
+  var DD_COLOR_KEYS = ['white', 'pink', 'yellow', 'blue', 'green'];
+
+  var DD_CROC_KEY = 'croc';
+
+  // 画像が無いカードを覚えておく（bohnanza と同じ仕組み）。
+  var ddImgMissing = {};
+
+  function ddRoomPath(roomId) {
+    return 'dodelidoRooms/' + roomId;
+  }
+
+  function subscribeDodelidoRoom(roomId, cb) {
+    return onValue(ddRoomPath(roomId), cb);
+  }
+
+  // カードは 'いろ:どうぶつ' の文字列（ワニだけ 'croc'）。
+  function ddCardInfo(key) {
+    var k = String(key || '');
+    if (k === DD_CROC_KEY) {
+      return { croc: true, color: '', animal: '', name: 'ワニ！', emoji: '🐊', colorName: 'たたけ！', frame: '#ff5a6a' };
+    }
+    var parts = k.split(':');
+    var c = String(parts[0] || '');
+    var a = String(parts[1] || '');
+    var cd = DD_COLOR_DEFS[c] || { name: c || '-', color: '#6b7280' };
+    var ad = DD_ANIMAL_DEFS[a] || { name: a || '-', emoji: '❔' };
+    return { croc: false, color: c, animal: a, name: ad.name, emoji: ad.emoji, colorName: cd.name, frame: cd.color };
+  }
+
+  function ddBuildDeck() {
+    var pool = [];
+    for (var c = 0; c < DD_COLOR_KEYS.length; c++) {
+      for (var a = 0; a < DD_ANIMAL_KEYS.length; a++) {
+        for (var n = 0; n < DD_COPIES_PER_CARD; n++) pool.push(DD_COLOR_KEYS[c] + ':' + DD_ANIMAL_KEYS[a]);
+      }
+    }
+    for (var w = 0; w < DD_CROC_COPIES; w++) pool.push(DD_CROC_KEY);
+    return bzShuffle(pool);
+  }
+
+  function ddNormCards(list) {
+    var out = [];
+    var src = Array.isArray(list) ? list : [];
+    for (var i = 0; i < src.length; i++) {
+      var v = String(src[i] || '');
+      if (v) out.push(v);
+    }
+    return out;
+  }
+
+  // RTDBは空配列がキーごと消える／まばらな配列はオブジェクトで返ることがあるので、
+  // 3つの場は読むたびに必ず「3本の配列」へ整える。
+  function ddNormPiles(piles) {
+    var src = piles && typeof piles === 'object' ? piles : {};
+    var out = [];
+    for (var i = 0; i < 3; i++) out.push(ddNormCards(src[i]));
+    return out;
+  }
+
+  function ddNormTaps(taps) {
+    var out = {};
+    var src = taps && typeof taps === 'object' ? taps : {};
+    var keys = Object.keys(src);
+    for (var i = 0; i < keys.length; i++) {
+      var mid = String(keys[i] || '');
+      if (!mid) continue;
+      var ms = parseIntSafe(src[mid], -1);
+      if (ms < 0) ms = 0;
+      out[mid] = ms;
+    }
+    return out;
+  }
+
+  function ddPlayerOf(room, mid) {
+    var p = (room && room.players && room.players[String(mid || '')]) || {};
+    return { name: String(p.name || ''), deck: ddNormCards(p.deck) };
+  }
+
+  function ddName(room, mid) {
+    try {
+      var nm = String((room && room.players && room.players[String(mid || '')] && room.players[String(mid || '')].name) || '');
+      return nm || String(mid || '');
+    } catch (e) {
+      return String(mid || '');
+    }
+  }
+
+  function ddTurnMid(room) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    if (!order.length) return '';
+    var i = parseIntSafe(room && room.turnIdx, 0) || 0;
+    if (i < 0 || i >= order.length) i = 0;
+    return String(order[i] || '');
+  }
+
+  function ddPhaseLabel(phase) {
+    var p = String(phase || '');
+    if (p === 'flip') return 'めくる';
+    if (p === 'call') return 'コール';
+    if (p === 'croc') return 'ワニ！';
+    if (p === 'crocResult') return 'ワニの けっか';
+    if (p === 'result') return 'けっか';
+    return p;
+  }
+
+  function ddMsLabel(ms) {
+    var v = parseIntSafe(ms, 0) || 0;
+    if (v < 0) v = 0;
+    return (v / 1000).toFixed(2) + 'びょう';
+  }
+
+  // 3つの場の いちばん上のカードを集める（からの場は数えない）。
+  function ddTops(piles) {
+    var ps = ddNormPiles(piles);
+    var out = [];
+    for (var i = 0; i < 3; i++) {
+      if (ps[i].length) out.push(String(ps[i][ps[i].length - 1] || ''));
+    }
+    return out;
+  }
+
+  function ddFieldCount(room) {
+    var ps = ddNormPiles(room && room.piles);
+    return ps[0].length + ps[1].length + ps[2].length;
+  }
+
+  // 正解のコールを求める（公式ルール準拠・純関数なので全端末で同じ答えになる）。
+  // ・同じ特徴（いろ or どうぶつ）が2まい以上 → 「一致」。両方一致なら多いほう、同数なら「ドデリド」
+  // ・どちらも一致しなければ「なし」
+  // ・見えているカメ1まいにつき、頭に「オー」を付ける
+  function ddComputeCall(piles) {
+    var tops = ddTops(piles);
+    var colorCount = {};
+    var animalCount = {};
+    var turtles = 0;
+    for (var i = 0; i < tops.length; i++) {
+      var info = ddCardInfo(tops[i]);
+      if (info.croc) continue; // ワニは即しょうぶになるので、コール計算には出てこない
+      if (info.color) colorCount[info.color] = (colorCount[info.color] || 0) + 1;
+      if (info.animal) animalCount[info.animal] = (animalCount[info.animal] || 0) + 1;
+      if (info.animal === 'turtle') turtles++;
+    }
+    var bestColor = '';
+    var bestColorN = 0;
+    var ckeys = Object.keys(colorCount);
+    for (var c = 0; c < ckeys.length; c++) {
+      if (colorCount[ckeys[c]] > bestColorN) {
+        bestColorN = colorCount[ckeys[c]];
+        bestColor = ckeys[c];
+      }
+    }
+    var bestAnimal = '';
+    var bestAnimalN = 0;
+    var akeys = Object.keys(animalCount);
+    for (var a = 0; a < akeys.length; a++) {
+      if (animalCount[akeys[a]] > bestAnimalN) {
+        bestAnimalN = animalCount[akeys[a]];
+        bestAnimal = akeys[a];
+      }
+    }
+    var colorHit = bestColorN >= 2 ? bestColor : '';
+    var animalHit = bestAnimalN >= 2 ? bestAnimal : '';
+
+    var kind = 'none';
+    var word = 'なし';
+    if (colorHit && animalHit) {
+      if (bestColorN > bestAnimalN) {
+        kind = 'color';
+        word = String((DD_COLOR_DEFS[colorHit] || {}).name || colorHit);
+      } else if (bestAnimalN > bestColorN) {
+        kind = 'animal';
+        word = String((DD_ANIMAL_DEFS[animalHit] || {}).name || animalHit);
+      } else {
+        kind = 'dodelido';
+        word = 'ドデリド';
+      }
+    } else if (colorHit) {
+      kind = 'color';
+      word = String((DD_COLOR_DEFS[colorHit] || {}).name || colorHit);
+    } else if (animalHit) {
+      kind = 'animal';
+      word = String((DD_ANIMAL_DEFS[animalHit] || {}).name || animalHit);
+    }
+
+    var prefix = '';
+    for (var t = 0; t < turtles; t++) prefix += 'オー ';
+    return {
+      kind: kind,
+      word: word,
+      turtles: turtles,
+      colorHit: colorHit,
+      colorN: bestColorN,
+      animalHit: animalHit,
+      animalN: bestAnimalN,
+      text: prefix + word + '！'
+    };
+  }
+
+  // ルーム全体を安全な形にコピーする（トランザクション内の作業用）。
+  function ddCloneRoom(room) {
+    var st = assign({}, room || {});
+    st.phase = String((room && room.phase) || '');
+    st.order = Array.isArray(room && room.order) ? room.order.slice() : [];
+    st.piles = ddNormPiles(room && room.piles);
+    st.log = Array.isArray(room && room.log) ? room.log.slice() : [];
+    st.turnIdx = parseIntSafe(room && room.turnIdx, 0) || 0;
+    st.turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
+    st.pileIdx = parseIntSafe(room && room.pileIdx, 0) || 0;
+    st.revealed = !!(room && room.revealed);
+    st.croc = room && room.croc ? { startAt: parseIntSafe(room.croc.startAt, 0) || 0, taps: ddNormTaps(room.croc.taps) } : null;
+    st.crocResult = room && room.crocResult ? room.crocResult : null;
+
+    var players = {};
+    var src = room && room.players && typeof room.players === 'object' ? room.players : {};
+    var keys = Object.keys(src);
+    for (var k = 0; k < keys.length; k++) {
+      var pid = String(keys[k] || '');
+      if (!pid) continue;
+      var p = src[pid] || {};
+      players[pid] = { name: String(p.name || ''), deck: ddNormCards(p.deck) };
+    }
+    st.players = players;
+    return st;
+  }
+
+  function ddPushLog(st, line) {
+    var text = String(line || '');
+    if (!text) return;
+    var log = Array.isArray(st.log) ? st.log.slice() : [];
+    log.push(text);
+    if (log.length > DD_LOG_MAX) log = log.slice(log.length - DD_LOG_MAX);
+    st.log = log;
+  }
+
+  // 共通トランザクション（bzTxn と同型）。fn が false を返したら room をそのまま返す（no-op）。
+  function ddTxn(roomId, fn, out) {
+    return dbRef(ddRoomPath(roomId))
+      .then(function (ref) {
+        return ref.transaction(
+          function (room) {
+            if (out) out.applied = false;
+            if (!room) return room;
+            if (String(room.phase || '') === 'result') return room;
+            var st = ddCloneRoom(room);
+            var ok = false;
+            try {
+              ok = fn(st);
+            } catch (e) {
+              ok = false;
+            }
+            if (!ok) return room;
+            if (out) out.applied = true;
+            return st;
+          },
+          undefined,
+          false
+        );
+      })
+      .then(function (res) {
+        return res.snapshot.val();
+      });
+  }
+
+  function createDodelidoRoom(roomId, lobbyId, members) {
+    var list = Array.isArray(members) ? members : [];
+    var order = [];
+    var names = {};
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i] || {};
+      var mid = String(m.mid || '');
+      if (!mid) continue;
+      if (names[mid] !== undefined) continue;
+      order.push(mid);
+      var nm = String(m.name || '').trim();
+      names[mid] = nm || '-';
+    }
+    if (order.length < 2) return Promise.reject(new Error('ドデリドは2人からです'));
+    if (order.length > 6) return Promise.reject(new Error('ドデリドは6人までです'));
+
+    var deck = ddBuildDeck();
+    var per = Math.floor(deck.length / order.length);
+    var players = {};
+    for (var pi = 0; pi < order.length; pi++) {
+      var pid = order[pi];
+      var hand = [];
+      for (var h = 0; h < per; h++) hand.push(String(deck.shift() || ''));
+      players[pid] = { name: names[pid], deck: hand };
+    }
+    var leftover = deck.length; // あまりは はこへ（ゲームから除外）
+
+    var room = {
+      createdAt: serverNowMs(),
+      lobbyId: String(lobbyId || ''),
+      phase: 'flip',
+      order: order,
+      turnIdx: 0,
+      turnCount: 1,
+      pileIdx: 0,
+      piles: null,
+      revealed: false,
+      croc: null,
+      crocResult: null,
+      players: players,
+      result: null,
+      log: [
+        'ゲームかいし！ ひとり ' + String(per) + 'まいずつ' + (leftover ? '（あまり' + String(leftover) + 'まいは はこへ）' : ''),
+        String(names[order[0]] || '') + 'の ばん'
+      ]
+    };
+    return setValue(ddRoomPath(roomId), room);
+  }
+
+  // 場の3山ぜんぶを その人の山の下（配列の末尾）へ。ひきとった枚数を返す。
+  function ddTakeAllPiles(st, mid) {
+    var pid = String(mid || '');
+    var players = assign({}, st.players || {});
+    var p = players[pid];
+    if (!p) return 0;
+    var piles = ddNormPiles(st.piles);
+    var taken = [];
+    for (var i = 0; i < 3; i++) {
+      for (var k = 0; k < piles[i].length; k++) taken.push(String(piles[i][k] || ''));
+    }
+    players[pid] = assign({}, p, { deck: ddNormCards(p.deck).concat(taken) });
+    st.players = players;
+    st.piles = [[], [], []];
+    st.pileIdx = 0;
+    return taken.length;
+  }
+
+  // つぎのラウンドへ（advance=true でつぎの人、false で同じ人＝おてつき/ワニひきとりの人）。
+  function ddNextTurn(st, advance) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    if (!order.length) return false;
+    var idx = parseIntSafe(st.turnIdx, 0) || 0;
+    if (idx < 0 || idx >= order.length) idx = 0;
+    if (advance) idx = (idx + 1) % order.length;
+    st.turnIdx = idx;
+    st.turnCount = (parseIntSafe(st.turnCount, 0) || 0) + 1;
+    st.phase = 'flip';
+    st.revealed = false;
+    st.croc = null;
+    st.crocResult = null;
+    ddPushLog(st, ddName(st, order[idx]) + 'の ばん');
+    return true;
+  }
+
+  // ゲーム終了。のこり枚数の少ない順（勝者=0まい）でランキングを作る。
+  function ddFinishGame(st, winnerMid) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    var rows = [];
+    for (var i = 0; i < order.length; i++) {
+      var pid = String(order[i] || '');
+      if (!pid) continue;
+      var p = ddPlayerOf(st, pid);
+      rows.push({ mid: pid, name: String(p.name || pid), cards: p.deck.length, rank: 0 });
+    }
+    rows.sort(function (a, b) {
+      return (a.cards || 0) - (b.cards || 0);
+    });
+    for (var r = 0; r < rows.length; r++) {
+      if (r > 0 && rows[r].cards === rows[r - 1].cards) rows[r].rank = rows[r - 1].rank;
+      else rows[r].rank = r + 1;
+    }
+    st.phase = 'result';
+    st.revealed = false;
+    st.croc = null;
+    st.crocResult = null;
+    st.result = { winnerMid: String(winnerMid || ''), ranking: rows };
+    ddPushLog(st, ddName(st, winnerMid) + 'が 出しきって かち！');
+    return true;
+  }
+
+  // めくり本体（flip → call / croc）。ddFlip と ddHostForce から使う。
+  function ddFlipInto(st) {
+    var pid = ddTurnMid(st);
+    var players = assign({}, st.players || {});
+    var p = players[pid];
+    if (!p) return false;
+    var deck = ddNormCards(p.deck);
+    if (!deck.length) return false;
+    var card = String(deck.shift() || '');
+    players[pid] = assign({}, p, { deck: deck });
+    st.players = players;
+
+    var piles = ddNormPiles(st.piles);
+    var pi = parseIntSafe(st.pileIdx, 0) || 0;
+    if (pi < 0 || pi > 2) pi = 0;
+    piles[pi] = piles[pi].concat([card]);
+    st.piles = piles;
+    st.pileIdx = (pi + 1) % 3;
+
+    if (card === DD_CROC_KEY) {
+      st.phase = 'croc';
+      st.croc = { startAt: serverNowMs(), taps: {} };
+      st.crocResult = null;
+      ddPushLog(st, '🐊 ワニ！ ぜんいん たたけ！');
+      return true;
+    }
+    st.phase = 'call';
+    st.revealed = false;
+    return true;
+  }
+
+  // 手番の人が1まいめくる。
+  function ddFlip(roomId, mid) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'flip') return false;
+      var pid = String(mid || '');
+      if (!pid || pid !== ddTurnMid(st)) return false;
+      return ddFlipInto(st);
+    });
+  }
+
+  // こたえあわせ（めくった人が口頭でコールしてから、だれでも押せる）。
+  function ddReveal(roomId) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'call') return false;
+      if (st.revealed) return false;
+      st.revealed = true;
+      return true;
+    });
+  }
+
+  // せいかい → つぎの人へ（山が0まいになっていたら その場で勝ち）。
+  function ddJudgeOk(roomId) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'call' || !st.revealed) return false;
+      var pid = ddTurnMid(st);
+      var call = ddComputeCall(st.piles);
+      var p = st.players && st.players[pid];
+      var deckLen = ddNormCards(p && p.deck).length;
+      ddPushLog(st, ddName(st, pid) + '「' + call.text + '」→ せいかい！');
+      if (deckLen <= 0) return ddFinishGame(st, pid);
+      return ddNextTurn(st, true);
+    });
+  }
+
+  // おてつき（まちがい・言いよどみ・おそすぎ）→ 場の全カードをひきとって、同じ人から さいかい。
+  function ddJudgeMiss(roomId) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'call' || !st.revealed) return false;
+      var pid = ddTurnMid(st);
+      var call = ddComputeCall(st.piles);
+      var taken = ddTakeAllPiles(st, pid);
+      ddPushLog(st, ddName(st, pid) + 'が おてつき！（せいかいは「' + call.text + '」）場の' + String(taken) + 'まいを ひきとり');
+      return ddNextTurn(st, false);
+    });
+  }
+
+  // ワニの決着。closed=true は「うちきり」（たたいていない人が ひきとり役）。
+  function ddResolveCroc(st, closed) {
+    var order = Array.isArray(st.order) ? st.order : [];
+    var taps = ddNormTaps(st.croc && st.croc.taps);
+    var rows = [];
+    for (var i = 0; i < order.length; i++) {
+      var pid = String(order[i] || '');
+      if (!pid) continue;
+      var has = taps[pid] !== undefined;
+      rows.push({ mid: pid, ms: has ? taps[pid] : -1, tapped: has });
+    }
+    if (!rows.length) return false;
+    // はやい順。たたいていない人は いちばん下（＝ひきとり役の候補）。
+    rows.sort(function (a, b) {
+      if (a.tapped !== b.tapped) return a.tapped ? -1 : 1;
+      return (a.ms || 0) - (b.ms || 0);
+    });
+    var loserMid = String(rows[rows.length - 1].mid || '');
+    var flipper = ddTurnMid(st);
+    var taken = ddTakeAllPiles(st, loserMid);
+    ddPushLog(st, '🐊 ' + ddName(st, loserMid) + 'が いちばん おそかった…（' + String(taken) + 'まい ひきとり）');
+
+    // ワニが さいごの1まいだった人は、ひきとり役でなければ その場で勝ち。
+    var fp = st.players && st.players[flipper];
+    if (flipper && flipper !== loserMid && ddNormCards(fp && fp.deck).length === 0) {
+      st.croc = null;
+      st.crocResult = null;
+      return ddFinishGame(st, flipper);
+    }
+
+    // ひきとった人から さいかい（公式: いちばん遅かった人が つぎのラウンドを はじめる）。
+    var li = order.indexOf(loserMid);
+    if (li >= 0) st.turnIdx = li;
+    st.phase = 'crocResult';
+    st.crocResult = { loserMid: loserMid, closed: !!closed, ranking: rows };
+    st.croc = null;
+    return true;
+  }
+
+  // ワニをたたく。elapsedMs は押した瞬間に端末側で serverNowMs()-startAt を計算して渡す。
+  function ddCrocTap(roomId, mid, elapsedMs) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'croc') return false;
+      var pid = String(mid || '');
+      var order = Array.isArray(st.order) ? st.order : [];
+      if (order.indexOf(pid) < 0) return false;
+      var croc = st.croc || { startAt: 0, taps: {} };
+      var taps = assign({}, croc.taps || {});
+      if (taps[pid] !== undefined) return false;
+      var ms = parseIntSafe(elapsedMs, 0) || 0;
+      if (ms < 0) ms = 0;
+      if (ms > 99000) ms = 99000;
+      taps[pid] = ms;
+      st.croc = { startAt: parseIntSafe(croc.startAt, 0) || 0, taps: taps };
+      // ぜんいん たたいたら そのまま けっかへ。
+      for (var i = 0; i < order.length; i++) {
+        if (taps[String(order[i] || '')] === undefined) return true;
+      }
+      return ddResolveCroc(st, false);
+    });
+  }
+
+  // うちきり（端末が動かない人がいるとき用）。
+  function ddCrocClose(roomId) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'croc') return false;
+      return ddResolveCroc(st, true);
+    });
+  }
+
+  // ワニのけっかを見おわって つぎへ（ひきとった人から さいかい）。
+  function ddCrocNext(roomId) {
+    return ddTxn(roomId, function (st) {
+      if (String(st.phase || '') !== 'crocResult') return false;
+      return ddNextTurn(st, false);
+    });
+  }
+
+  // ホスト救済：本人の端末が動かないときに、代理でフェーズを進める。
+  function ddHostForce(roomId) {
+    var out = { applied: false };
+    return ddTxn(roomId, function (st) {
+      var phase = String(st.phase || '');
+      if (phase === 'flip') {
+        if (!ddFlipInto(st)) return false;
+        ddPushLog(st, '（だいり）カードを めくりました');
+        return true;
+      }
+      if (phase === 'call') {
+        if (!st.revealed) {
+          st.revealed = true;
+          ddPushLog(st, '（だいり）こたえを ひらきました');
+          return true;
+        }
+        var pid = ddTurnMid(st);
+        var p = st.players && st.players[pid];
+        var deckLen = ddNormCards(p && p.deck).length;
+        ddPushLog(st, '（だいり）せいかい として すすめました');
+        if (deckLen <= 0) return ddFinishGame(st, pid);
+        return ddNextTurn(st, true);
+      }
+      if (phase === 'croc') return ddResolveCroc(st, true);
+      if (phase === 'crocResult') return ddNextTurn(st, false);
+      return false;
+    }, out).then(function () {
+      return !!out.applied;
+    });
+  }
+
+  // -------------------- dodelido: 表示部品 --------------------
+
+  function ddCardImgSrc(key) {
+    var k = String(key || '');
+    var file = k === DD_CROC_KEY ? 'croc' : k.replace(':', '_');
+    var src = './assets/dodelido/' + file + '.png';
+    try {
+      var v = getCacheBusterParam();
+      if (v) src += '?v=' + encodeURIComponent(String(v));
+    } catch (e) {
+      // ignore
+    }
+    return src;
+  }
+
+  // カード1まい。プレースホルダー（色わく+絵文字+どうぶつ名+色名）の上に画像を重ねる。
+  function ddCardHtml(key, extraCls, cornerHtml) {
+    var k = String(key || '');
+    var info = ddCardInfo(k);
+    var img = '';
+    if (k && !ddImgMissing[k]) {
+      img =
+        '<img class="dd-card-img" data-dd-img="' + escapeHtml(k) + '" alt="' + escapeHtml(String(info.name || k)) + '" src="' + escapeHtml(ddCardImgSrc(k)) + '" />';
+    }
+    return (
+      '<div class="dd-card ' + escapeHtml(String(extraCls || '')) + (info.croc ? ' dd-card--croc' : '') + '" style="--dd-col:' + escapeHtml(String(info.frame || '#6b7280')) + '">' +
+      '<div class="dd-card-ph">' +
+      '<div class="dd-card-emoji">' + escapeHtml(String(info.emoji || '')) + '</div>' +
+      '<div class="dd-card-name">' + escapeHtml(String(info.name || k)) + '</div>' +
+      '<div class="dd-card-color">' + escapeHtml(String(info.colorName || '')) + '</div>' +
+      '</div>' +
+      img +
+      (cornerHtml || '') +
+      '</div>'
+    );
+  }
+
+  // render 後に呼ぶ。画像の load/error を見て表示を切り替える（bzBindCardImages と同型）。
+  function ddBindCardImages(rootEl) {
+    try {
+      var imgs = rootEl && rootEl.querySelectorAll ? rootEl.querySelectorAll('img.dd-card-img') : [];
+      for (var i = 0; i < imgs.length; i++) {
+        (function (im) {
+          if (!im || im.__dd_img_bound) return;
+          im.__dd_img_bound = true;
+          var key = String(im.getAttribute('data-dd-img') || '');
+          function markMissing() {
+            if (key) ddImgMissing[key] = true;
+            try {
+              if (im.parentNode) im.parentNode.removeChild(im);
+            } catch (e1) {
+              // ignore
+            }
+          }
+          if (im.complete) {
+            if (im.naturalWidth > 0) {
+              try {
+                if (im.classList) im.classList.add('is-loaded');
+              } catch (e2) {
+                // ignore
+              }
+              return;
+            }
+            markMissing();
+            return;
+          }
+          im.addEventListener('load', function () {
+            try {
+              if (im.classList) im.classList.add('is-loaded');
+            } catch (e3) {
+              // ignore
+            }
+          });
+          im.addEventListener('error', markMissing);
+        })(imgs[i]);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 3つの場。call/croc 中は「いま出た」場、flip 中は「つぎ ここ」の場を強調する。
+  function ddPilesHtml(room) {
+    var piles = ddNormPiles(room && room.piles);
+    var phase = String((room && room.phase) || '');
+    var pi = parseIntSafe(room && room.pileIdx, 0) || 0;
+    if (pi < 0 || pi > 2) pi = 0;
+    var lastPile = (pi + 2) % 3;
+    var showLast = phase === 'call' || phase === 'croc' || phase === 'crocResult';
+    var out = '';
+    for (var i = 0; i < 3; i++) {
+      var top = piles[i].length ? String(piles[i][piles[i].length - 1] || '') : '';
+      var isLast = showLast && i === lastPile && piles[i].length > 0;
+      var isNext = phase === 'flip' && i === pi;
+      out +=
+        '<div class="dd-pile' + (isLast ? ' dd-pile--last' : '') + (isNext ? ' dd-pile--next' : '') + '">' +
+        (top ? ddCardHtml(top, '') : '<div class="dd-card dd-card--empty"><div class="dd-card-ph"><div class="dd-card-emoji">…</div></div></div>') +
+        '<div class="dd-pile-info">やま' + escapeHtml(String(i + 1)) + '・' + escapeHtml(String(piles[i].length)) + 'まい</div>' +
+        (isNext ? '<div class="dd-pile-tag">つぎ ここ</div>' : '') +
+        (isLast ? '<div class="dd-pile-tag dd-pile-tag--new">いま出た</div>' : '') +
+        '</div>';
+    }
+    return '<div class="dd-piles">' + out + '</div>';
+  }
+
+  // 正解の表示（大きなコール + 内訳チップ）。
+  function ddAnswerHtml(room) {
+    var call = ddComputeCall(room && room.piles);
+    var chips = '';
+    if (call.colorHit) {
+      var cd = DD_COLOR_DEFS[call.colorHit] || { name: call.colorHit, color: '#6b7280' };
+      chips += '<span class="dd-chip" style="--dd-col:' + escapeHtml(String(cd.color)) + '">' + escapeHtml(String(cd.name)) + ' ×' + escapeHtml(String(call.colorN)) + '</span>';
+    }
+    if (call.animalHit) {
+      var ad = DD_ANIMAL_DEFS[call.animalHit] || { name: call.animalHit, emoji: '' };
+      chips += '<span class="dd-chip">' + escapeHtml(String(ad.emoji || '')) + escapeHtml(String(ad.name)) + ' ×' + escapeHtml(String(call.animalN)) + '</span>';
+    }
+    if (call.turtles) {
+      chips += '<span class="dd-chip dd-chip--turtle">🐢カメ ×' + escapeHtml(String(call.turtles)) + ' → あたまに「オー」</span>';
+    }
+    if (!chips) chips = '<span class="dd-chip dd-chip--none">そろい なし</span>';
+    return '<div class="dd-answer">' + escapeHtml(call.text) + '</div><div class="dd-chiprow">' + chips + '</div>';
+  }
+
+  // のこり枚数チップ（プレイヤー画面・テーブルで共用）。
+  function ddOthersHtml(room, meMid) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var turnMid = ddTurnMid(room);
+    var out = '';
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var p = ddPlayerOf(room, mid);
+      out +=
+        '<span class="dd-other' + (mid === turnMid ? ' dd-other--turn' : '') + '">' +
+        (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + (meMid && mid === String(meMid) ? '（あなた）' : '') +
+        ' <b>' + escapeHtml(String(p.deck.length)) + '</b>まい</span>';
+    }
+    return '<div class="dd-others">' + out + '</div>';
+  }
+
+  // けっか（のこり枚数ランキング・共用HUDの .bz-rank を再利用）。
+  function ddRankingHtml(room, meMid) {
+    var r = (room && room.result && Array.isArray(room.result.ranking)) ? room.result.ranking : [];
+    if (!r.length) return '';
+    var out = '';
+    for (var i = 0; i < r.length; i++) {
+      var row = r[i] || {};
+      var rank = parseIntSafe(row.rank, i + 1) || i + 1;
+      var medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '　';
+      var isMe = meMid && String(row.mid || '') === String(meMid);
+      var cards = parseIntSafe(row.cards, 0) || 0;
+      out +=
+        '<div class="bz-rank-row' + (rank === 1 ? ' bz-rank-row--top' : '') + (isMe ? ' bz-rank-row--me' : '') + '">' +
+        '<span class="bz-rank-no">' + escapeHtml(String(medal)) + String(rank) + 'い</span>' +
+        '<span class="bz-rank-name">' + escapeHtml(String(row.name || row.mid || '')) + (isMe ? '<em>あなた</em>' : '') + '</span>' +
+        '<span class="bz-rank-coins">' + (cards === 0 ? 'あがり🎉' : 'のこり' + escapeHtml(String(cards)) + 'まい') + '</span>' +
+        '</div>';
+    }
+    return '<div class="bz-rank">' + out + '</div>';
+  }
+
+  // ワニのタップ状況（croc中）とけっか（crocResult）の共通部品。
+  function ddCrocListHtml(room) {
+    var cr = (room && room.crocResult) || {};
+    var rows = Array.isArray(cr.ranking) ? cr.ranking : [];
+    var out = '';
+    for (var i = 0; i < rows.length; i++) {
+      var rr = rows[i] || {};
+      var isLoser = String(rr.mid || '') === String(cr.loserMid || '');
+      out +=
+        '<div class="dd-crocrow' + (isLoser ? ' dd-crocrow--loser' : '') + '">' +
+        '<span class="dd-crocrow-no">' + escapeHtml(String(i + 1)) + '</span>' +
+        '<span class="dd-crocrow-name">' + escapeHtml(ddName(room, rr.mid)) + '</span>' +
+        '<span class="dd-crocrow-ms">' + (rr.tapped ? escapeHtml(ddMsLabel(rr.ms)) : 'たたけず…') + (isLoser ? ' 🐊ひきとり' : '') + '</span>' +
+        '</div>';
+    }
+    return '<div class="dd-croclist">' + out + '</div>';
+  }
+
+  // -------------------- dodelido: プレイヤー画面 --------------------
+
+  function renderDodelidoPlayer(viewEl, opts) {
+    var room = opts.room;
+    var playerId = opts.playerId ? String(opts.playerId) : '';
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var isHost = !!opts.isHost;
+    var isTableGmDevice = !!opts.isTableGmDevice;
+    var canOperate = !isTableGmDevice;
+
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var phase = String((room && room.phase) || '');
+    var turnMid = ddTurnMid(room);
+    var isMyTurn = !!(playerId && String(turnMid) === playerId);
+    var me = ddPlayerOf(room, playerId);
+    var inGame = !!(playerId && room && room.players && room.players[playerId]);
+    var revealed = !!(room && room.revealed);
+
+    if (phase === 'result') {
+      var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
+      var backHtml = lobbyId && isHost ? '<button id="ddNextToLobby" class="primary">ロビーへもどる</button>' : '';
+      render(
+        viewEl,
+        '<div class="stack bz-screen dd-screen">' +
+        '<div class="bbg-title-row"><div class="big">🦩 けっか</div></div>' +
+        (winnerMid ? '<div class="dd-winline">🏆 ' + escapeHtml(ddName(room, winnerMid)) + 'の かち！</div>' : '') +
+        ddRankingHtml(room, playerId) +
+        '<div class="card">' + bzLogHtml(room, 8) + '</div>' +
+        (backHtml ? '<div class="row">' + backHtml + '</div>' : '') +
+        '</div>'
+      );
+      return;
+    }
+
+    if (!inGame && !isTableGmDevice) {
+      render(
+        viewEl,
+        '<div class="stack bz-screen dd-screen">' +
+        '<div class="big">🦩 ドデリド</div>' +
+        '<div class="card muted">このゲームに さんかしていません。</div>' +
+        bzLogHtml(room, 6) +
+        '</div>'
+      );
+      return;
+    }
+
+    // ---- 上部ステータス
+    var statusHtml =
+      '<div class="card bz-top">' +
+      '<div class="bz-top-row">' +
+      '<span class="bz-phase">' + escapeHtml(ddPhaseLabel(phase)) + '</span>' +
+      '<span class="bz-turn' + (isMyTurn ? ' bz-turn--me' : '') + '">' + escapeHtml(ddName(room, turnMid)) + 'の ばん</span>' +
+      '<span class="dd-remain">🎴のこり ' + escapeHtml(String(me.deck.length)) + 'まい</span>' +
+      '</div>' +
+      bbgFxToggleHtml() +
+      '</div>';
+
+    // ---- 3つの場
+    var pilesCard = '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>';
+
+    // ---- アクション
+    var actionHtml = '';
+    if (phase === 'flip') {
+      if (isMyTurn && canOperate) {
+        actionHtml =
+          '<div class="card dd-act">' +
+          '<div class="bz-hint">めくったら すぐ こえに だして コール！（まちがい・言いよどみ・3びょう こえたら おてつき）</div>' +
+          '<button type="button" id="ddFlipBtn" class="primary dd-flip-btn">🎴 めくる！</button>' +
+          '</div>';
+      } else {
+        actionHtml = '<div class="card dd-act muted">' + escapeHtml(ddName(room, turnMid)) + 'が めくります' + bbgWaitDotsHtml() + '</div>';
+      }
+    }
+
+    if (phase === 'call') {
+      if (!revealed) {
+        actionHtml =
+          '<div class="card dd-act">' +
+          '<div class="dd-answer dd-answer--hidden">❓</div>' +
+          '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が こえに だして コールしてから こたえあわせ</div>' +
+          (canOperate ? '<button type="button" id="ddRevealBtn" class="primary bz-btn">こたえあわせ</button>' : '') +
+          '</div>';
+      } else {
+        actionHtml =
+          '<div class="card dd-act">' +
+          ddAnswerHtml(room) +
+          (canOperate
+            ? '<div class="dd-judge">' +
+              '<button type="button" id="ddOkBtn" class="primary">せいかい！</button>' +
+              '<button type="button" id="ddMissBtn" class="ghost dd-miss-btn">おてつき…</button>' +
+              '</div>' +
+              '<div class="bz-note">おてつきは 場のカードを ぜんぶ ひきとって、おなじ人から さいかいします</div>'
+            : '') +
+          '</div>';
+      }
+    }
+
+    if (phase === 'croc') {
+      var taps = ddNormTaps(room && room.croc && room.croc.taps);
+      var myMs = playerId && taps[playerId] !== undefined ? taps[playerId] : -1;
+      var tapLine = '';
+      for (var ci = 0; ci < order.length; ci++) {
+        var cm = String(order[ci] || '');
+        if (!cm) continue;
+        var doneTap = taps[cm] !== undefined;
+        tapLine +=
+          '<span class="dd-tap ' + (doneTap ? 'dd-tap--done' : 'dd-tap--wait') + '">' +
+          escapeHtml(ddName(room, cm)) + (doneTap ? ' ' + escapeHtml(ddMsLabel(taps[cm])) : ' まだ…') + '</span>';
+      }
+      actionHtml =
+        '<div class="card dd-act">' +
+        (canOperate && inGame && myMs < 0
+          ? '<button type="button" id="ddCrocBtn" class="dd-croc-btn">🐊 たたけ！！</button>'
+          : myMs >= 0
+            ? '<div class="dd-croc-done">たたいた！（' + escapeHtml(ddMsLabel(myMs)) + '）</div>'
+            : '<div class="bz-hint">ぜんいんが 🐊を たたくのを まっています' + bbgWaitDotsHtml() + '</div>') +
+        '<div class="dd-tapline">' + tapLine + '</div>' +
+        (canOperate ? '<div class="row"><button type="button" id="ddCrocCloseBtn" class="ghost bz-btn">うちきる（たたけない人が いるとき）</button></div>' : '') +
+        '</div>';
+    }
+
+    if (phase === 'crocResult') {
+      var cr = (room && room.crocResult) || {};
+      actionHtml =
+        '<div class="card dd-act">' +
+        '<div class="bz-sec-title">🐊 ワニの けっか</div>' +
+        ddCrocListHtml(room) +
+        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が 場のカードを ひきとって、つぎのラウンドを はじめます</div>' +
+        (canOperate ? '<div class="row"><button type="button" id="ddCrocNextBtn" class="primary bz-btn">つぎへ</button></div>' : '') +
+        '</div>';
+    }
+
+    // ---- のこり枚数 + ログ
+    var othersCard = '<div class="card"><div class="bz-sec-title">のこり まいすう</div>' + ddOthersHtml(room, playerId) + '</div>';
+    var logCard = '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>';
+
+    render(
+      viewEl,
+      '<div class="stack bz-screen dd-screen bbg-wide">' +
+      '<div class="bbg-2col">' +
+      '<div class="bbg-col">' +
+      statusHtml +
+      pilesCard +
+      actionHtml +
+      '</div>' +
+      '<div class="bbg-col">' +
+      othersCard +
+      logCard +
+      '</div>' +
+      '</div>' +
+      '</div>'
+    );
+  }
+
+  function routeDodelidoPlayer(roomId, isHost) {
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (e0) {
+      lobbyId = '';
+    }
+
+    var isTableGmDevice = false;
+    try {
+      var qGm = parseQuery();
+      isTableGmDevice = !!(qGm && String(qGm.gmdev || '') === '1');
+    } catch (eGm) {
+      isTableGmDevice = false;
+    }
+
+    var playerId = '';
+    try {
+      var q1 = parseQuery();
+      playerId = q1 && q1.player ? String(q1.player) : '';
+    } catch (eP) {
+      playerId = '';
+    }
+    if (!playerId && lobbyId) {
+      try {
+        playerId = String(getOrCreateLobbyMemberId(lobbyId) || '');
+      } catch (eMid) {
+        playerId = '';
+      }
+    }
+
+    var lastRoom = null;
+    var ui = {
+      inFlight: false,
+      cancelled: false,
+      fxReady: false,
+      lastTurnKey: '',
+      lastSndKey: '',
+      lastResultKey: '',
+      lobbyReturnWatching: false,
+      lobbyUnsub: null
+    };
+
+    function redirectToLobby() {
+      if (!lobbyId) return;
+      ui.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = isHost ? 'lobby_host' : 'lobby_player';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (ui.lobbyReturnWatching) return;
+      ui.lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'dodelido' || rid !== String(roomId || '')) {
+              try {
+                if (ui.lobbyUnsub) ui.lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              ui.lobbyUnsub = null;
+              redirectToLobby();
+            }
+          });
+        })
+        .then(function (u2) {
+          ui.lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    function done() {
+      ui.inFlight = false;
+    }
+
+    function fail(e) {
+      bbgShowToast((e && e.message) || 'できませんでした');
+    }
+
+    function renderNow(room) {
+      lastRoom = room;
+      try {
+        if (lobbyId) ensureLobbyReturnWatcher();
+      } catch (eLW) {
+        // ignore
+      }
+
+      renderDodelidoPlayer(viewEl, {
+        roomId: roomId,
+        room: room,
+        playerId: playerId,
+        lobbyId: lobbyId,
+        isHost: isHost,
+        ui: ui,
+        isTableGmDevice: isTableGmDevice
+      });
+      ddBindCardImages(viewEl);
+      bindBbgFxToggle();
+
+      var phase = String((room && room.phase) || '');
+      var turnMid = ddTurnMid(room);
+
+      // 手番（ラウンド）が変わったら1回だけオーバーレイ
+      try {
+        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
+        if (ui.fxReady && phase !== 'result' && turnKey !== ui.lastTurnKey) {
+          bbgShowTurnOverlay(String(turnMid) === String(playerId) ? 'あなたの ばん！' : ddName(room, turnMid) + 'の ばん');
+        }
+        ui.lastTurnKey = turnKey;
+      } catch (eT) {
+        // ignore
+      }
+
+      // フェーズが動いたときの効果音（スナップショットごとに1回だけ）
+      try {
+        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase + '|' + (room && room.revealed ? '1' : '0');
+        if (ui.fxReady && sndKey !== ui.lastSndKey) {
+          if (phase === 'call' && !(room && room.revealed)) bbgFx.reveal();
+          else if (phase === 'call' && room && room.revealed) bbgFx.play();
+          else if (phase === 'croc') {
+            bbgFx.notify();
+            bbgFx.vibrate(200);
+          } else if (phase === 'crocResult') bbgFx.miss();
+        }
+        ui.lastSndKey = sndKey;
+      } catch (eS) {
+        // ignore
+      }
+
+      try {
+        var rKey = phase === 'result' ? 'result' : '';
+        if (ui.fxReady && rKey && rKey !== ui.lastResultKey) {
+          bbgFx.win();
+        }
+        ui.lastResultKey = rKey;
+      } catch (eR) {
+        // ignore
+      }
+      ui.fxReady = true;
+
+      if (isTableGmDevice) return;
+
+      bindPlayerActions();
+    }
+
+    function bindPlayerActions() {
+      var flipBtn = document.getElementById('ddFlipBtn');
+      if (flipBtn && !flipBtn.__dd_bound) {
+        flipBtn.__dd_bound = true;
+        flipBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          ui.inFlight = true;
+          bbgFx.reveal();
+          ddFlip(roomId, playerId).catch(fail).then(done, done);
+        });
+      }
+
+      var revealBtn = document.getElementById('ddRevealBtn');
+      if (revealBtn && !revealBtn.__dd_bound) {
+        revealBtn.__dd_bound = true;
+        revealBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          ui.inFlight = true;
+          bbgFx.play();
+          ddReveal(roomId).catch(fail).then(done, done);
+        });
+      }
+
+      var okBtn = document.getElementById('ddOkBtn');
+      if (okBtn && !okBtn.__dd_bound) {
+        okBtn.__dd_bound = true;
+        okBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          ui.inFlight = true;
+          bbgFx.hit();
+          ddJudgeOk(roomId).catch(fail).then(done, done);
+        });
+      }
+
+      var missBtn = document.getElementById('ddMissBtn');
+      if (missBtn && !missBtn.__dd_bound) {
+        missBtn.__dd_bound = true;
+        missBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          var nm = ddName(lastRoom, ddTurnMid(lastRoom));
+          if (!bbgConfirmClick(missBtn, nm + 'の おてつきに しますか？\n場のカードを ぜんぶ ひきとります。', 'おてつき')) return;
+          ui.inFlight = true;
+          bbgFx.miss();
+          ddJudgeMiss(roomId).catch(fail).then(done, done);
+        });
+      }
+
+      var crocBtn = document.getElementById('ddCrocBtn');
+      if (crocBtn && !crocBtn.__dd_bound) {
+        crocBtn.__dd_bound = true;
+        crocBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          var croc = lastRoom && lastRoom.croc ? lastRoom.croc : null;
+          var start = parseIntSafe(croc && croc.startAt, 0) || 0;
+          var ms = start > 0 ? serverNowMs() - start : 0;
+          if (ms < 0) ms = 0;
+          ui.inFlight = true;
+          bbgFx.tap();
+          ddCrocTap(roomId, playerId, ms).catch(fail).then(done, done);
+        });
+      }
+
+      var crocCloseBtn = document.getElementById('ddCrocCloseBtn');
+      if (crocCloseBtn && !crocCloseBtn.__dd_bound) {
+        crocCloseBtn.__dd_bound = true;
+        crocCloseBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          if (!bbgConfirmClick(crocCloseBtn, 'うちきりますか？\nまだ たたいていない人が 場のカードを ひきとります。', 'うちきる')) return;
+          ui.inFlight = true;
+          ddCrocClose(roomId).catch(fail).then(done, done);
+        });
+      }
+
+      var crocNextBtn = document.getElementById('ddCrocNextBtn');
+      if (crocNextBtn && !crocNextBtn.__dd_bound) {
+        crocNextBtn.__dd_bound = true;
+        crocNextBtn.addEventListener('click', function () {
+          if (ui.inFlight) return;
+          ui.inFlight = true;
+          bbgFx.play();
+          ddCrocNext(roomId).catch(fail).then(done, done);
+        });
+      }
+
+      var nextBtn = document.getElementById('ddNextToLobby');
+      if (nextBtn && !nextBtn.__dd_bound) {
+        nextBtn.__dd_bound = true;
+        nextBtn.addEventListener('click', function () {
+          if (!lobbyId) return;
+          nextBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobby();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              nextBtn.disabled = false;
+            });
+        });
+      }
+    }
+
+    firebaseReady()
+      .then(function () {
+        if (lobbyId) ensureLobbyReturnWatcher();
+        return subscribeDodelidoRoom(roomId, function (room) {
+          if (ui.cancelled) return;
+          if (!room) {
+            renderError(viewEl, '部屋が見つかりません');
+            return;
+          }
+          renderNow(room);
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+        // 購読が確立する前に画面遷移していたら、すぐに解除する。
+        if (ui.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      ui.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (e0p) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (e1p) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
+    });
+  }
+
+  // -------------------- dodelido: テーブル画面 --------------------
+
+  function renderDodelidoTable(viewEl, opts) {
+    var room = opts.room;
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var isHost = !!opts.isHost;
+
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var phase = String((room && room.phase) || '');
+    var turnMid = ddTurnMid(room);
+    var revealed = !!(room && room.revealed);
+
+    if (phase === 'result') {
+      var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
+      render(
+        viewEl,
+        '<div class="stack bz-screen dd-screen bz-table">' +
+        '<div class="bbg-title-row"><div class="big">🦩 ドデリド けっか</div></div>' +
+        (winnerMid ? '<div class="dd-winline">🏆 ' + escapeHtml(ddName(room, winnerMid)) + 'の かち！</div>' : '') +
+        ddRankingHtml(room, '') +
+        '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
+        (lobbyId ? '<div class="row"><button type="button" id="ddNextToLobby" class="primary">ロビーへもどる</button></div>' : '') +
+        '</div>'
+      );
+      return;
+    }
+
+    var seats = '';
+    var taps = phase === 'croc' ? ddNormTaps(room && room.croc && room.croc.taps) : null;
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var p = ddPlayerOf(room, mid);
+      var sub = '';
+      if (taps) {
+        sub = taps[mid] !== undefined ? '🐊 ' + escapeHtml(ddMsLabel(taps[mid])) : 'まだ たたいていない…';
+      }
+      seats +=
+        '<div class="card bz-seat' + (mid === turnMid ? ' bz-seat--turn' : '') + '">' +
+        '<div class="bz-seat-head">' +
+        '<span class="bz-seat-name">' + (mid === turnMid ? '▶ ' : '') + escapeHtml(p.name || mid) + '</span>' +
+        '<span class="dd-remain">' + escapeHtml(String(p.deck.length)) + 'まい</span>' +
+        '</div>' +
+        (sub ? '<div class="bz-seat-cnt">' + sub + '</div>' : '') +
+        '</div>';
+    }
+
+    var centerHtml = '';
+    if (phase === 'flip') {
+      centerHtml = '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が めくります' + bbgWaitDotsHtml() + '</div>';
+    } else if (phase === 'call' && !revealed) {
+      centerHtml =
+        '<div class="dd-answer dd-answer--hidden">❓</div>' +
+        '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（参加者の端末で こたえあわせ）</div>';
+    } else if (phase === 'call' && revealed) {
+      centerHtml = ddAnswerHtml(room);
+    } else if (phase === 'croc') {
+      centerHtml = '<div class="dd-answer">🐊 たたけ！！</div>';
+    } else if (phase === 'crocResult') {
+      var cr = (room && room.crocResult) || {};
+      centerHtml =
+        ddCrocListHtml(room) +
+        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が ひきとって さいかい（参加者の端末で「つぎへ」）</div>';
+    }
+
+    render(
+      viewEl,
+      '<div class="stack bz-screen dd-screen bz-table">' +
+      '<div class="card bz-top bz-top--bar">' +
+      '<div class="bz-top-row">' +
+      '<span class="bz-phase">' + escapeHtml(ddPhaseLabel(phase)) + '</span>' +
+      '<span class="bz-turn bz-turn--me">' + escapeHtml(ddName(room, turnMid)) + 'の ばん</span>' +
+      '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'ラウンドめ</span>' +
+      '<span class="bz-deckinfo"><span>場に <b>' + escapeHtml(String(ddFieldCount(room))) + '</b>まい</span></span>' +
+      '</div>' +
+      bbgFxToggleHtml() +
+      '</div>' +
+      // crocResult 中は場が必ず空（ひきとり済み）なので、テーブルでは場を省いて順位リストの高さにあてる。
+      (phase === 'crocResult' ? '' : '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>') +
+      '<div class="card dd-act">' + centerHtml + '</div>' +
+      '<div class="bz-seats">' + seats + '</div>' +
+      '<div class="card bz-logbox">' + bzLogHtml(room, 10) + '</div>' +
+      (isHost
+        ? '<div class="row"><button type="button" id="ddHostForce" class="ghost">⚠ すすめる（だいり）</button>' +
+          (lobbyId ? '<button type="button" id="ddAbortToLobby" class="ghost">ロビーへもどる</button>' : '') +
+          '</div>'
+        : '') +
+      '</div>'
+    );
+  }
+
+  function routeDodelidoTable(roomId, isHost) {
+    try {
+      if (document && document.body && document.body.classList) {
+        document.body.classList.remove('ll-player-screen');
+        document.body.classList.add('ll-table-screen');
+      }
+    } catch (e0) {
+      // ignore
+    }
+
+    // ホスト以外がURLを直打ちしたらプレイヤー画面へ回す（bohnanza_table と同じ）。
+    if (!isHost) {
+      var qx0 = {};
+      var vx0 = getCacheBusterParam();
+      if (vx0) qx0.v = vx0;
+      qx0.room = roomId;
+      try {
+        var qq0 = parseQuery();
+        if (qq0 && qq0.lobby) qx0.lobby = String(qq0.lobby);
+        if (qq0 && qq0.player) qx0.player = String(qq0.player);
+      } catch (e0x) {
+        // ignore
+      }
+      qx0.screen = 'dodelido_player';
+      setQuery(qx0);
+      route();
+      return;
+    }
+
+    var unsub = null;
+    var lobbyId = '';
+    try {
+      var q0 = parseQuery();
+      lobbyId = q0 && q0.lobby ? String(q0.lobby) : '';
+    } catch (eQ) {
+      lobbyId = '';
+    }
+
+    var tUi = { cancelled: false, fxReady: false, lastTurnKey: '', lastSndKey: '', lastResultKey: '', inFlight: false };
+    var lobbyReturnWatching = false;
+    var lobbyUnsub = null;
+
+    function redirectToLobbyHost() {
+      if (!lobbyId) return;
+      tUi.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      lobbyUnsub = null;
+      var q = {};
+      var v = getCacheBusterParam();
+      if (v) q.v = v;
+      q.lobby = lobbyId;
+      q.screen = 'lobby_host';
+      try {
+        var qx = parseQuery();
+        if (qx && String(qx.gmdev || '') === '1') q.gmdev = '1';
+      } catch (e) {
+        // ignore
+      }
+      setQuery(q);
+      route();
+    }
+
+    function ensureLobbyReturnWatcher() {
+      if (!lobbyId) return;
+      if (lobbyReturnWatching) return;
+      lobbyReturnWatching = true;
+      firebaseReady()
+        .then(function () {
+          return subscribeLobby(lobbyId, function (lobby) {
+            var cg = (lobby && lobby.currentGame) || null;
+            var kind = cg && cg.kind ? String(cg.kind) : '';
+            var rid = cg && cg.roomId ? String(cg.roomId) : '';
+            if (!cg || kind !== 'dodelido' || rid !== String(roomId || '')) {
+              try {
+                if (lobbyUnsub) lobbyUnsub();
+              } catch (e) {
+                // ignore
+              }
+              lobbyUnsub = null;
+              redirectToLobbyHost();
+            }
+          });
+        })
+        .then(function (u2) {
+          lobbyUnsub = u2;
+        })
+        .catch(function () {
+          // ignore
+        });
+    }
+
+    function renderTableNow(room) {
+      renderDodelidoTable(viewEl, { roomId: roomId, room: room, isHost: isHost, lobbyId: lobbyId });
+      ddBindCardImages(viewEl);
+      bindBbgFxToggle();
+
+      var phase = String((room && room.phase) || '');
+      var turnMid = ddTurnMid(room);
+      try {
+        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
+        if (tUi.fxReady && phase !== 'result' && turnKey !== tUi.lastTurnKey) {
+          bbgShowTurnOverlay(ddName(room, turnMid) + 'の ばん');
+        }
+        tUi.lastTurnKey = turnKey;
+      } catch (eT) {
+        // ignore
+      }
+      try {
+        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase + '|' + (room && room.revealed ? '1' : '0');
+        if (tUi.fxReady && sndKey !== tUi.lastSndKey) {
+          if (phase === 'call' && !(room && room.revealed)) bbgFx.reveal();
+          else if (phase === 'call' && room && room.revealed) bbgFx.play();
+          else if (phase === 'croc') bbgFx.notify();
+          else if (phase === 'crocResult') bbgFx.miss();
+        }
+        tUi.lastSndKey = sndKey;
+      } catch (eS) {
+        // ignore
+      }
+      try {
+        var rKey = phase === 'result' ? 'result' : '';
+        if (tUi.fxReady && rKey && rKey !== tUi.lastResultKey) bbgFx.win();
+        tUi.lastResultKey = rKey;
+      } catch (eR) {
+        // ignore
+      }
+      tUi.fxReady = true;
+
+      var forceBtn = document.getElementById('ddHostForce');
+      if (forceBtn && !forceBtn.__dd_bound) {
+        forceBtn.__dd_bound = true;
+        forceBtn.addEventListener('click', function () {
+          if (tUi.inFlight) return;
+          if (!bbgConfirmClick(forceBtn, 'だいりで すすめますか？\nコールちゅうなら「せいかい」あつかいに、ワニちゅうなら うちきりになります。', 'すすめる')) return;
+          tUi.inFlight = true;
+          forceBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return ddHostForce(roomId);
+            })
+            .then(function (applied) {
+              bbgShowToast(applied ? 'だいりで すすめました' : 'いまは すすめられませんでした');
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              tUi.inFlight = false;
+              forceBtn.disabled = false;
+            });
+        });
+      }
+
+      var abortBtn = document.getElementById('ddAbortToLobby');
+      if (abortBtn && !abortBtn.__dd_bound) {
+        abortBtn.__dd_bound = true;
+        abortBtn.addEventListener('click', function () {
+          if (!bbgConfirmClick(abortBtn, 'ゲームを ちゅうだんして\nぜんいん ロビーに もどります。', 'ロビーに戻る')) return;
+          if (!lobbyId) return;
+          abortBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobbyHost();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              abortBtn.disabled = false;
+            });
+        });
+      }
+
+      var nextBtn = document.getElementById('ddNextToLobby');
+      if (nextBtn && !nextBtn.__dd_bound) {
+        nextBtn.__dd_bound = true;
+        nextBtn.addEventListener('click', function () {
+          if (!lobbyId) return;
+          nextBtn.disabled = true;
+          firebaseReady()
+            .then(function () {
+              return setLobbyCurrentGame(lobbyId, null);
+            })
+            .then(function () {
+              redirectToLobbyHost();
+            })
+            .catch(function (e) {
+              bbgShowToast((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              nextBtn.disabled = false;
+            });
+        });
+      }
+    }
+
+    firebaseReady()
+      .then(function () {
+        if (lobbyId) ensureLobbyReturnWatcher();
+        return subscribeDodelidoRoom(roomId, function (room) {
+          if (tUi.cancelled) return;
+          if (!room) {
+            renderError(viewEl, '部屋が見つかりません');
+            return;
+          }
+          renderTableNow(room);
+        });
+      })
+      .then(function (u) {
+        unsub = u;
+        if (tUi.cancelled) {
+          try {
+            if (unsub) unsub();
+          } catch (eU1) {
+            // ignore
+          }
+          unsub = null;
+        }
+      })
+      .catch(function (e) {
+        renderError(viewEl, (e && e.message) || 'Firebase接続に失敗しました');
+      });
+
+    window.addEventListener('popstate', function () {
+      tUi.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (e0p) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (lobbyUnsub) lobbyUnsub();
+      } catch (e1p) {
+        // ignore
+      }
+      lobbyUnsub = null;
+    });
+  }
+
   // -------------------- UI --------------------
   var HEADER_LOBBY_ID = '';
 
@@ -12492,7 +14086,8 @@
     codenames: { label: 'コードネーム', emoji: '🕵️', min: 4 },
     hannin: { label: '犯人は踊る', emoji: '🃏', min: 3 },
     oekaki: { label: 'おえかきバトル', emoji: '🎨', min: 1 },
-    bohnanza: { label: 'ボーナンザ', emoji: '🫘', min: 3 }
+    bohnanza: { label: 'ボーナンザ', emoji: '🫘', min: 3 },
+    dodelido: { label: 'ドデリド', emoji: '🦩', min: 2 }
   };
 
   function gameKindLabel(kind) {
@@ -12778,7 +14373,7 @@
         ' をあそび中</span></div>'
       : '';
 
-    var gameKinds = ['wordwolf', 'codenames', 'loveletter', 'hannin', 'oekaki', 'bohnanza'];
+    var gameKinds = ['wordwolf', 'codenames', 'loveletter', 'hannin', 'oekaki', 'bohnanza', 'dodelido'];
     var gameGridHtml = '';
     for (var gi = 0; gi < gameKinds.length; gi++) {
       var gk = gameKinds[gi];
@@ -16698,6 +18293,7 @@
             else if (kind === 'hannin') min = 3;
             else if (kind === 'oekaki') min = 1; // 一人でもOK（採点のみ）
             else if (kind === 'bohnanza') min = 3;
+            else if (kind === 'dodelido') min = 2;
             else min = 3; // wordwolf
 
             if (n0 < min) {
@@ -16712,6 +18308,14 @@
               clearInlineError('lobbyHostError');
               setInlineError('lobbyHostError', 'ボーナンザは5人までです（いまは' + String(n0) + '人）');
               bbgShowToast('ボーナンザは 3〜5人で あそべます');
+              return;
+            }
+
+            // ドデリドは基本ルールの2〜6人のみ。
+            if (kind === 'dodelido' && n0 > 6) {
+              clearInlineError('lobbyHostError');
+              setInlineError('lobbyHostError', 'ドデリドは6人までです（いまは' + String(n0) + '人）');
+              bbgShowToast('ドデリドは 2〜6人で あそべます');
               return;
             }
           } catch (eMin) {
@@ -16729,7 +18333,7 @@
           }
 
           // Wordwolf requires the legacy settings screen.
-          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin' && kind !== 'oekaki' && kind !== 'bohnanza') {
+          if (kind !== 'codenames' && kind !== 'loveletter' && kind !== 'hannin' && kind !== 'oekaki' && kind !== 'bohnanza' && kind !== 'dodelido') {
             var qWw = {};
             var vWw = getCacheBusterParam();
             if (vWw) qWw.v = vWw;
@@ -16766,6 +18370,7 @@
           var hostPidH = '';
           var hostPidO = '';
           var hostPidB = '';
+          var hostPidD = '';
           firebaseReady()
             .then(function () {
               if (kind === 'codenames') {
@@ -16940,6 +18545,24 @@
                   return;
                 });
               }
+
+              if (kind === 'dodelido') {
+                // ドデリドも room 内にロビーフェーズを持たない。配札済みの初期状態を一括で作る。
+                var orderD = normalizeOrder(lobby);
+                var membersD = (lobby && lobby.members) || {};
+                var listD = [];
+                for (var dA = 0; dA < orderD.length; dA++) {
+                  var pidD = String(orderD[dA] || '');
+                  if (!pidD) continue;
+                  var nmD = membersD && membersD[pidD] && membersD[pidD].name ? String(membersD[pidD].name) : '';
+                  listD.push({ mid: pidD, name: nmD || '-' });
+                }
+                hostPidD = isTableGm ? '' : String(mid || '');
+                if (hostPidD && orderD.indexOf(hostPidD) === -1) hostPidD = '';
+                return createDodelidoRoom(roomId, lobbyId, listD).then(function () {
+                  return;
+                });
+              }
               return;
             })
             .then(function () {
@@ -16980,6 +18603,11 @@
                 // GM端末(テーブル表示)は player を持たせない（hannin と同じ理由）。
                 if (!isTableGm && hostPidB) q.player = String(hostPidB);
                 q.screen = isTableGm ? 'bohnanza_table' : 'bohnanza_player';
+              } else if (kind === 'dodelido') {
+                q.host = '1';
+                // GM端末(テーブル表示)は player を持たせない（hannin と同じ理由）。
+                if (!isTableGm && hostPidD) q.player = String(hostPidD);
+                q.screen = isTableGm ? 'dodelido_table' : 'dodelido_player';
               }
               setQuery(q);
               route();
@@ -17143,6 +18771,10 @@
         q.player = String(mid);
       } else if (kind === 'bohnanza') {
         q.screen = 'bohnanza_player';
+        if (isHostDevice) q.host = '1';
+        q.player = String(mid);
+      } else if (kind === 'dodelido') {
+        q.screen = 'dodelido_player';
         if (isHostDevice) q.host = '1';
         q.player = String(mid);
       } else {
@@ -25354,7 +26986,7 @@
 
   function demoIsDemoScreen(screen) {
     var sc = String(screen || '');
-    return sc === 'demo_loveletter' || sc === 'demo_hannin' || sc === 'demo_bohnanza';
+    return sc === 'demo_loveletter' || sc === 'demo_hannin' || sc === 'demo_bohnanza' || sc === 'demo_dodelido';
   }
 
   function demoMakeRoomId() {
@@ -25383,6 +27015,7 @@
     var g = String(game || '');
     if (g === 'll') return 'ラブレター';
     if (g === 'bz') return 'ボーナンザ';
+    if (g === 'dd') return 'ドデリド';
     return '犯人は踊る';
   }
 
@@ -25554,12 +27187,12 @@
     var q = {};
     var v = getCacheBusterParam();
     if (v) q.v = v;
-    q.screen = s.game === 'll' ? 'demo_loveletter' : s.game === 'bz' ? 'demo_bohnanza' : 'demo_hannin';
+    q.screen = s.game === 'll' ? 'demo_loveletter' : s.game === 'bz' ? 'demo_bohnanza' : s.game === 'dd' ? 'demo_dodelido' : 'demo_hannin';
     q.room = String(s.roomId || '');
     q.view = String(s.view || 'bot1');
     var idx = demoViewIndex(s.view);
-    // 犯人は踊る／ボーナンザの routeXxxPlayer は ?player= から自分のIDを読む。
-    if ((s.game === 'hn' || s.game === 'bz') && idx >= 0) q.player = String(s.botIds[idx] || '');
+    // 犯人は踊る／ボーナンザ／ドデリドの routeXxxPlayer は ?player= から自分のIDを読む。
+    if ((s.game === 'hn' || s.game === 'bz' || s.game === 'dd') && idx >= 0) q.player = String(s.botIds[idx] || '');
     if (Number(s.speed) !== 1) q.sp = String(s.speed);
     if (s.paused) q.pz = '1';
     return q;
@@ -25605,8 +27238,20 @@
     return createBohnanzaRoom(s.roomId, '', members);
   }
 
+  // ドデリドも同じく createDodelidoRoom が配札まで済ませる。
+  function demoCreateDodelido(s) {
+    var members = [];
+    for (var i = 0; i < s.botIds.length; i++) {
+      var mid = String(s.botIds[i] || '');
+      if (!mid) continue;
+      members.push({ mid: mid, name: demoBotName(i) });
+    }
+    return createDodelidoRoom(s.roomId, '', members);
+  }
+
   function demoCreateAndStart(s) {
     if (s.game === 'bz') return demoCreateBohnanza(s);
+    if (s.game === 'dd') return demoCreateDodelido(s);
     var settings = { order: s.botIds.slice() };
     var create = s.game === 'll' ? createLoveLetterRoom(s.roomId, settings) : createHanninRoom(s.roomId, settings);
     return create
@@ -25627,7 +27272,7 @@
   }
 
   function demoEnsureRoom(s) {
-    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : s.game === 'bz' ? bzRoomPath(s.roomId) : hanninRoomPath(s.roomId);
+    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : s.game === 'bz' ? bzRoomPath(s.roomId) : s.game === 'dd' ? ddRoomPath(s.roomId) : hanninRoomPath(s.roomId);
     return getValueOnce(path).then(function (room) {
       if (room) return null; // リロード等で既にあるルームはそのまま使う
       return demoCreateAndStart(s);
@@ -25636,7 +27281,7 @@
 
   function demoSubscribe(s) {
     var myGen = s.gen;
-    var sub = s.game === 'll' ? subscribeLoveLetterRoom : s.game === 'bz' ? subscribeBohnanzaRoom : subscribeHanninRoom;
+    var sub = s.game === 'll' ? subscribeLoveLetterRoom : s.game === 'bz' ? subscribeBohnanzaRoom : s.game === 'dd' ? subscribeDodelidoRoom : subscribeHanninRoom;
     return sub(s.roomId, function (room) {
       if (!s || s.stopped || s.gen !== myGen) return;
       if (demoState !== s) return;
@@ -25671,6 +27316,7 @@
         // テーブル視点（routeXxxTable は isHost ガードがあるので true を渡す）
         if (s.game === 'll') routeLoveLetterTable(s.roomId, true);
         else if (s.game === 'bz') routeBohnanzaTable(s.roomId, true);
+        else if (s.game === 'dd') routeDodelidoTable(s.roomId, true);
         else routeHanninTable(s.roomId, true);
       } else {
         var pid = String(s.botIds[idx] || '');
@@ -25680,6 +27326,9 @@
         } else if (s.game === 'bz') {
           // routeBohnanzaPlayer は ?player= を見る（demoReplaceUrl で入れてある）
           routeBohnanzaPlayer(s.roomId, false);
+        } else if (s.game === 'dd') {
+          // routeDodelidoPlayer も ?player= を見る（demoReplaceUrl で入れてある）
+          routeDodelidoPlayer(s.roomId, false);
         } else {
           // routeHanninPlayer は ?player= を見る（demoReplaceUrl で入れてある）
           routeHanninPlayer(s.roomId, false);
@@ -25841,6 +27490,7 @@
     try {
       if (s.game === 'll') return String((room && room.phase) || '') === 'finished';
       if (s.game === 'bz') return String((room && room.phase) || '') === 'result';
+      if (s.game === 'dd') return String((room && room.phase) || '') === 'result';
       var st = room && room.state ? room.state : null;
       return !!(st && st.result && st.result.decidedAt);
     } catch (e) {
@@ -25902,7 +27552,7 @@
 
     var plan = null;
     try {
-      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : s.game === 'bz' ? demoPlanBohnanza(s, room) : demoPlanHannin(s, room);
+      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : s.game === 'bz' ? demoPlanBohnanza(s, room) : s.game === 'dd' ? demoPlanDodelido(s, room) : demoPlanHannin(s, room);
     } catch (ePlan) {
       plan = null;
     }
@@ -25941,14 +27591,19 @@
       return;
     }
     // 犯人は踊る/ラブレターは「確認待ち(_wf|)」だけが代理対象。
-    // ボーナンザは待機という概念が無く、どのフェーズでも bzHostForce が代理で先へ進められる。
-    var canForce = s.game === 'bz' ? String(s.actKey || '').indexOf('bz_') === 0 : String(s.actKey || '').indexOf('_wf|') > 0;
+    // ボーナンザ/ドデリドは待機という概念が無く、どのフェーズでもホスト救済が代理で先へ進められる。
+    var canForce =
+      s.game === 'bz'
+        ? String(s.actKey || '').indexOf('bz_') === 0
+        : s.game === 'dd'
+          ? String(s.actKey || '').indexOf('dd_') === 0
+          : String(s.actKey || '').indexOf('_wf|') > 0;
     if (stuckMs > 12000 && s.forcedKey !== s.actKey && canForce) {
       s.forcedKey = s.actKey;
       demoLog('待機が解除されないので代理で進めます: ' + String(s.actKey || ''), null);
       var fp = null;
       try {
-        fp = s.game === 'll' ? forceAdvanceLoveLetter(s.roomId) : s.game === 'bz' ? bzHostForce(s.roomId) : forceAdvanceHannin(s.roomId);
+        fp = s.game === 'll' ? forceAdvanceLoveLetter(s.roomId) : s.game === 'bz' ? bzHostForce(s.roomId) : s.game === 'dd' ? ddHostForce(s.roomId) : forceAdvanceHannin(s.roomId);
       } catch (eF) {
         fp = null;
       }
@@ -26806,6 +28461,102 @@
     return null;
   }
 
+  // -------------------- demo: ドデリドの判断 --------------------
+  // お手つき率は15%（せいかいの流れと ひきとりの流れが両方見えるように）。
+  // ゆらぎは demoBzRoll（盤面ハッシュ）で作る（Math.random だと毎tickで判断が変わり実行されない）。
+  function demoPlanDodelido(s, room) {
+    var phase = String((room && room.phase) || '');
+    if (!phase || phase === 'result') return null; // 決着は demoTick 側（demoIsFinished）が受け持つ
+    var order = demoBzOrder(room);
+    if (!order.length) return null;
+    var turnMid = ddTurnMid(room);
+    if (!turnMid) return null;
+    var turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
+
+    if (phase === 'flip') {
+      return {
+        key: 'dd_flip|' + turnMid + '|' + String(turnCount),
+        min: 700,
+        max: 1400,
+        label: ddName(room, turnMid) + ' が 1まい めくります',
+        run: function () {
+          return ddFlip(s.roomId, turnMid);
+        }
+      };
+    }
+
+    if (phase === 'call') {
+      if (!room.revealed) {
+        return {
+          key: 'dd_rev|' + String(turnCount),
+          min: 1000,
+          max: 2000,
+          label: ddName(room, turnMid) + ' が コールちゅう…',
+          run: function () {
+            return ddReveal(s.roomId);
+          }
+        };
+      }
+      var miss = demoBzRoll(s, 'dd_judge|' + String(turnCount)) < 15;
+      return {
+        key: 'dd_judge|' + String(turnCount),
+        min: 900,
+        max: 1700,
+        label: miss ? ddName(room, turnMid) + ' は おてつき！' : ddName(room, turnMid) + ' は せいかい',
+        run: function () {
+          return miss ? ddJudgeMiss(s.roomId) : ddJudgeOk(s.roomId);
+        }
+      };
+    }
+
+    if (phase === 'croc') {
+      var taps = ddNormTaps(room.croc && room.croc.taps);
+      var waiting = [];
+      for (var i = 0; i < order.length; i++) {
+        var mid = String(order[i] || '');
+        if (!mid) continue;
+        if (taps[mid] === undefined) waiting.push(mid);
+      }
+      if (!waiting.length) return null; // ぜんいんたたけば ddCrocTap 側で自動的にけっかへ進む
+      // ハッシュから疑似反応時間を作り、はやい人からたたく（けっかの順位も この時間で決まる）。
+      var best = waiting[0];
+      var bestMs = -1;
+      for (var w = 0; w < waiting.length; w++) {
+        var ms = 350 + (demoBzHash(String(s.roomId || '') + '|ddcroc|' + String(turnCount) + '|' + waiting[w]) % 1400);
+        if (bestMs < 0 || ms < bestMs) {
+          bestMs = ms;
+          best = waiting[w];
+        }
+      }
+      var tappedN = order.length - waiting.length;
+      return {
+        key: 'dd_croc|' + String(turnCount) + '|' + String(tappedN),
+        min: 250,
+        max: 600,
+        label: ddName(room, best) + ' が ワニを たたく！',
+        run: (function (mid2, ms2) {
+          return function () {
+            return ddCrocTap(s.roomId, mid2, ms2);
+          };
+        })(best, bestMs)
+      };
+    }
+
+    if (phase === 'crocResult') {
+      return {
+        key: 'dd_next|' + String(turnCount),
+        min: 1400,
+        max: 2400,
+        label: 'けっかを 見て つぎへ',
+        run: function () {
+          return ddCrocNext(s.roomId);
+        }
+      };
+    }
+
+    return null;
+  }
+
   // -------------------- demo: ルーティング --------------------
   function routeDemoLoveLetter() {
     return routeDemoGame('ll');
@@ -26817,6 +28568,10 @@
 
   function routeDemoBohnanza() {
     return routeDemoGame('bz');
+  }
+
+  function routeDemoDodelido() {
+    return routeDemoGame('dd');
   }
 
   function routeDemoGame(game) {
@@ -26873,7 +28628,8 @@
       box.innerHTML =
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">🤖 デモ: ラブレター</a>' +
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">🤖 デモ: ボーナンザ</a>';
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">🤖 デモ: ボーナンザ</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_dodelido">🤖 デモ: ドデリド</a>';
       host.appendChild(box);
     } catch (e) {
       // ignore
@@ -28040,13 +29796,16 @@
         oekaki_player: 1,
         // ボーナンザはプレイヤー画面のみ許可（テーブル画面はホスト端末専用）。
         bohnanza_player: 1,
+        // ドデリドも同様にプレイヤー画面のみ許可。
+        dodelido_player: 1,
         // リレーモードはロビー外の遊び。LINE等で届いたリンクは制限端末でも開けるようにする
         // （部屋を作る側の画面 oekaki_relay_create は下のホスト系ブロックで弾かれる）。
         oekaki_relay: 1,
         // デモ（自動プレイ）は見るだけの画面。ロビーに参加済みの端末でも開けるようにする。
         demo_loveletter: 1,
         demo_hannin: 1,
-        demo_bohnanza: 1
+        demo_bohnanza: 1,
+        demo_dodelido: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
@@ -28132,6 +29891,7 @@
     if (screen === 'demo_loveletter') return routeDemoLoveLetter();
     if (screen === 'demo_hannin') return routeDemoHannin();
     if (screen === 'demo_bohnanza') return routeDemoBohnanza();
+    if (screen === 'demo_dodelido') return routeDemoDodelido();
 
     if (screen === 'codenames_rejoin') {
       if (!roomId) return routeHome();
@@ -28178,6 +29938,16 @@
     if (screen === 'bohnanza_player') {
       if (!roomId) return routeHome();
       return routeBohnanzaPlayer(roomId, isHost);
+    }
+
+    if (screen === 'dodelido_table') {
+      if (!roomId) return routeHome();
+      return routeDodelidoTable(roomId, isHost);
+    }
+
+    if (screen === 'dodelido_player') {
+      if (!roomId) return routeHome();
+      return routeDodelidoPlayer(roomId, isHost);
     }
 
     if (screen === 'oekaki_relay_create') return routeOekakiRelayCreate();

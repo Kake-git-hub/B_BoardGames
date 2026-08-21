@@ -11,6 +11,7 @@
 - おえかきバトル（Oekaki）… AI判定にGemini APIを使用（後述）
 - おえかきバトル リレーモード（Oekaki Relay）… 2人用・非同期。ロビーを使わず、URLをLINE等で渡し合って遊ぶ
 - ボーナンザ（Bohnanza）
+- ドデリド（Dodelido）
 
 このアプリは「静的ファイル + Firebase Realtime Database」で動きます。
 
@@ -119,6 +120,7 @@ Realtime Database を使い、複数端末で同じ状態を共有します。
 - おえかきバトル: `oekakiRooms/<roomId>`
 - おえかきバトル（リレー）: `oekakiRelayRooms/<roomId>`
 - ボーナンザ: `bohnanzaRooms/<roomId>`
+- ドデリド: `dodelidoRooms/<roomId>`
 
 いずれも「ホストが作成 → 参加者がjoin → 以降はroomの状態遷移で全画面が追従」という流れです。
 （リレーモードだけはロビーを経由せず、URLを人づてに渡して非同期に進めます。§6.6参照）
@@ -283,6 +285,20 @@ UI
 - カード画像は `assets/bohnanza/<key>.png` を置くだけで（次回リロード時から）自動的にプレースホルダーから切り替わる。**画像が無い間はプレースホルダー**（豆色の枠+絵文字+名前+豆メーター）で識別可能
 - 詳細な仕様は `BOHNANZA_DESIGN.md` を参照
 
+### 6.8 ドデリド
+
+- 対応人数: **2〜6人**（公式準拠）
+- **コール（宣言）は口頭で行う**。アプリは「カード・3つの場・正解の判定表示・ワニの反射しょうぶ」だけを受け持つ
+- カードは105枚（どうぶつ5種×いろ5色×各4枚 + ワニ5枚）を均等に配り、あまりはゲームから除外
+- 手番の人が「めくる」→ 口頭でコール → だれかが「こたえあわせ」→ 正解表示 → 「せいかい」/「おてつき」をタップ（テーブルの信頼モデルで**全参加者が押せる**）
+- 正解は保存せず `ddComputeCall(piles)` の純関数で毎回計算（なし / 特徴名 / 多いほう / 同数ならドデリド / カメ1枚につき頭に「オー」）
+- **ワニだけはアプリが計測**: 全員が自分の端末の🐊ボタンをたたき、サーバー時刻基準の経過msで順位付け。全員たたくと自動決着、一番遅い人が場の全カードをひきとる。端末が動かない人がいれば「うちきる」
+- おてつき/ワニひきとりの人は場の3山すべてを**自分の山の下**に加え、**その本人が次のラウンドを開始**（公式準拠）
+- 最初に山を出し切った人が勝ち（最後の1枚もコール成功が必要）
+- カード画像は `assets/dodelido/<いろ>_<どうぶつ>.png`（例 `blue_penguin.png`）と `croc.png` を置くだけで自動的にプレースホルダーから切り替わる
+- デモ自動プレイ: `?screen=demo_dodelido`（ホーム下部の入口からも開ける）
+- 詳細な仕様は `DODELIDO_DESIGN.md` を参照
+
 ---
 
 ## 7) Firebase セットアップ
@@ -313,12 +329,13 @@ UI
     "hanninRooms": { ".read": true, ".write": true },
     "oekakiRooms": { ".read": true, ".write": true },
     "oekakiRelayRooms": { ".read": true, ".write": true },
-    "bohnanzaRooms": { ".read": true, ".write": true }
+    "bohnanzaRooms": { ".read": true, ".write": true },
+    "dodelidoRooms": { ".read": true, ".write": true }
   }
 }
 ```
 
-※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。同様に、ボーナンザを追加した場合は `bohnanzaRooms` のルール追記が必要です（下記参照）。
+※ おえかきバトルを追加した場合、既存プロジェクトでも `oekakiRooms` のルール追記が必要です（無いと「ゲーム開始」が PERMISSION_DENIED になります）。同様に、ボーナンザを追加した場合は `bohnanzaRooms`、ドデリドを追加した場合は `dodelidoRooms` のルール追記が必要です（下記参照）。
 
 #### ⚠ リレーモードを使う前に（既存プロジェクトでの1回だけの作業）
 
@@ -391,6 +408,42 @@ DBルールはアプリのソースではなく Firebase Console 側の設定な
 いずれの場合も、直前の行の末尾に**カンマ**が要る点に注意してください。
 
 確認方法: ホーム画面 → ロビー作成 →「ボーナンザ」を選んで「ゲーム開始」で、エラーにならずゲーム画面まで進めばOKです。
+
+#### ⚠ ドデリドを使う前に（既存プロジェクトでの1回だけの作業）
+
+ドデリドは新しいパス `dodelidoRooms` を使います。**このルールを足していないと「ゲーム開始」で PERMISSION_DENIED になり、ルームが作れません**（既存ゲームには影響しません）。
+
+手順はボーナンザのときと同じです。
+
+1. Firebase Console → 対象プロジェクト → **Realtime Database → ルール**
+2. **`"rules"` の中（`oekakiRooms` などと同じ階層）に** `dodelidoRooms` を追記する。既存のルールは消さない
+   - ⚠ 一番外側の `}` の**後ろ**ではなく、必ず `"rules": { ... }` の**内側**に入れること
+   - ⚠ 書き方は既存のルールと同じ形式に合わせる（下記2パターン）
+3. **公開（Publish）** を押す。反映は即時で、アプリ側の再デプロイは不要
+
+**パターンA: 既存が `$roomId` ワイルドカード形式の場合**（本番はこちら）
+
+```json
+"bohnanzaRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+"dodelidoRooms": {
+  ".indexOn": ["createdAt"],
+  "$roomId": { ".read": true, ".write": true }
+},
+```
+
+**パターンB: 既存がトップレベル許可のフラット形式の場合**
+
+```json
+"bohnanzaRooms": { ".read": true, ".write": true },
+"dodelidoRooms": { ".read": true, ".write": true },
+```
+
+いずれの場合も、直前の行の末尾に**カンマ**が要る点に注意してください。
+
+確認方法: ホーム画面 → ロビー作成 →「ドデリド」を選んで「ゲーム開始」で、エラーにならずゲーム画面まで進めばOKです（デモ `?screen=demo_dodelido` でも確認できます）。
 
 ※ 現在の本番ルールは「`lobbies/$id` 単位の許可」になっており、`lobbies` や `rooms` などの**トップレベル一括読み取りは拒否**されます。このため `cleanupOldRooms()`（7日超の部屋の自動削除）は毎回 permission_denied で空振りしています。自動削除を効かせたい場合は、上記のようにトップレベルに `.read` を付ける（＋`.indexOn: ["createdAt"]` 推奨）ようConsoleでルールを変更してください。ホームのロビー一覧は `lobbies/_index` を使うため、**ルール変更なしでも動作します**。
 
