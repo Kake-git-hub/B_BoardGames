@@ -1244,19 +1244,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-remain{font-size:13px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 
 /* 3つの場 */
-.dd-pilesbox{padding:14px 10px;position:relative}
-/* 番手のモーダル: カードの上に重ねて1.2秒だけ（タップは奪わない） */
-.dd-turnov{
-  position:absolute;inset:0;z-index:5;pointer-events:none;
-  display:flex;align-items:center;justify-content:center;
-  border-radius:var(--radius);background:rgba(6,10,20,.62);
-  animation:ddTurnOv 1.2s ease forwards;
-}
-.dd-turnov b{
-  font-size:clamp(24px,6vw,40px);font-weight:900;color:var(--accent);
-  text-shadow:0 2px 12px rgba(0,0,0,.8);text-align:center;line-height:1.3;
-}
-@keyframes ddTurnOv{0%{opacity:0;transform:scale(.92)}14%{opacity:1;transform:scale(1)}78%{opacity:1}100%{opacity:0}}
+.dd-pilesbox{padding:14px 10px}
 .dd-piles{display:flex;gap:10px;justify-content:center;align-items:center}
 .dd-pile{border-radius:14px;padding:6px;flex:0 1 auto}
 .dd-pile--last{background:rgba(91,157,255,.10);box-shadow:0 0 0 2px rgba(91,157,255,.45)}
@@ -1307,7 +1295,27 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-count b{font-size:56px;font-weight:900;line-height:1;color:var(--warn)}
 
 /* 一行の合図 */
-.dd-line{font-size:17px;font-weight:900;color:var(--muted);padding:0;min-height:1.5em}
+.dd-line{position:relative;font-size:17px;font-weight:900;color:var(--muted);padding:0;min-height:1.9em;display:flex;align-items:center;justify-content:center}
+/* 番手のポップアップ: 番手テキストの位置（カードより上）で1.2秒だけ。カードには重ねない */
+.dd-turnov{
+  position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);
+  z-index:5;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;
+  padding:3px 10px;border-radius:999px;
+  background:linear-gradient(180deg,rgba(91,157,255,.26),rgba(139,123,255,.16)),var(--card);
+  border:1px solid var(--line2);box-shadow:var(--shadow-s);
+  animation:ddTurnOv 1.2s ease forwards;
+}
+.dd-turnov b{
+  font-size:clamp(17px,4.6vw,23px);font-weight:900;color:var(--accent);line-height:1.25;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;
+}
+@keyframes ddTurnOv{
+  0%{opacity:0;transform:translateY(-50%) scale(.9)}
+  14%{opacity:1;transform:translateY(-50%) scale(1)}
+  78%{opacity:1;transform:translateY(-50%) scale(1)}
+  100%{opacity:0;transform:translateY(-50%) scale(1)}
+}
 .dd-line--me{color:var(--accent);animation:ddLinePulse 1.1s ease-in-out infinite alternate}
 .dd-line--croc{color:#ff5a6a;font-size:22px;animation:ddLineBlink .45s ease-in-out infinite alternate}
 @keyframes ddLinePulse{from{opacity:.72;transform:scale(.985)}to{opacity:1;transform:scale(1)}}
@@ -1371,6 +1379,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-count b{font-size:64px}
   .dd-line{font-size:20px}
   .dd-line--croc{font-size:26px}
+  .dd-turnov b{font-size:26px}
   .dd-tapzone{font-size:22px}
   .dd-tapzone--croc{font-size:30px}
   /* 正方形の一辺は画面高さの34%まで（縦1024で約348px、横768で約261px） */

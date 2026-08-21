@@ -12662,11 +12662,11 @@
     return '<div class="bz-rank">' + out + '</div>';
   }
 
-  // 番手のモーダルは カードの上（場の領域）に重ねて出す（1.2秒で消える・タップは奪わない）。
-  // 画面ぜんたいを覆う共通オーバーレイ（bbgShowTurnOverlay）は使わない: タップエリアを隠さないため。
+  // 番手のポップアップは カードより上（タイトル行の番手テキストの位置）に出す（1.2秒で消える）。
+  // カードには重ねない: 場のカードを隠さないため。画面ぜんたいを覆う共通オーバーレイも使わない。
   function ddShowTurnOverlay(rootEl, label) {
     try {
-      var box = rootEl && rootEl.querySelector ? rootEl.querySelector('.dd-pilesbox') : null;
+      var box = rootEl && rootEl.querySelector ? rootEl.querySelector('.dd-line') : null;
       if (!box) return;
       var olds = box.querySelectorAll('.dd-turnov');
       for (var i = 0; i < olds.length; i++) {
