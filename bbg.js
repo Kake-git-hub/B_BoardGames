@@ -11885,11 +11885,14 @@
   }
 
   // -------------------- dodelido (ドデリド) --------------------
-  // 対面プレイ補助。コール（宣言）は口頭で行い、アプリは「カード・3つの場・正解表示・ワニの反射しょうぶ」を受け持つ。
+  // 対面プレイ補助。コール（宣言）と答え合わせは口頭で行い、アプリは「カード・3つの場・正解表示・ワニの反射しょうぶ」を受け持つ。
   // DBパス: dodelidoRooms/<roomId>（RTDBルールの追記が必要）。
-  // 進行: flip（手番が1まいめくる）→ call（口頭コール→こたえあわせ→せいかい/おてつき）
-  //       └ ワニが出たら croc（全員が🐊ボタンをたたく）→ crocResult（いちばん遅い人が全ひきとり）
-  // せいかいなら つぎの人へ。おてつき/ワニひきとりの人が あたらしいラウンドを はじめる（公式ルール準拠）。
+  // 操作はぜんぶ「がめんのどこでもタップ」:
+  //   flip: 手番の人のタップで1まいめくる → call: 口頭でコール（正解は本人以外の画面に表示）
+  //     ├ せいかい → つぎの人のタップで、そのまま自分の1まいがめくれて手番が進む（確認ボタンなし）
+  //     └ おてつき → コールした本人が「ながおし」して場の全カードをひきとり、同じ人から さいかい
+  //   ワニが出たら croc: 全員ががめんをたたく（pointerdownで計測）→ crocResult: ひきとった人のタップで さいかい
+  // おてつき/ワニひきとりの人が あたらしいラウンドを はじめる（公式ルール準拠）。
   // ステータスバー/ログ/ランキングは bohnanza の共用HUDクラス（.bz-top/.bz-log/.bz-rank 等）を再利用する。
   var DD_LOG_MAX = 40;
   var DD_CROC_COPIES = 5; // ワニは全部で5まい
@@ -12119,7 +12122,7 @@
     st.turnIdx = parseIntSafe(room && room.turnIdx, 0) || 0;
     st.turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
     st.pileIdx = parseIntSafe(room && room.pileIdx, 0) || 0;
-    st.revealed = !!(room && room.revealed);
+    st.flippedAt = parseIntSafe(room && room.flippedAt, 0) || 0;
     st.croc = room && room.croc ? { startAt: parseIntSafe(room.croc.startAt, 0) || 0, taps: ddNormTaps(room.croc.taps) } : null;
     st.crocResult = room && room.crocResult ? room.crocResult : null;
 
@@ -12210,7 +12213,7 @@
       turnCount: 1,
       pileIdx: 0,
       piles: null,
-      revealed: false,
+      flippedAt: 0,
       croc: null,
       crocResult: null,
       players: players,
@@ -12251,7 +12254,6 @@
     st.turnIdx = idx;
     st.turnCount = (parseIntSafe(st.turnCount, 0) || 0) + 1;
     st.phase = 'flip';
-    st.revealed = false;
     st.croc = null;
     st.crocResult = null;
     ddPushLog(st, ddName(st, order[idx]) + 'の ばん');
@@ -12276,7 +12278,6 @@
       else rows[r].rank = r + 1;
     }
     st.phase = 'result';
-    st.revealed = false;
     st.croc = null;
     st.crocResult = null;
     st.result = { winnerMid: String(winnerMid || ''), ranking: rows };
@@ -12302,6 +12303,7 @@
     piles[pi] = piles[pi].concat([card]);
     st.piles = piles;
     st.pileIdx = (pi + 1) % 3;
+    st.flippedAt = serverNowMs();
 
     if (card === DD_CROC_KEY) {
       st.phase = 'croc';
@@ -12311,7 +12313,7 @@
       return true;
     }
     st.phase = 'call';
-    st.revealed = false;
+    st.crocResult = null;
     return true;
   }
 
@@ -12325,35 +12327,35 @@
     });
   }
 
-  // こたえあわせ（めくった人が口頭でコールしてから、だれでも押せる）。
-  function ddReveal(roomId) {
+  // つぎの人のタップ（＝前のコールが せいかい）。前の人が出しきっていたら その場で勝ち、
+  // そうでなければ 手番を進めて そのまま自分の1まいをめくる（タップ1回で進む）。
+  function ddTapNext(roomId, mid) {
     return ddTxn(roomId, function (st) {
       if (String(st.phase || '') !== 'call') return false;
-      if (st.revealed) return false;
-      st.revealed = true;
-      return true;
-    });
-  }
-
-  // せいかい → つぎの人へ（山が0まいになっていたら その場で勝ち）。
-  function ddJudgeOk(roomId) {
-    return ddTxn(roomId, function (st) {
-      if (String(st.phase || '') !== 'call' || !st.revealed) return false;
-      var pid = ddTurnMid(st);
+      var order = Array.isArray(st.order) ? st.order : [];
+      if (!order.length) return false;
+      var idx = parseIntSafe(st.turnIdx, 0) || 0;
+      if (idx < 0 || idx >= order.length) idx = 0;
+      var flipper = String(order[idx] || '');
+      var next = String(order[(idx + 1) % order.length] || '');
+      if (!mid || String(mid) !== next) return false;
       var call = ddComputeCall(st.piles);
-      var p = st.players && st.players[pid];
+      var p = st.players && st.players[flipper];
       var deckLen = ddNormCards(p && p.deck).length;
-      ddPushLog(st, ddName(st, pid) + '「' + call.text + '」→ せいかい！');
-      if (deckLen <= 0) return ddFinishGame(st, pid);
-      return ddNextTurn(st, true);
+      ddPushLog(st, ddName(st, flipper) + '「' + call.text + '」→ せいかい！');
+      if (deckLen <= 0) return ddFinishGame(st, flipper);
+      if (!ddNextTurn(st, true)) return false;
+      return ddFlipInto(st);
     });
   }
 
-  // おてつき（まちがい・言いよどみ・おそすぎ）→ 場の全カードをひきとって、同じ人から さいかい。
-  function ddJudgeMiss(roomId) {
+  // おてつき（まちがい・言いよどみ・おそすぎ）。コールした本人の「ながおし」でだけ発動。
+  // 場の全カードをひきとって、同じ人から さいかい。
+  function ddJudgeMiss(roomId, mid) {
     return ddTxn(roomId, function (st) {
-      if (String(st.phase || '') !== 'call' || !st.revealed) return false;
+      if (String(st.phase || '') !== 'call') return false;
       var pid = ddTurnMid(st);
+      if (!mid || String(mid) !== String(pid)) return false;
       var call = ddComputeCall(st.piles);
       var taken = ddTakeAllPiles(st, pid);
       ddPushLog(st, ddName(st, pid) + 'が おてつき！（せいかいは「' + call.text + '」）場の' + String(taken) + 'まいを ひきとり');
@@ -12395,7 +12397,8 @@
     var li = order.indexOf(loserMid);
     if (li >= 0) st.turnIdx = li;
     st.phase = 'crocResult';
-    st.crocResult = { loserMid: loserMid, closed: !!closed, ranking: rows };
+    // at はタップの誤爆よけ（たたいた直後の指が そのまま「さいかい」してしまわないように）。
+    st.crocResult = { loserMid: loserMid, closed: !!closed, at: serverNowMs(), ranking: rows };
     st.croc = null;
     return true;
   }
@@ -12431,11 +12434,14 @@
     });
   }
 
-  // ワニのけっかを見おわって つぎへ（ひきとった人から さいかい）。
-  function ddCrocNext(roomId) {
+  // ワニのけっかから さいかい。ひきとった本人のタップでだけ発動し、そのまま自分の1まいをめくる。
+  function ddCrocResume(roomId, mid) {
     return ddTxn(roomId, function (st) {
       if (String(st.phase || '') !== 'crocResult') return false;
-      return ddNextTurn(st, false);
+      var loser = String((st.crocResult && st.crocResult.loserMid) || '');
+      if (!mid || String(mid) !== loser) return false;
+      if (!ddNextTurn(st, false)) return false;
+      return ddFlipInto(st);
     });
   }
 
@@ -12450,11 +12456,7 @@
         return true;
       }
       if (phase === 'call') {
-        if (!st.revealed) {
-          st.revealed = true;
-          ddPushLog(st, '（だいり）こたえを ひらきました');
-          return true;
-        }
+        // 代理では「せいかい」あつかいで手番だけ進める（つぎの人は自分のタップでめくる）。
         var pid = ddTurnMid(st);
         var p = st.players && st.players[pid];
         var deckLen = ddNormCards(p && p.deck).length;
@@ -12666,7 +12668,13 @@
     var isMyTurn = !!(playerId && String(turnMid) === playerId);
     var me = ddPlayerOf(room, playerId);
     var inGame = !!(playerId && room && room.players && room.players[playerId]);
-    var revealed = !!(room && room.revealed);
+    var nextMid = '';
+    if (order.length) {
+      var ti0 = parseIntSafe(room && room.turnIdx, 0) || 0;
+      if (ti0 < 0 || ti0 >= order.length) ti0 = 0;
+      nextMid = String(order[(ti0 + 1) % order.length] || '');
+    }
+    var isNextMe = !!(playerId && nextMid === playerId);
 
     if (phase === 'result') {
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
@@ -12710,39 +12718,42 @@
     // ---- 3つの場
     var pilesCard = '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>';
 
-    // ---- アクション
+    // ---- アクション（操作はぜんぶ「がめんのどこでもタップ/ながおし」。ここは案内の表示だけ）
     var actionHtml = '';
     if (phase === 'flip') {
       if (isMyTurn && canOperate) {
         actionHtml =
           '<div class="card dd-act">' +
+          '<div class="dd-prompt">👉 がめんの どこでも<br>タップで めくる！</div>' +
           '<div class="bz-hint">めくったら すぐ こえに だして コール！（まちがい・言いよどみ・3びょう こえたら おてつき）</div>' +
-          '<button type="button" id="ddFlipBtn" class="primary dd-flip-btn">🎴 めくる！</button>' +
           '</div>';
       } else {
-        actionHtml = '<div class="card dd-act muted">' + escapeHtml(ddName(room, turnMid)) + 'が めくります' + bbgWaitDotsHtml() + '</div>';
+        actionHtml = '<div class="card dd-act muted">' + escapeHtml(ddName(room, turnMid)) + 'の タップまち' + bbgWaitDotsHtml() + '</div>';
       }
     }
 
     if (phase === 'call') {
-      if (!revealed) {
+      if (playerId && isMyTurn) {
+        // コールした本人には こたえを見せない（口頭で答え合わせするため）。
         actionHtml =
           '<div class="card dd-act">' +
-          '<div class="dd-answer dd-answer--hidden">❓</div>' +
-          '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が こえに だして コールしてから こたえあわせ</div>' +
-          (canOperate ? '<button type="button" id="ddRevealBtn" class="primary bz-btn">こたえあわせ</button>' : '') +
+          '<div class="dd-prompt">📣 こえに だして コール！</div>' +
+          '<div class="bz-hint">みんなが こうとうで こたえあわせ。まちがえていたら <b>がめんを ながおし</b>して 場のカードを ひきとり</div>' +
           '</div>';
-      } else {
+      } else if (canOperate && inGame) {
         actionHtml =
           '<div class="card dd-act">' +
           ddAnswerHtml(room) +
-          (canOperate
-            ? '<div class="dd-judge">' +
-              '<button type="button" id="ddOkBtn" class="primary">せいかい！</button>' +
-              '<button type="button" id="ddMissBtn" class="ghost dd-miss-btn">おてつき…</button>' +
-              '</div>' +
-              '<div class="bz-note">おてつきは 場のカードを ぜんぶ ひきとって、おなじ人から さいかいします</div>'
-            : '') +
+          (isNextMe
+            ? '<div class="dd-prompt dd-prompt--sub">あっていたら 👉 タップで じぶんの ばん！（そのまま めくれます）</div>'
+            : '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'の コールを こうとうで たしかめよう。まちがいなら 本人が ながおしで ひきとり</div>') +
+          '</div>';
+      } else {
+        // テーブル端末・観戦: こたえは出さない（コール中の人に見えてしまうため）。
+        actionHtml =
+          '<div class="card dd-act">' +
+          '<div class="dd-answer dd-answer--hidden">❓</div>' +
+          '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（こたえは 各プレイヤーの がめんに）</div>' +
           '</div>';
       }
     }
@@ -12762,7 +12773,7 @@
       actionHtml =
         '<div class="card dd-act">' +
         (canOperate && inGame && myMs < 0
-          ? '<button type="button" id="ddCrocBtn" class="dd-croc-btn">🐊 たたけ！！</button>'
+          ? '<div class="dd-prompt dd-prompt--croc">🐊 がめんを たたけ！！</div>'
           : myMs >= 0
             ? '<div class="dd-croc-done">たたいた！（' + escapeHtml(ddMsLabel(myMs)) + '）</div>'
             : '<div class="bz-hint">ぜんいんが 🐊を たたくのを まっています' + bbgWaitDotsHtml() + '</div>') +
@@ -12773,12 +12784,14 @@
 
     if (phase === 'crocResult') {
       var cr = (room && room.crocResult) || {};
+      var isLoserMe = !!(playerId && String(cr.loserMid || '') === playerId);
       actionHtml =
         '<div class="card dd-act">' +
         '<div class="bz-sec-title">🐊 ワニの けっか</div>' +
         ddCrocListHtml(room) +
-        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が 場のカードを ひきとって、つぎのラウンドを はじめます</div>' +
-        (canOperate ? '<div class="row"><button type="button" id="ddCrocNextBtn" class="primary bz-btn">つぎへ</button></div>' : '') +
+        (isLoserMe && canOperate
+          ? '<div class="dd-prompt dd-prompt--sub">👉 タップで さいかい（あなたから・そのまま めくれます）</div>'
+          : '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が 場のカードを ひきとりました。' + escapeHtml(ddName(room, cr.loserMid)) + 'の タップで さいかい</div>') +
         '</div>';
     }
 
@@ -12845,6 +12858,8 @@
       lastTurnKey: '',
       lastSndKey: '',
       lastResultKey: '',
+      tapBound: false,
+      detachTap: null,
       lobbyReturnWatching: false,
       lobbyUnsub: null
     };
@@ -12852,6 +12867,11 @@
     function redirectToLobby() {
       if (!lobbyId) return;
       ui.cancelled = true;
+      try {
+        if (ui.detachTap) ui.detachTap();
+      } catch (eDT) {
+        // ignore
+      }
       try {
         if (unsub) unsub();
       } catch (eU0) {
@@ -12952,10 +12972,9 @@
 
       // フェーズが動いたときの効果音（スナップショットごとに1回だけ）
       try {
-        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase + '|' + (room && room.revealed ? '1' : '0');
+        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase;
         if (ui.fxReady && sndKey !== ui.lastSndKey) {
-          if (phase === 'call' && !(room && room.revealed)) bbgFx.reveal();
-          else if (phase === 'call' && room && room.revealed) bbgFx.play();
+          if (phase === 'call') bbgFx.reveal();
           else if (phase === 'croc') {
             bbgFx.notify();
             bbgFx.vibrate(200);
@@ -12982,67 +13001,208 @@
       bindPlayerActions();
     }
 
-    function bindPlayerActions() {
-      var flipBtn = document.getElementById('ddFlipBtn');
-      if (flipBtn && !flipBtn.__dd_bound) {
-        flipBtn.__dd_bound = true;
-        flipBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          ui.inFlight = true;
-          bbgFx.reveal();
-          ddFlip(roomId, playerId).catch(fail).then(done, done);
-        });
+    // ---- がめんのどこでもタップ / ながおし ----
+    // viewEl は route をまたいで使い回されるため、リスナーは必ず ui.detachTap で外せるようにする
+    // （redirectToLobby と popstate で解除）。ながおし中に指が画面外へ出ても取りこぼさないよう、
+    // move/up/cancel は window に張る。
+    var DD_HOLD_MS = 650;
+    var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false };
+
+    function ddHoldHide() {
+      try {
+        var el = document.getElementById('ddHoldInd');
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function ddHoldShow() {
+      ddHoldHide();
+      try {
+        var el = document.createElement('div');
+        el.className = 'dd-hold';
+        el.id = 'ddHoldInd';
+        el.textContent = 'ひきとり中…（はなすと キャンセル）';
+        document.body.appendChild(el);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function ddCancelHold() {
+      if (ptr.holdTimer) {
+        clearTimeout(ptr.holdTimer);
+        ptr.holdTimer = null;
+      }
+      ddHoldHide();
+    }
+
+    // ボタン・リンク等の上は タップ/ながおし の対象外にする。
+    function ddTapAllowed(ev) {
+      try {
+        var t = ev && ev.target;
+        if (!t || !t.closest) return true;
+        return !t.closest('button, a, select, input, textarea, label');
+      } catch (e) {
+        return true;
+      }
+    }
+
+    // タップの振り分け（フェーズと自分の役割で決まる。関係ない人のタップは何もしない）。
+    function ddHandleTap() {
+      if (ui.cancelled || ui.inFlight || !playerId || !lastRoom) return;
+      var room = lastRoom;
+      var phase = String((room && room.phase) || '');
+      var order = Array.isArray(room && room.order) ? room.order : [];
+
+      if (phase === 'flip') {
+        if (String(ddTurnMid(room)) !== playerId) return;
+        ui.inFlight = true;
+        bbgFx.reveal();
+        ddFlip(roomId, playerId).catch(fail).then(done, done);
+        return;
       }
 
-      var revealBtn = document.getElementById('ddRevealBtn');
-      if (revealBtn && !revealBtn.__dd_bound) {
-        revealBtn.__dd_bound = true;
-        revealBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          ui.inFlight = true;
-          bbgFx.play();
-          ddReveal(roomId).catch(fail).then(done, done);
-        });
+      if (phase === 'call') {
+        // つぎの人のタップだけが「せいかい → じぶんの ばん」。めくった直後の連打は誤爆よけで無視。
+        if (!order.length) return;
+        var idx = parseIntSafe(room && room.turnIdx, 0) || 0;
+        if (idx < 0 || idx >= order.length) idx = 0;
+        var next = String(order[(idx + 1) % order.length] || '');
+        if (playerId !== next) return;
+        var fa = parseIntSafe(room && room.flippedAt, 0) || 0;
+        if (fa && serverNowMs() - fa < 700) return;
+        ui.inFlight = true;
+        bbgFx.reveal();
+        ddTapNext(roomId, playerId).catch(fail).then(done, done);
+        return;
       }
 
-      var okBtn = document.getElementById('ddOkBtn');
-      if (okBtn && !okBtn.__dd_bound) {
-        okBtn.__dd_bound = true;
-        okBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          ui.inFlight = true;
-          bbgFx.hit();
-          ddJudgeOk(roomId).catch(fail).then(done, done);
-        });
+      if (phase === 'crocResult') {
+        var cr = (room && room.crocResult) || {};
+        if (String(cr.loserMid || '') !== playerId) return;
+        var at = parseIntSafe(cr.at, 0) || 0;
+        if (at && serverNowMs() - at < 700) return;
+        ui.inFlight = true;
+        bbgFx.play();
+        ddCrocResume(roomId, playerId).catch(fail).then(done, done);
+        return;
       }
+    }
 
-      var missBtn = document.getElementById('ddMissBtn');
-      if (missBtn && !missBtn.__dd_bound) {
-        missBtn.__dd_bound = true;
-        missBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          var nm = ddName(lastRoom, ddTurnMid(lastRoom));
-          if (!bbgConfirmClick(missBtn, nm + 'の おてつきに しますか？\n場のカードを ぜんぶ ひきとります。', 'おてつき')) return;
+    // ワニは pointerdown の瞬間にたたく（up を待つより反応が速い）。
+    function ddSlapNow() {
+      if (ui.cancelled || ui.inFlight || !playerId || !lastRoom) return;
+      var room = lastRoom;
+      if (String((room && room.phase) || '') !== 'croc') return;
+      var order = Array.isArray(room && room.order) ? room.order : [];
+      if (order.indexOf(playerId) < 0) return;
+      var taps = ddNormTaps(room.croc && room.croc.taps);
+      if (taps[playerId] !== undefined) return;
+      var start = parseIntSafe(room.croc && room.croc.startAt, 0) || 0;
+      var ms = start > 0 ? serverNowMs() - start : 0;
+      if (ms < 0) ms = 0;
+      ui.inFlight = true;
+      bbgFx.tap();
+      ddCrocTap(roomId, playerId, ms).catch(fail).then(done, done);
+    }
+
+    function onDdPointerDown(ev) {
+      if (!ev.isPrimary) return;
+      if (ui.cancelled) return;
+      if (!ddTapAllowed(ev)) return;
+      ptr.active = true;
+      ptr.id = ev.pointerId;
+      ptr.x = ev.clientX;
+      ptr.y = ev.clientY;
+      ptr.t = nowMs();
+      ptr.holdFired = false;
+
+      var phase = String((lastRoom && lastRoom.phase) || '');
+      if (phase === 'croc') {
+        ddSlapNow();
+        return;
+      }
+      // ながおし（おてつき）はコールした本人だけ。
+      if (phase === 'call' && playerId && String(ddTurnMid(lastRoom)) === playerId) {
+        ddHoldShow();
+        ptr.holdTimer = setTimeout(function () {
+          ptr.holdTimer = null;
+          ptr.holdFired = true;
+          ddHoldHide();
+          if (ui.cancelled || ui.inFlight) return;
           ui.inFlight = true;
           bbgFx.miss();
-          ddJudgeMiss(roomId).catch(fail).then(done, done);
-        });
+          bbgFx.vibrate(150);
+          ddJudgeMiss(roomId, playerId).catch(fail).then(done, done);
+        }, DD_HOLD_MS);
       }
+    }
 
-      var crocBtn = document.getElementById('ddCrocBtn');
-      if (crocBtn && !crocBtn.__dd_bound) {
-        crocBtn.__dd_bound = true;
-        crocBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          var croc = lastRoom && lastRoom.croc ? lastRoom.croc : null;
-          var start = parseIntSafe(croc && croc.startAt, 0) || 0;
-          var ms = start > 0 ? serverNowMs() - start : 0;
-          if (ms < 0) ms = 0;
-          ui.inFlight = true;
-          bbgFx.tap();
-          ddCrocTap(roomId, playerId, ms).catch(fail).then(done, done);
-        });
+    function onDdPointerMove(ev) {
+      if (!ptr.active || ev.pointerId !== ptr.id) return;
+      var dx = ev.clientX - ptr.x;
+      var dy = ev.clientY - ptr.y;
+      if (dx * dx + dy * dy > 144) ddCancelHold(); // 12px以上動いたら ながおし中止（スクロール操作とみなす）
+    }
+
+    function onDdPointerUp(ev) {
+      if (!ptr.active || ev.pointerId !== ptr.id) return;
+      ptr.active = false;
+      var wasHold = ptr.holdFired;
+      ptr.holdFired = false;
+      ddCancelHold();
+      if (wasHold) return; // ながおし発動ずみ。はなした操作をタップにしない
+      var dx = ev.clientX - ptr.x;
+      var dy = ev.clientY - ptr.y;
+      if (dx * dx + dy * dy > 144) return;
+      if (nowMs() - ptr.t > 600) return; // タップとながおしの間の長さは無視（誤爆よけ）
+      if (!ddTapAllowed(ev)) return;
+      ddHandleTap();
+    }
+
+    function onDdPointerCancel(ev) {
+      if (ev.pointerId !== ptr.id) return;
+      ptr.active = false;
+      ptr.holdFired = false;
+      ddCancelHold();
+    }
+
+    function onDdContextMenu(ev) {
+      // ながおしでOSのコンテキストメニューが出ないようにする（ゲーム画面内だけ）。
+      try {
+        if (ev && ev.preventDefault) ev.preventDefault();
+      } catch (e) {
+        // ignore
       }
+    }
+
+    function ensureTapHandlers() {
+      if (ui.tapBound) return;
+      ui.tapBound = true;
+      viewEl.addEventListener('pointerdown', onDdPointerDown);
+      viewEl.addEventListener('contextmenu', onDdContextMenu);
+      window.addEventListener('pointermove', onDdPointerMove);
+      window.addEventListener('pointerup', onDdPointerUp);
+      window.addEventListener('pointercancel', onDdPointerCancel);
+      ui.detachTap = function () {
+        ui.tapBound = false;
+        ddCancelHold();
+        try {
+          viewEl.removeEventListener('pointerdown', onDdPointerDown);
+          viewEl.removeEventListener('contextmenu', onDdContextMenu);
+          window.removeEventListener('pointermove', onDdPointerMove);
+          window.removeEventListener('pointerup', onDdPointerUp);
+          window.removeEventListener('pointercancel', onDdPointerCancel);
+        } catch (e) {
+          // ignore
+        }
+      };
+    }
+
+    function bindPlayerActions() {
+      ensureTapHandlers();
 
       var crocCloseBtn = document.getElementById('ddCrocCloseBtn');
       if (crocCloseBtn && !crocCloseBtn.__dd_bound) {
@@ -13052,17 +13212,6 @@
           if (!bbgConfirmClick(crocCloseBtn, 'うちきりますか？\nまだ たたいていない人が 場のカードを ひきとります。', 'うちきる')) return;
           ui.inFlight = true;
           ddCrocClose(roomId).catch(fail).then(done, done);
-        });
-      }
-
-      var crocNextBtn = document.getElementById('ddCrocNextBtn');
-      if (crocNextBtn && !crocNextBtn.__dd_bound) {
-        crocNextBtn.__dd_bound = true;
-        crocNextBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          ui.inFlight = true;
-          bbgFx.play();
-          ddCrocNext(roomId).catch(fail).then(done, done);
         });
       }
 
@@ -13120,6 +13269,11 @@
     window.addEventListener('popstate', function () {
       ui.cancelled = true;
       try {
+        if (ui.detachTap) ui.detachTap();
+      } catch (eDp) {
+        // ignore
+      }
+      try {
         if (unsub) unsub();
       } catch (e0p) {
         // ignore
@@ -13144,7 +13298,6 @@
     var order = Array.isArray(room && room.order) ? room.order : [];
     var phase = String((room && room.phase) || '');
     var turnMid = ddTurnMid(room);
-    var revealed = !!(room && room.revealed);
 
     if (phase === 'result') {
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
@@ -13183,20 +13336,19 @@
 
     var centerHtml = '';
     if (phase === 'flip') {
-      centerHtml = '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が めくります' + bbgWaitDotsHtml() + '</div>';
-    } else if (phase === 'call' && !revealed) {
+      centerHtml = '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'の タップまち' + bbgWaitDotsHtml() + '</div>';
+    } else if (phase === 'call') {
+      // テーブルには こたえを出さない（コール中の人に見えてしまうため）。
       centerHtml =
         '<div class="dd-answer dd-answer--hidden">❓</div>' +
-        '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（参加者の端末で こたえあわせ）</div>';
-    } else if (phase === 'call' && revealed) {
-      centerHtml = ddAnswerHtml(room);
+        '<div class="bz-hint">' + escapeHtml(ddName(room, turnMid)) + 'が コールちゅう…（こたえは 各プレイヤーの がめんに。まちがいなら 本人が ながおしで ひきとり）</div>';
     } else if (phase === 'croc') {
-      centerHtml = '<div class="dd-answer">🐊 たたけ！！</div>';
+      centerHtml = '<div class="dd-answer">🐊 がめんを たたけ！！</div>';
     } else if (phase === 'crocResult') {
       var cr = (room && room.crocResult) || {};
       centerHtml =
         ddCrocListHtml(room) +
-        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が ひきとって さいかい（参加者の端末で「つぎへ」）</div>';
+        '<div class="bz-hint">' + escapeHtml(ddName(room, cr.loserMid)) + 'が ひきとりました。' + escapeHtml(ddName(room, cr.loserMid)) + 'の タップで さいかい</div>';
     }
 
     render(
@@ -13343,10 +13495,9 @@
         // ignore
       }
       try {
-        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase + '|' + (room && room.revealed ? '1' : '0');
+        var sndKey = String(parseIntSafe(room && room.turnCount, 0) || 0) + '|' + phase;
         if (tUi.fxReady && sndKey !== tUi.lastSndKey) {
-          if (phase === 'call' && !(room && room.revealed)) bbgFx.reveal();
-          else if (phase === 'call' && room && room.revealed) bbgFx.play();
+          if (phase === 'call') bbgFx.reveal();
           else if (phase === 'croc') bbgFx.notify();
           else if (phase === 'crocResult') bbgFx.miss();
         }
@@ -28486,25 +28637,18 @@
     }
 
     if (phase === 'call') {
-      if (!room.revealed) {
-        return {
-          key: 'dd_rev|' + String(turnCount),
-          min: 1000,
-          max: 2000,
-          label: ddName(room, turnMid) + ' が コールちゅう…',
-          run: function () {
-            return ddReveal(s.roomId);
-          }
-        };
-      }
+      // コール（口頭）のぶんの間を置いてから、おてつき（本人のながおし）か つぎの人のタップ。
+      var jIdx = parseIntSafe(room && room.turnIdx, 0) || 0;
+      if (jIdx < 0 || jIdx >= order.length) jIdx = 0;
+      var nextMid = String(order[(jIdx + 1) % order.length] || '');
       var miss = demoBzRoll(s, 'dd_judge|' + String(turnCount)) < 15;
       return {
         key: 'dd_judge|' + String(turnCount),
-        min: 900,
-        max: 1700,
-        label: miss ? ddName(room, turnMid) + ' は おてつき！' : ddName(room, turnMid) + ' は せいかい',
+        min: 1100,
+        max: 2100,
+        label: miss ? ddName(room, turnMid) + ' が ながおしで ひきとり！' : ddName(room, nextMid) + ' が タップで じぶんの ばん',
         run: function () {
-          return miss ? ddJudgeMiss(s.roomId) : ddJudgeOk(s.roomId);
+          return miss ? ddJudgeMiss(s.roomId, turnMid) : ddTapNext(s.roomId, nextMid);
         }
       };
     }
@@ -28543,13 +28687,15 @@
     }
 
     if (phase === 'crocResult') {
+      var loserMid = String((room.crocResult && room.crocResult.loserMid) || '');
+      if (!loserMid) return null;
       return {
         key: 'dd_next|' + String(turnCount),
         min: 1400,
         max: 2400,
-        label: 'けっかを 見て つぎへ',
+        label: ddName(room, loserMid) + ' が タップで さいかい',
         run: function () {
-          return ddCrocNext(s.roomId);
+          return ddCrocResume(s.roomId, loserMid);
         }
       };
     }

@@ -1231,7 +1231,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
 /* ステータスバー/ログ/ランキングは bohnanza の共用HUDクラス(.bz-top/.bz-log/.bz-rank等)を再利用。
    カード画像(./assets/dodelido/<いろ>_<どうぶつ>.png / croc.png)が用意されるまでは、
    プレースホルダー(色わく+動物絵文字+名前+色名)だけで遊べるようにする。 */
-.dd-screen{gap:10px}
+.dd-screen{gap:10px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .dd-remain{font-size:13px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 
 /* 3つの場 */
@@ -1288,9 +1288,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
 }
 .dd-card-img.is-loaded{opacity:1}
 
-/* アクション（めくる/コール/ワニ） */
+/* アクション（タップ進行の案内。操作は「がめんのどこでもタップ/ながおし」） */
 .dd-act{display:flex;flex-direction:column;gap:8px}
-.dd-flip-btn{width:100%;padding:16px;font-size:19px;font-weight:900}
 .dd-answer{font-size:28px;font-weight:900;text-align:center;color:var(--accent);line-height:1.25;animation:ddPop .22s ease}
 .dd-answer--hidden{color:var(--muted);animation:none}
 @keyframes ddPop{from{transform:scale(.7);opacity:0}to{transform:scale(1);opacity:1}}
@@ -1303,16 +1302,34 @@ body.bbg-demo-on .app{padding-bottom:104px}
 }
 .dd-chip--turtle{border-color:#22c55e}
 .dd-chip--none{color:var(--muted)}
-.dd-judge{display:flex;gap:8px}
-.dd-judge button{flex:1 1 0;padding:13px 8px;font-size:15px;font-weight:900;min-width:0}
-.dd-miss-btn{border-color:var(--danger);color:var(--danger)}
 
-/* ワニの反射しょうぶ */
-.dd-croc-btn{
-  width:100%;min-height:104px;font-size:24px;font-weight:900;
-  background:linear-gradient(180deg,#ff5a6a,#c2273a);border:none;color:#fff;border-radius:14px;
+/* タップ進行のプロンプト */
+.dd-prompt{
+  font-size:22px;font-weight:900;text-align:center;line-height:1.45;color:var(--accent);
+  padding:12px 0;animation:ddPromptPulse 1.1s ease-in-out infinite alternate;
+}
+.dd-prompt--sub{font-size:16px;padding:6px 0}
+.dd-prompt--croc{
+  font-size:26px;color:#fff;border-radius:14px;padding:28px 8px;
+  background:linear-gradient(180deg,#ff5a6a,#c2273a);
   animation:ddCrocPulse .5s ease-in-out infinite alternate;
 }
+@keyframes ddPromptPulse{from{opacity:.72;transform:scale(.985)}to{opacity:1;transform:scale(1)}}
+
+/* ながおし（おてつき ひきとり）インジケータ */
+.dd-hold{
+  position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:60;
+  width:min(320px,80vw);padding:10px 14px;border-radius:999px;
+  background:rgba(24,8,12,.94);border:1px solid var(--danger);color:var(--danger);
+  font-size:13px;font-weight:900;text-align:center;overflow:hidden;pointer-events:none;
+}
+.dd-hold::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:0;
+  background:rgba(255,90,106,.30);animation:ddHoldFill .65s linear forwards;
+}
+@keyframes ddHoldFill{from{width:0}to{width:100%}}
+
+/* ワニの反射しょうぶ */
 .dd-croc-done{font-size:18px;font-weight:900;text-align:center;color:var(--ok);padding:8px 0}
 .dd-tapline{display:flex;gap:6px;flex-wrap:wrap}
 .dd-tap{
@@ -1358,8 +1375,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
 @media (max-height:820px){
   .dd-screen{gap:8px}
   .dd-answer{font-size:24px}
-  .dd-croc-btn{min-height:84px;font-size:21px}
-  .dd-flip-btn{padding:12px;font-size:17px}
+  .dd-prompt{font-size:19px;padding:8px 0}
+  .dd-prompt--croc{font-size:22px;padding:20px 8px}
   .dd-pile{padding:6px 5px 3px}
   .dd-card-emoji{font-size:26px}
 }
