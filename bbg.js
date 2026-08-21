@@ -12662,6 +12662,38 @@
     return '<div class="bz-rank">' + out + '</div>';
   }
 
+  // 番手のモーダルは カードの上（場の領域）に重ねて出す（1.2秒で消える・タップは奪わない）。
+  // 画面ぜんたいを覆う共通オーバーレイ（bbgShowTurnOverlay）は使わない: タップエリアを隠さないため。
+  function ddShowTurnOverlay(rootEl, label) {
+    try {
+      var box = rootEl && rootEl.querySelector ? rootEl.querySelector('.dd-pilesbox') : null;
+      if (!box) return;
+      var olds = box.querySelectorAll('.dd-turnov');
+      for (var i = 0; i < olds.length; i++) {
+        if (olds[i] && olds[i].parentNode) olds[i].parentNode.removeChild(olds[i]);
+      }
+      var el = document.createElement('div');
+      el.className = 'dd-turnov';
+      el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = '<b>' + escapeHtml(String(label == null ? '' : label)) + '</b>';
+      box.appendChild(el);
+      setTimeout(function () {
+        try {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } catch (e1) {
+          // ignore
+        }
+      }, 1200);
+    } catch (e) {
+      // ignore
+    }
+    try {
+      bbgFx.turn();
+    } catch (e2) {
+      // ignore
+    }
+  }
+
   // -------------------- dodelido: プレイヤー画面 --------------------
   // プレイ中の情報は最低限（3つの場・自分ののこり枚数・一行の合図）。
   // コールの正解・ログ・ほかの人の枚数・説明文は出さない（必要なことは口頭で確認するベース）。
@@ -12746,11 +12778,13 @@
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple">' +
-      '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
-      ddLineHtml(room, playerId) +
+      '<div class="dd-head">' + ddLineHtml(room, playerId) + bbgFxToggleHtml() + '</div>' +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       '<div class="dd-tapzone' + zoneCls + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
-      '<div class="dd-count"><span>のこり</span><b>' + escapeHtml(String(me.deck.length)) + '</b><span>まい</span></div>' +
+      // ワニ中は のこり枚数を出さない（全員のタップ順が画面に収まるように）。
+      (phase === 'croc' || phase === 'crocResult'
+        ? ''
+        : '<div class="dd-count"><span>のこり</span><b>' + escapeHtml(String(me.deck.length)) + '</b><span>まい</span></div>') +
       ddCrocOrderHtml(
         room,
         phase === 'croc' && canOperate ? '<button type="button" id="ddCrocCloseBtn" class="ghost dd-ord-btn">うちきる</button>' : ''
@@ -12905,7 +12939,7 @@
       try {
         var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
         if (ui.fxReady && phase !== 'result' && turnKey !== ui.lastTurnKey) {
-          bbgShowTurnOverlay(String(turnMid) === String(playerId) ? 'あなたの ばん！' : ddName(room, turnMid) + 'の ばん');
+          ddShowTurnOverlay(viewEl, String(turnMid) === String(playerId) ? 'あなたの ばん！' : ddName(room, turnMid) + 'の ばん');
         }
         ui.lastTurnKey = turnKey;
       } catch (eT) {
@@ -13281,8 +13315,7 @@
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple bz-table">' +
-      '<div class="dd-fxwrap">' + bbgFxToggleHtml() + '</div>' +
-      ddLineHtml(room, '') +
+      '<div class="dd-head">' + ddLineHtml(room, '') + bbgFxToggleHtml() + '</div>' +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       ddCrocOrderHtml(room) +
       '<div class="bz-seats">' + seats + '</div>' +
@@ -13406,7 +13439,7 @@
       try {
         var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
         if (tUi.fxReady && phase !== 'result' && turnKey !== tUi.lastTurnKey) {
-          bbgShowTurnOverlay(ddName(room, turnMid) + 'の ばん');
+          ddShowTurnOverlay(viewEl, ddName(room, turnMid) + 'の ばん');
         }
         tUi.lastTurnKey = turnKey;
       } catch (eT) {

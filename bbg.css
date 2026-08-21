@@ -1235,12 +1235,28 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-screen{gap:10px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .dd-simple{align-items:center;text-align:center}
 .dd-simple > *{width:100%}
+/* タイトル行: 左〜中央が番手表示、右はしに音のON/OFF */
+.dd-head{display:flex;align-items:center;gap:8px}
+.dd-head .dd-line{flex:1 1 auto;min-width:0;text-align:center}
+.dd-head .bbg-fx-toggle{position:static;flex:0 0 auto}
 .dd-fxwrap{display:flex;justify-content:flex-end}
 .dd-fxwrap .bbg-fx-toggle{position:static}
 .dd-remain{font-size:13px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 
 /* 3つの場 */
-.dd-pilesbox{padding:14px 10px}
+.dd-pilesbox{padding:14px 10px;position:relative}
+/* 番手のモーダル: カードの上に重ねて1.2秒だけ（タップは奪わない） */
+.dd-turnov{
+  position:absolute;inset:0;z-index:5;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;
+  border-radius:var(--radius);background:rgba(6,10,20,.62);
+  animation:ddTurnOv 1.2s ease forwards;
+}
+.dd-turnov b{
+  font-size:clamp(24px,6vw,40px);font-weight:900;color:var(--accent);
+  text-shadow:0 2px 12px rgba(0,0,0,.8);text-align:center;line-height:1.3;
+}
+@keyframes ddTurnOv{0%{opacity:0;transform:scale(.92)}14%{opacity:1;transform:scale(1)}78%{opacity:1}100%{opacity:0}}
 .dd-piles{display:flex;gap:10px;justify-content:center;align-items:center}
 .dd-pile{border-radius:14px;padding:6px;flex:0 1 auto}
 .dd-pile--last{background:rgba(91,157,255,.10);box-shadow:0 0 0 2px rgba(91,157,255,.45)}
