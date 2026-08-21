@@ -1299,18 +1299,40 @@ body.bbg-demo-on .app{padding-bottom:104px}
 /* ワニのうちきり（端末が動かない人がいるとき用・目立たせない） */
 .dd-rescue button{padding:5px 12px;font-size:12px;opacity:.6}
 
-/* ながおし（おてつき ひきとり）インジケータ */
-.dd-hold{
-  position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:60;
-  width:min(320px,80vw);padding:10px 14px;border-radius:999px;
-  background:rgba(24,8,12,.94);border:1px solid var(--danger);color:var(--danger);
-  font-size:13px;font-weight:900;text-align:center;overflow:hidden;pointer-events:none;
+/* タップエリア（操作はここだけ。文言は「いま自分ができること」を一語で） */
+.dd-tapzone{
+  position:relative;overflow:hidden;min-height:112px;
+  border:2px dashed var(--line2);border-radius:16px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:900;color:var(--muted);
+  background:rgba(255,255,255,.02);-webkit-tap-highlight-color:transparent;
 }
-.dd-hold::before{
+.dd-tapzone > span{position:relative;z-index:1}
+.dd-tapzone--on{border-style:solid;border-color:var(--accent);color:var(--accent);background:rgba(91,157,255,.08);animation:ddLinePulse 1.1s ease-in-out infinite alternate}
+.dd-tapzone--hint{font-size:14px}
+.dd-tapzone--croc{
+  border-style:solid;border-color:#ff5a6a;color:#fff;font-size:26px;
+  background:linear-gradient(180deg,#ff5a6a,#c2273a);animation:ddCrocPulse .5s ease-in-out infinite alternate;
+}
+.dd-tapzone--done{border-style:solid;border-color:var(--ok);color:var(--ok)}
+/* ながおし中: 左から赤く満ちる（650msで発動・はなすと消える） */
+.dd-tapzone--hold::after{
   content:"";position:absolute;left:0;top:0;bottom:0;width:0;
-  background:rgba(255,90,106,.30);animation:ddHoldFill .65s linear forwards;
+  background:rgba(255,90,106,.35);animation:ddHoldFill .65s linear forwards;
 }
 @keyframes ddHoldFill{from{width:0}to{width:100%}}
+
+/* ワニのタップ順（①名前 秒 … 最遅に🐊） */
+.dd-order{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.dd-ord{
+  display:inline-flex;align-items:center;gap:4px;
+  font-size:13px;font-weight:800;border:1px solid var(--line2);border-radius:999px;
+  padding:3px 10px;background:var(--card2);
+}
+.dd-ord b{font-size:12px;color:var(--accent)}
+.dd-ord em{font-style:normal;font-size:11px;color:var(--muted)}
+.dd-ord--wait{opacity:.6}
+.dd-ord--loser{border-color:var(--danger);color:var(--danger)}
 
 /* 勝者の1行 */
 .dd-winline{font-size:20px;font-weight:900;text-align:center;color:var(--warn)}
@@ -1330,6 +1352,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-count b{font-size:72px}
   .dd-line{font-size:20px}
   .dd-line--croc{font-size:26px}
+  .dd-tapzone{min-height:140px;font-size:22px}
+  .dd-tapzone--croc{font-size:30px}
 }
 
 /* 高さ820以下のタブレット横置き: 少しつめる */
@@ -1337,7 +1361,9 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-screen{gap:8px}
   .dd-card{height:clamp(130px,26vh,220px)}
   .dd-card{height:clamp(130px,26dvh,220px)}
-  .dd-count b{font-size:60px}
+  .dd-count b{font-size:56px}
+  .dd-tapzone{min-height:104px}
+  .dd-pilesbox{padding:10px}
 }
 
 /* ==================== ノースクロール化（タブレット優先・2026-08） ====================
