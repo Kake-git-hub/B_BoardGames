@@ -2,7 +2,7 @@
 // SW_VERSION は release.ps1 がリリースごとに自動更新する。
 // このファイルの内容が変わるとブラウザがSW更新を検知し、
 // install(新キャッシュ作成) → activate(旧キャッシュ削除) → ページ側が自動リロード、で最新版に切り替わる。
-const SW_VERSION = '20260821235037';
+const SW_VERSION = '20260827140731';
 const CACHE_NAME = 'bbg-cache-' + SW_VERSION;
 const ASSETS_TO_CACHE = [
   './',

@@ -12349,16 +12349,22 @@
     });
   }
 
-  // おてつき（まちがい・言いよどみ・おそすぎ）。コールした本人の「ながおし」でだけ発動。
-  // 場の全カードをひきとって、同じ人から さいかい。
+  // おてつき（まちがい・言いよどみ・おそすぎ）。「ながおし」した本人が 場の全カードをひきとる。
+  // コールした本人にかぎらず、まえのラウンドの まちがいに あとから気づいた人も
+  // 自分の「ながおし」で 遡ってひきとれる（だれの番かに関係なく、ひきとった本人から さいかい）。
+  // ※ フェーズは call だけでよい: せいかいのタップ(ddTapNext)は そのまま次のめくりに入るため、
+  //   場にカードがあるのは call の間だけ（flip は場が空のときにしか来ない）。
   function ddJudgeMiss(roomId, mid) {
     return ddTxn(roomId, function (st) {
       if (String(st.phase || '') !== 'call') return false;
-      var pid = ddTurnMid(st);
-      if (!mid || String(mid) !== String(pid)) return false;
+      var order = Array.isArray(st.order) ? st.order : [];
+      var pid = String(mid || '');
+      if (!pid || order.indexOf(pid) < 0) return false;
       var call = ddComputeCall(st.piles);
       var taken = ddTakeAllPiles(st, pid);
+      if (!taken) return false;
       ddPushLog(st, ddName(st, pid) + 'が おてつき！（せいかいは「' + call.text + '」）場の' + String(taken) + 'まいを ひきとり');
+      st.turnIdx = order.indexOf(pid);
       return ddNextTurn(st, false);
     });
   }
@@ -12473,6 +12479,16 @@
   }
 
   // -------------------- dodelido: 表示部品 --------------------
+
+  // スマホ横置きかどうか（bbg.css の同名 media query と条件を一致させること）。
+  // 横置き中はカードを画面いっぱいに出し、タップエリアは画面ぜんたいになる。
+  function ddPhoneLandscape() {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(orientation: landscape) and (max-height: 520px)').matches);
+    } catch (e) {
+      return false;
+    }
+  }
 
   function ddCardImgSrc(key) {
     var k = String(key || '');
@@ -12760,6 +12776,10 @@
       } else if (phase === 'call' && isNextMe) {
         zoneLabel = 'タップで つぎへ';
         zoneCls = ' dd-tapzone--on';
+      } else if (phase === 'call') {
+        // コール中は だれでも「ながおし」で 自分のまちがいに遡って気づいて ひきとれる
+        zoneLabel = 'まちがいに きづいたら ながおし';
+        zoneCls = ' dd-tapzone--hint';
       } else if (phase === 'croc') {
         var tapsZ = ddNormTaps(room && room.croc && room.croc.taps);
         var tappedZ = tapsZ[playerId] !== undefined;
@@ -12780,7 +12800,7 @@
       '<div class="stack bz-screen dd-screen dd-simple">' +
       '<div class="dd-head">' + ddLineHtml(room, playerId) + bbgFxToggleHtml() + '</div>' +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
-      '<div class="dd-tapzone' + zoneCls + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
+      '<div class="dd-tapzone' + zoneCls + (zoneLabel ? '' : ' dd-tapzone--idle') + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
       // ワニ中は のこり枚数を出さない（全員のタップ順が画面に収まるように）。
       (phase === 'croc' || phase === 'crocResult'
         ? ''
@@ -12985,10 +13005,13 @@
     var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false };
 
     // ながおし中はタップエリア自体が左から赤く満ちていく（はなすと消える）。
+    // スマホ横置きではカードエリアも赤く満ちる（タップエリア=画面ぜんたいのため）。
     function ddHoldHide() {
       try {
         var z = document.getElementById('ddTapZone');
         if (z && z.classList) z.classList.remove('dd-tapzone--hold');
+        var pb = viewEl && viewEl.querySelector ? viewEl.querySelector('.dd-pilesbox') : null;
+        if (pb && pb.classList) pb.classList.remove('dd-tapzone--hold');
       } catch (e) {
         // ignore
       }
@@ -12998,16 +13021,23 @@
       try {
         var z = document.getElementById('ddTapZone');
         if (z && z.classList) z.classList.add('dd-tapzone--hold');
+        if (ddPhoneLandscape()) {
+          var pb = viewEl && viewEl.querySelector ? viewEl.querySelector('.dd-pilesbox') : null;
+          if (pb && pb.classList) pb.classList.add('dd-tapzone--hold');
+        }
       } catch (e) {
         // ignore
       }
     }
 
     // タップ/ながおしは カードの下のタップエリア（#ddTapZone）の中だけ有効。
+    // スマホ横置きだけは プレイ画面ぜんたい（カードエリアふくむ）を有効にする。
     function ddInTapZone(ev) {
       try {
         var t = ev && ev.target;
-        return !!(t && t.closest && t.closest('#ddTapZone'));
+        if (!t || !t.closest) return false;
+        if (t.closest('#ddTapZone')) return true;
+        return !!(ddPhoneLandscape() && t.closest('.dd-simple'));
       } catch (e) {
         return false;
       }
@@ -13108,8 +13138,10 @@
         ddSlapNow();
         return;
       }
-      // ながおし（おてつき）はコールした本人だけ。
-      if (phase === 'call' && playerId && String(ddTurnMid(lastRoom)) === playerId) {
+      // ながおし（おてつき）はコール中なら だれでも（まえのまちがいに気づいた人の遡りひきとり）。
+      // ひきとるのは ながおしした本人（ddJudgeMiss が playerId に回収させる）。
+      var orderH = Array.isArray(lastRoom && lastRoom.order) ? lastRoom.order : [];
+      if (phase === 'call' && playerId && orderH.indexOf(playerId) >= 0) {
         ddHoldShow();
         ptr.holdTimer = setTimeout(function () {
           ptr.holdTimer = null;
@@ -27088,7 +27120,7 @@
 
   function demoIsDemoScreen(screen) {
     var sc = String(screen || '');
-    return sc === 'demo_loveletter' || sc === 'demo_hannin' || sc === 'demo_bohnanza' || sc === 'demo_dodelido';
+    return sc === 'demo_loveletter' || sc === 'demo_hannin' || sc === 'demo_bohnanza' || sc === 'demo_dodelido' || sc === 'demo_codenames';
   }
 
   function demoMakeRoomId() {
@@ -27118,7 +27150,23 @@
     if (g === 'll') return 'ラブレター';
     if (g === 'bz') return 'ボーナンザ';
     if (g === 'dd') return 'ドデリド';
+    if (g === 'cn') return 'コードネーム';
     return '犯人は踊る';
+  }
+
+  // コードネームのボット割り当ては固定（4人ちょうどで最小構成になる）:
+  // bot1=赤スパイマスター / bot2=赤諜報員 / bot3=青スパイマスター / bot4=青諜報員
+  var DEMO_CN_ASSIGN = [
+    { team: 'red', role: 'spymaster' },
+    { team: 'red', role: 'operative' },
+    { team: 'blue', role: 'spymaster' },
+    { team: 'blue', role: 'operative' }
+  ];
+
+  function demoCnRoleLabel(i) {
+    var a = DEMO_CN_ASSIGN[i];
+    if (!a) return '';
+    return (a.team === 'red' ? '赤' : '青') + (a.role === 'spymaster' ? 'マスター' : '諜報員');
   }
 
   function demoRandBetween(min, max) {
@@ -27289,7 +27337,16 @@
     var q = {};
     var v = getCacheBusterParam();
     if (v) q.v = v;
-    q.screen = s.game === 'll' ? 'demo_loveletter' : s.game === 'bz' ? 'demo_bohnanza' : s.game === 'dd' ? 'demo_dodelido' : 'demo_hannin';
+    q.screen =
+      s.game === 'll'
+        ? 'demo_loveletter'
+        : s.game === 'bz'
+          ? 'demo_bohnanza'
+          : s.game === 'dd'
+            ? 'demo_dodelido'
+            : s.game === 'cn'
+              ? 'demo_codenames'
+              : 'demo_hannin';
     q.room = String(s.roomId || '');
     q.view = String(s.view || 'bot1');
     var idx = demoViewIndex(s.view);
@@ -27340,6 +27397,32 @@
     return createBohnanzaRoom(s.roomId, '', members);
   }
 
+  // コードネームはロビー画面を通さず、作成→4人参加→チーム/役職を固定で割り当ててから開始する。
+  function demoCreateCodenames(s) {
+    return createCodenamesRoom(s.roomId, { size: 5 })
+      .then(function () {
+        return demoCnJoinSeq(s, 0);
+      })
+      .then(function () {
+        return startCodenamesGame(s.roomId);
+      });
+  }
+
+  function demoCnJoinSeq(s, i) {
+    if (!s || s.stopped) return Promise.resolve(null);
+    if (i >= s.botIds.length) return Promise.resolve(null);
+    var pid = String(s.botIds[i] || '');
+    var nm = demoBotName(i);
+    var a = DEMO_CN_ASSIGN[i] || DEMO_CN_ASSIGN[0];
+    return joinPlayerInCodenamesRoom(s.roomId, pid, nm, i === 0)
+      .then(function () {
+        return setCodenamesPlayerProfile(s.roomId, pid, nm, a.team, a.role);
+      })
+      .then(function () {
+        return demoCnJoinSeq(s, i + 1);
+      });
+  }
+
   // ドデリドも同じく createDodelidoRoom が配札まで済ませる。
   function demoCreateDodelido(s) {
     var members = [];
@@ -27354,6 +27437,7 @@
   function demoCreateAndStart(s) {
     if (s.game === 'bz') return demoCreateBohnanza(s);
     if (s.game === 'dd') return demoCreateDodelido(s);
+    if (s.game === 'cn') return demoCreateCodenames(s);
     var settings = { order: s.botIds.slice() };
     var create = s.game === 'll' ? createLoveLetterRoom(s.roomId, settings) : createHanninRoom(s.roomId, settings);
     return create
@@ -27374,7 +27458,16 @@
   }
 
   function demoEnsureRoom(s) {
-    var path = s.game === 'll' ? loveletterRoomPath(s.roomId) : s.game === 'bz' ? bzRoomPath(s.roomId) : s.game === 'dd' ? ddRoomPath(s.roomId) : hanninRoomPath(s.roomId);
+    var path =
+      s.game === 'll'
+        ? loveletterRoomPath(s.roomId)
+        : s.game === 'bz'
+          ? bzRoomPath(s.roomId)
+          : s.game === 'dd'
+            ? ddRoomPath(s.roomId)
+            : s.game === 'cn'
+              ? codenamesRoomPath(s.roomId)
+              : hanninRoomPath(s.roomId);
     return getValueOnce(path).then(function (room) {
       if (room) return null; // リロード等で既にあるルームはそのまま使う
       return demoCreateAndStart(s);
@@ -27383,7 +27476,16 @@
 
   function demoSubscribe(s) {
     var myGen = s.gen;
-    var sub = s.game === 'll' ? subscribeLoveLetterRoom : s.game === 'bz' ? subscribeBohnanzaRoom : s.game === 'dd' ? subscribeDodelidoRoom : subscribeHanninRoom;
+    var sub =
+      s.game === 'll'
+        ? subscribeLoveLetterRoom
+        : s.game === 'bz'
+          ? subscribeBohnanzaRoom
+          : s.game === 'dd'
+            ? subscribeDodelidoRoom
+            : s.game === 'cn'
+              ? subscribeCodenamesRoom
+              : subscribeHanninRoom;
     return sub(s.roomId, function (room) {
       if (!s || s.stopped || s.gen !== myGen) return;
       if (demoState !== s) return;
@@ -27419,12 +27521,17 @@
         if (s.game === 'll') routeLoveLetterTable(s.roomId, true);
         else if (s.game === 'bz') routeBohnanzaTable(s.roomId, true);
         else if (s.game === 'dd') routeDodelidoTable(s.roomId, true);
+        else if (s.game === 'cn') routeCodenamesTable(s.roomId, true);
         else routeHanninTable(s.roomId, true);
       } else {
         var pid = String(s.botIds[idx] || '');
         if (s.game === 'll') {
           setLoveLetterPlayerId(s.roomId, pid);
           routeLoveLetterPlayer(s.roomId, false);
+        } else if (s.game === 'cn') {
+          // routeCodenamesPlayer は localStorage の自分ID（部屋ごと）を見る。
+          setCodenamesPlayerId(s.roomId, pid);
+          routeCodenamesPlayer(s.roomId, false);
         } else if (s.game === 'bz') {
           // routeBohnanzaPlayer は ?player= を見る（demoReplaceUrl で入れてある）
           routeBohnanzaPlayer(s.roomId, false);
@@ -27472,7 +27579,9 @@
 
     var viewOpts = '';
     for (var i = 0; i < DEMO_BOT_COUNT; i++) {
-      viewOpts += '<option value="bot' + String(i + 1) + '">' + escapeHtml(demoBotName(i)) + 'の画面</option>';
+      // コードネームは役割が固定なので、視点選択にも役割を出す。
+      var roleTag = s.game === 'cn' ? '（' + demoCnRoleLabel(i) + '）' : '';
+      viewOpts += '<option value="bot' + String(i + 1) + '">' + escapeHtml(demoBotName(i) + roleTag) + 'の画面</option>';
     }
     viewOpts += '<option value="table">テーブル</option>';
 
@@ -27593,6 +27702,7 @@
       if (s.game === 'll') return String((room && room.phase) || '') === 'finished';
       if (s.game === 'bz') return String((room && room.phase) || '') === 'result';
       if (s.game === 'dd') return String((room && room.phase) || '') === 'result';
+      if (s.game === 'cn') return String((room && room.phase) || '') === 'finished';
       var st = room && room.state ? room.state : null;
       return !!(st && st.result && st.result.decidedAt);
     } catch (e) {
@@ -27654,7 +27764,16 @@
 
     var plan = null;
     try {
-      plan = s.game === 'll' ? demoPlanLoveLetter(s, room) : s.game === 'bz' ? demoPlanBohnanza(s, room) : s.game === 'dd' ? demoPlanDodelido(s, room) : demoPlanHannin(s, room);
+      plan =
+        s.game === 'll'
+          ? demoPlanLoveLetter(s, room)
+          : s.game === 'bz'
+            ? demoPlanBohnanza(s, room)
+            : s.game === 'dd'
+              ? demoPlanDodelido(s, room)
+              : s.game === 'cn'
+                ? demoPlanCodenames(s, room)
+                : demoPlanHannin(s, room);
     } catch (ePlan) {
       plan = null;
     }
@@ -28592,14 +28711,28 @@
       var jIdx = parseIntSafe(room && room.turnIdx, 0) || 0;
       if (jIdx < 0 || jIdx >= order.length) jIdx = 0;
       var nextMid = String(order[(jIdx + 1) % order.length] || '');
-      var miss = demoBzRoll(s, 'dd_judge|' + String(turnCount)) < 15;
+      var jRoll = demoBzRoll(s, 'dd_judge|' + String(turnCount));
+      var miss = jRoll < 15;
+      // 遡りひきとり: まえに回答した人が あとから自分のまちがいに気づいて ながおし（新ルールの確認用）。
+      var retroMid = '';
+      if (!miss && jRoll < 22 && order.length > 1) {
+        retroMid = String(order[(jIdx + order.length - 1) % order.length] || '');
+        if (!retroMid || retroMid === turnMid) retroMid = '';
+      }
+      var jLabel = miss
+        ? ddName(room, turnMid) + ' が ながおしで ひきとり！'
+        : retroMid
+          ? ddName(room, retroMid) + ' が まえの まちがいに きづいて ながおし！'
+          : ddName(room, nextMid) + ' が タップで じぶんの ばん';
       return {
         key: 'dd_judge|' + String(turnCount),
         min: 1100,
         max: 2100,
-        label: miss ? ddName(room, turnMid) + ' が ながおしで ひきとり！' : ddName(room, nextMid) + ' が タップで じぶんの ばん',
+        label: jLabel,
         run: function () {
-          return miss ? ddJudgeMiss(s.roomId, turnMid) : ddTapNext(s.roomId, nextMid);
+          if (miss) return ddJudgeMiss(s.roomId, turnMid);
+          if (retroMid) return ddJudgeMiss(s.roomId, retroMid);
+          return ddTapNext(s.roomId, nextMid);
         }
       };
     }
@@ -28654,6 +28787,133 @@
     return null;
   }
 
+  // -------------------- demo: コードネームの判断 --------------------
+  // ボットは盤面のこたえ(key)を知っている前提の疑似AI（デモは画面と進行の確認用）。
+  // ヒント語は固定リストから出す（盤面の単語とは無関係）。
+  var DEMO_CN_CLUE_WORDS = ['どうぶつ', 'たべもの', 'のりもの', 'しぜん', 'まるいもの', 'つめたいもの', 'そらのもの', 'いえのなか', 'ちいさいもの', 'ひかるもの'];
+
+  function demoCnBotId(s, team, role) {
+    for (var i = 0; i < DEMO_CN_ASSIGN.length; i++) {
+      if (DEMO_CN_ASSIGN[i].team === team && DEMO_CN_ASSIGN[i].role === role) return String(s.botIds[i] || '');
+    }
+    return '';
+  }
+
+  function demoPlanCodenames(s, room) {
+    var phase = String((room && room.phase) || '');
+
+    if (phase === 'lobby') {
+      // 開始が何らかの理由で流れたときの保険
+      return {
+        key: 'cn_start',
+        min: 700,
+        max: 1200,
+        label: 'ゲームを開始します',
+        run: function () {
+          return startCodenamesGame(s.roomId);
+        }
+      };
+    }
+
+    if (phase !== 'playing') return null;
+    var turn = room.turn || {};
+    var team = String(turn.team || '');
+    if (team !== 'red' && team !== 'blue') return null;
+    var teamJp = team === 'red' ? '赤' : '青';
+    var status = String(turn.status || '');
+    var turnNo = parseIntSafe(turn.turnNo, 0) || 0;
+
+    if (status === 'awaiting_clue') {
+      var smId = demoCnBotId(s, team, 'spymaster');
+      if (!smId) return null;
+      var prog = room.progress || {};
+      var remain = parseIntSafe(team === 'red' ? prog.redRemaining : prog.blueRemaining, 1) || 1;
+      var word = DEMO_CN_CLUE_WORDS[demoBzHash(String(s.roomId) + '|cnw|' + String(turnNo)) % DEMO_CN_CLUE_WORDS.length];
+      var num = Math.max(1, Math.min(remain, 1 + (demoBzHash(String(s.roomId) + '|cnn|' + String(turnNo)) % 3)));
+      return {
+        key: 'cn_clue|' + String(turnNo) + '|' + team,
+        min: 2400,
+        max: 4200,
+        label: teamJp + 'のスパイマスターが ヒントを考え中',
+        run: function () {
+          return submitCodenamesClue(s.roomId, smId, word, num);
+        }
+      };
+    }
+
+    if (status !== 'guessing') return null;
+    var opId = demoCnBotId(s, team, 'operative');
+    if (!opId) return null;
+    var board = room.board || {};
+    var words = Array.isArray(board.words) ? board.words : [];
+    var bkey = Array.isArray(board.key) ? board.key : [];
+    var revealed = Array.isArray(board.revealed) ? board.revealed : [];
+
+    // まだ伏せているカードを種類ごとに分ける
+    var own = [];
+    var other = [];
+    var assassin = [];
+    var ownKey = team === 'red' ? 'R' : 'B';
+    for (var i = 0; i < words.length; i++) {
+      if (revealed[i]) continue;
+      var k = String(bkey[i] || '');
+      if (k === ownKey) own.push(i);
+      else if (k === 'A') assassin.push(i);
+      else other.push(i);
+    }
+    if (!own.length && !other.length && !assassin.length) return null;
+
+    var guessesLeft = parseIntSafe(turn.guessesLeft, 0) || 0;
+
+    // 仮選択(pending)ずみなら それをめくる。まだなら まず仮選択（マーカーの見た目も確認できるように）。
+    var pending = turn.pending && typeof turn.pending === 'object' ? turn.pending : {};
+    var pendingIdx = -1;
+    var pks = Object.keys(pending);
+    for (var pj = 0; pj < pks.length; pj++) {
+      var pv = parseIntSafe(pks[pj], -1);
+      if (pending[pks[pj]] && pv >= 0 && !revealed[pv]) {
+        pendingIdx = pv;
+        break;
+      }
+    }
+    if (pendingIdx >= 0) {
+      return {
+        key: 'cn_reveal|' + String(turnNo) + '|' + String(guessesLeft) + '|' + String(pendingIdx),
+        min: 1300,
+        max: 2400,
+        label: teamJp + 'の諜報員が「' + String(words[pendingIdx] || '') + '」をめくる',
+        run: (function (idx3) {
+          return function () {
+            return revealCodenamesCard(s.roomId, opId, idx3);
+          };
+        })(pendingIdx)
+      };
+    }
+
+    // 65%で正解 / まれに暗殺者 / のこりは はずれ。同じ盤面なら毎tickおなじ選択になる。
+    var seed = String(s.roomId) + '|cnp|' + String(turnNo) + '|' + String(guessesLeft);
+    var roll = demoBzHash(seed) % 100;
+    var pick = -1;
+    if (roll < 65 && own.length) pick = own[demoBzHash(seed + '|o') % own.length];
+    else if (roll >= 98 && assassin.length) pick = assassin[0];
+    else if (other.length) pick = other[demoBzHash(seed + '|x') % other.length];
+    if (pick < 0 && own.length) pick = own[0];
+    if (pick < 0 && other.length) pick = other[0];
+    if (pick < 0 && assassin.length) pick = assassin[0];
+    if (pick < 0) return null;
+    return {
+      key: 'cn_mark|' + String(turnNo) + '|' + String(guessesLeft) + '|' + String(pick),
+      min: 1600,
+      max: 3000,
+      label: teamJp + 'の諜報員が「' + String(words[pick] || '') + '」を仮選択',
+      run: (function (idx2) {
+        return function () {
+          return toggleCodenamesPending(s.roomId, opId, idx2);
+        };
+      })(pick)
+    };
+  }
+
   // -------------------- demo: ルーティング --------------------
   function routeDemoLoveLetter() {
     return routeDemoGame('ll');
@@ -28669,6 +28929,10 @@
 
   function routeDemoDodelido() {
     return routeDemoGame('dd');
+  }
+
+  function routeDemoCodenames() {
+    return routeDemoGame('cn');
   }
 
   function routeDemoGame(game) {
@@ -28726,7 +28990,8 @@
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">🤖 デモ: ラブレター</a>' +
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>' +
         '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">🤖 デモ: ボーナンザ</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_dodelido">🤖 デモ: ドデリド</a>';
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_dodelido">🤖 デモ: ドデリド</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_codenames">🤖 デモ: コードネーム</a>';
       host.appendChild(box);
     } catch (e) {
       // ignore
@@ -29902,7 +30167,8 @@
         demo_loveletter: 1,
         demo_hannin: 1,
         demo_bohnanza: 1,
-        demo_dodelido: 1
+        demo_dodelido: 1,
+        demo_codenames: 1
       };
 
       // Host-mode is never allowed on restricted devices (even if URL is tampered).
@@ -29989,6 +30255,7 @@
     if (screen === 'demo_hannin') return routeDemoHannin();
     if (screen === 'demo_bohnanza') return routeDemoBohnanza();
     if (screen === 'demo_dodelido') return routeDemoDodelido();
+    if (screen === 'demo_codenames') return routeDemoCodenames();
 
     if (screen === 'codenames_rejoin') {
       if (!roomId) return routeHome();
