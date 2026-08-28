@@ -3,19 +3,12 @@ param(
   [switch]$NoCommit,
 
   # Where to publish.
-  # - stable: push to origin (GitHub Pages stable URL)
-  # - dev: push to dev remote (GitHub Pages dev URL)
-  # - both: push to both remotes
-  [ValidateSet('stable', 'dev', 'both')]
-  [string]$Channel = 'dev',
+  # 2026-08-29: dev リポジトリ(B_BoardGames-dev)は廃止したので stable(origin)のみ。
+  [ValidateSet('stable')]
+  [string]$Channel = 'stable',
 
-  # Remote names (defaults assume origin=stable, dev=dev).
-  [string]$StableRemote = 'origin',
-  [string]$DevRemote = 'dev',
-
-  # Optional: if set and dev remote is missing, it will be added automatically.
-  # Example: https://github.com/<user>/B_BoardGames-dev.git
-  [string]$DevRemoteUrl = ""
+  # Remote name (GitHub Pages の公開先)
+  [string]$StableRemote = 'origin'
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,27 +49,13 @@ function Replace-SwVersion([string]$path) {
 
 Replace-SwVersion "sw.js"
 
-function Ensure-Remote([string]$name, [string]$urlIfMissing) {
+function Ensure-Remote([string]$name) {
   $existing = git remote 2>$null | Where-Object { $_ -eq $name }
   if ($existing) { return }
-  if (-not $urlIfMissing) {
-    throw "Git remote '$name' is not configured. Add it with: git remote add $name <url>"
-  }
-  git remote add $name $urlIfMissing
-  if ($LASTEXITCODE -ne 0) {
-    throw "Failed to add git remote '$name' ($urlIfMissing)"
-  }
+  throw "Git remote '$name' is not configured. Add it with: git remote add $name <url>"
 }
 
-$pushStable = $Channel -eq 'stable' -or $Channel -eq 'both'
-$pushDev = $Channel -eq 'dev' -or $Channel -eq 'both'
-
-if ($pushStable) {
-  Ensure-Remote $StableRemote ""
-}
-if ($pushDev) {
-  Ensure-Remote $DevRemote $DevRemoteUrl
-}
+Ensure-Remote $StableRemote
 
 git add -A
 
@@ -94,18 +73,9 @@ if (-not $NoCommit) {
   }
 }
 
-# Push to selected channel(s)
-if ($pushStable) {
-  git push $StableRemote main
-  if ($LASTEXITCODE -ne 0) {
-    throw "git push $StableRemote main failed"
-  }
-}
-if ($pushDev) {
-  git push $DevRemote main
-  if ($LASTEXITCODE -ne 0) {
-    throw "git push $DevRemote main failed"
-  }
+git push $StableRemote main
+if ($LASTEXITCODE -ne 0) {
+  throw "git push $StableRemote main failed"
 }
 
 Write-Host "Released: channel=$Channel assets=$assetV"

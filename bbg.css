@@ -385,7 +385,15 @@ body.ll-player-screen .app{padding-top:10px}
 .ll-status-card{max-width:calc(100% - 120px)}
 .ll-player .ll-status-card{margin-right:auto}
 
-body.ll-player-screen .ll-piles-box{position:fixed;top:4px;right:4px;z-index:10000}
+/* 画面の右上に貼り付ける箱。position:fixed なので .app の余白が効かない。
+   ここで安全領域（ステータスバー／ノッチ）ぶんを自分でよけないと、
+   充電・電波マークの真下に潜り込んで読めなくなる。 */
+body.ll-player-screen .ll-piles-box{
+  position:fixed;
+  top:calc(4px + env(safe-area-inset-top, 0px));
+  right:calc(4px + env(safe-area-inset-right, 0px));
+  z-index:10000;
+}
 body.ll-player-screen{overflow-x:hidden}
 .header h1.gm-lobby-return{cursor:pointer}
 .header h1.gm-lobby-return:hover{text-decoration:underline}
@@ -458,10 +466,23 @@ body.ll-table-screen .app{max-width:980px}
 .ll-guess-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .ll-guess-grid button{width:100%}
 
-.ll-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px}
+/* モーダル。中身が高いときに上端がステータスバーへ潜らないよう安全領域を足す。 */
+.ll-overlay{
+  position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;
+  padding:16px;
+  padding-top:calc(16px + env(safe-area-inset-top, 0px));
+  padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px));
+}
 .ll-overlay.ll-sheet{align-items:center}
 .ll-overlay-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.6)}
-.ll-overlay-panel{position:relative;width:100%;max-width:520px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;max-height:calc(100vh - 32px);overflow:auto}
+/* 高さの上限は .ll-overlay の padding（安全領域ぶんを含む）を差し引いた残り。 */
+.ll-overlay-panel{
+  position:relative;width:100%;max-width:520px;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;
+  max-height:calc(100vh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow:auto;
+}
+.ll-overlay-panel{max-height:calc(100dvh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))}
 
 .ll-compare-row{display:flex;gap:10px;justify-content:space-between;align-items:flex-start;margin-top:6px}
 .ll-compare-col{flex:1;min-width:0}
