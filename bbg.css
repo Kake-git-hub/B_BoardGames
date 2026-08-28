@@ -18,6 +18,9 @@
   --shadow-s:0 2px 10px rgba(0,0,0,.22);
 }
 *{box-sizing:border-box}
+/* スクロールバーの出入りで中身が左右にずれないよう、はじめから場所を空けておく
+   （対応していないブラウザでは無視されるだけ）。 */
+html{scrollbar-gutter:stable}
 html,body{height:100%}
 body{
   margin:0;
@@ -30,9 +33,24 @@ body{
   font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Sans","Noto Sans JP",sans-serif;
   -webkit-font-smoothing:antialiased;
 }
-.app{max-width:520px;margin:0 auto;padding:16px}
+/* スマホのノッチ／ステータスバー（充電・電波マーク）と重ならないよう、
+   端末が教えてくる安全領域のぶんだけ内側に寄せる。
+   ホーム画面から起動したPWA（全画面）では上に値が入り、ブラウザのタブでは0になる。 */
+.app{
+  max-width:520px;margin:0 auto;
+  padding:16px;
+  padding-top:calc(16px + env(safe-area-inset-top, 0px));
+  padding-right:calc(16px + env(safe-area-inset-right, 0px));
+  padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px));
+  padding-left:calc(16px + env(safe-area-inset-left, 0px));
+}
 .header{padding:8px 4px 12px}
 .header-row{display:flex;justify-content:space-between;gap:12px;align-items:center}
+/* タイトルと効果音ボタンを横に並べる */
+.header-title{display:flex;align-items:center;gap:8px;min-width:0}
+/* ロビー・GM画面のヘッダーは細く（縦の場所を取らない） */
+.header--slim{padding:2px 4px 6px}
+.header--slim h1{font-size:15px}
 .header h1{
   margin:0;font-size:17px;font-weight:900;letter-spacing:.3px;
   display:flex;align-items:center;gap:7px;
@@ -236,6 +254,8 @@ hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 .ww-word-label{font-size:12px;font-weight:800;color:var(--muted);letter-spacing:1px;margin-bottom:6px}
 .ww-word{font-size:30px;font-weight:900;letter-spacing:1px;line-height:1.3;word-break:break-word}
 .ww-word--small{font-size:22px}
+/* ヘッダー右は2行ぶんで固定。行数（状態/ターン/残り時間）が変わってもワードカードが動かない。 */
+.ww-headright{text-align:right;line-height:1.25;min-height:2.5em}
 
 /* update toast */
 .bbg-toast{
@@ -319,13 +339,36 @@ body.ll-player-screen .app{padding-top:10px}
 /* Codenames: emphasize only the acting player (frame) */
 #view.cn-turn-actor::before{content:"";position:absolute;inset:-3px;border:3px solid var(--text);border-radius:12px;pointer-events:none}
 
-.cn-clue-row{display:flex;gap:10px;align-items:center;flex-wrap:nowrap}
+/* ヒント行は高さ固定。スパイマスターの「入力欄つき」と「表示だけ」で
+   高さが変わらないので、ヒントを送っても下の盤面が動かない。 */
+.cn-clue-row{display:flex;gap:10px;align-items:center;flex-wrap:nowrap;min-height:48px}
 .cn-clue-row input{flex:1;min-width:0}
 .cn-clue-num{max-width:90px}
 .cn-clue-view,.cn-clue-left{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cn-clue-view{flex:1 1 auto;min-width:0}
+.cn-clue-left{flex:0 0 auto}
 .cn-clue-view b,.cn-clue-left b{color:var(--text)}
+/* ターン終了はヒント行の中に置く（別行だと出没のたびに盤面が上下するため） */
+.cn-endturn{flex:0 0 auto;padding:7px 12px;font-size:12px;white-space:nowrap}
 
 .cn-pending .cn-word{color:var(--ok)}
+
+/* ヒント履歴: 最新が いちばん上。高さ上限つきの内部スクロールなので、
+   ヒントが増えても画面ぜんたいの高さは変わらない。 */
+.cn-log{
+  display:flex;flex-direction:column;gap:4px;
+  max-height:132px;overflow-y:auto;overscroll-behavior:contain;
+}
+.cn-log-row{
+  border:1px solid var(--line);border-radius:10px;
+  padding:5px 10px;background:var(--card2);align-items:center;
+}
+.cn-log-row:first-child{border-color:var(--line2);background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(0,0,0,0)),var(--card2)}
+.cn-log-row.cn-log-red{border-left:4px solid rgba(255,90,106,.75)}
+.cn-log-row.cn-log-blue{border-left:4px solid rgba(77,163,255,.75)}
+@media (max-height:820px){
+  .cn-log{max-height:104px}
+}
 
 /* Love Letter (mobile-first, no-scroll) */
 .ll-hand-wrap{display:flex;flex-direction:column;gap:10px}
@@ -731,12 +774,15 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 /* prefers-reduced-motion はこのファイル上部(253行付近)のグローバル指定で
    すべてのanimation/transitionが無効化されるため、ここでの個別対応は不要。 */
 
-/* 効果音トグル (bbgFxToggleHtml) */
+/* 効果音トグル。index.html のヘッダー（タイトルの横）に固定で置いてある。
+   プレイ画面には出さない（場所を取るため）。 */
 .bbg-fx-toggle{
   width:40px;height:40px;padding:0;font-size:18px;line-height:1;
   border:1px solid var(--line);border-radius:10px;background:var(--card2);
   display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
 }
+/* タイトル横は小さめに */
+.bbg-fx-toggle--header{width:30px;height:30px;font-size:15px;border-radius:9px}
 
 /* ターン開始オーバーレイ (bbgShowTurnOverlay)。pointer-events:noneでタップを奪わない。 */
 .bbg-turn-overlay{position:fixed;inset:0;z-index:8000;display:flex;align-items:center;justify-content:center;pointer-events:none}
@@ -860,18 +906,29 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 /* 使用できない理由の注記 */
 .ll-use-note{font-size:13px;line-height:1.4;font-weight:800;color:var(--warn);text-align:center}
 
-/* プレイヤー画面の「直近のプレイ」バナー */
+/* プレイヤー画面の「直近のプレイ」バナー。
+   まだプレイが無いときも同じ高さの空枠を出すので、最初のプレイで手札が下がらない。 */
 .ll-lastplay{
   display:flex;gap:8px;align-items:center;justify-content:center;
   border:1px solid var(--line);border-radius:12px;background:var(--card2);
-  padding:8px 10px;
+  padding:8px 10px;min-height:54px;
 }
+.ll-lastplay--empty{opacity:.5;border-style:dashed}
 .ll-lastplay-icon{width:24px;height:24px;object-fit:contain;border-radius:6px;flex:0 0 auto;background:#0f1520}
-.ll-lastplay-text{min-width:0;font-size:13px;line-height:1.4;font-weight:800;text-align:left}
+/* 文は最大2行。長い文でも枠の高さが変わらないので、下の手札の位置が動かない。 */
+.ll-lastplay-text{
+  min-width:0;font-size:13px;line-height:1.4;font-weight:800;text-align:left;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;
+}
 
-/* テーブル画面の直近プレイ(アイコン付き) */
-.ll-table-lastplay-banner{display:flex;gap:10px;align-items:center;justify-content:center}
+/* テーブル画面の直近プレイ(アイコン付き)。
+   空のときも同じ高さの枠を出す（最初のプレイで山札・墓地が上へ寄らないように）。 */
+.ll-table-lastplay-banner{display:flex;gap:10px;align-items:center;justify-content:center;min-height:58px}
 .ll-table-lastplay-icon{width:32px;height:32px;object-fit:contain;border-radius:8px;flex:0 0 auto;background:#0f1520}
+.ll-table-lastplay--empty{opacity:.45;border-style:dashed;font-weight:700}
+.hn-table .ll-table-lastplay-banner{min-height:62px}
+/* テーブルの文は1行で省略。折り返して枠が伸びると盤面（山札・墓地・席）が動くため。 */
+.ll-table-lastplay-banner>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* 山札残りわずか */
 .ll-deck-low{color:var(--danger)}
@@ -885,9 +942,6 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 /* ホスト救済(進行が止まったときの代理進行) */
 .ll-force-box{display:flex;flex-direction:column;gap:8px;align-items:center;padding:12px;border-color:var(--warn)}
 .ll-force-title{font-weight:900;color:var(--warn)}
-
-/* 効果音トグルを右寄せで置く行 */
-.ll-fx-row{display:flex;justify-content:flex-end}
 
 /* 席の揺れ(脱落演出)。手番席のパルス指定より優先させるため個別に上書きする。 */
 .ll-seat .ll-seat-card.bbg-shake,
@@ -935,7 +989,8 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 /* 墓地：直近3枚（右端が最新・古いものは半透明） */
 .hn-grave-item{display:inline-flex}
 .hn-grave-item--old{opacity:.55}
-.hn-grave-recent{display:flex;gap:6px;justify-content:center;margin-top:6px}
+/* 空でも高さを保つ（最初の捨て札で中央の山の位置が動かないように。56px幅の3:4＝約75px） */
+.hn-grave-recent{display:flex;gap:6px;justify-content:center;margin-top:6px;min-height:75px}
 .hn-grave-mini{width:56px;aspect-ratio:3/4;border-radius:8px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
 .hn-grave-mini--old{opacity:.55}
 
@@ -1058,7 +1113,6 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .bz-coins{font-size:14px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 .bz-deckinfo{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
 .bz-deckinfo b{color:var(--text);font-size:13px}
-.bz-top .bbg-fx-toggle{position:absolute;top:6px;right:6px}
 
 /* カード（プレースホルダー + 画像の重ね） */
 .bz-card{
@@ -1156,7 +1210,13 @@ body.bbg-demo-on .app{padding-bottom:104px}
 }
 
 /* めくれ札 */
-.bz-fu{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start}
+/* こうかん以外のフェーズでも枠を出しておくので、高さは小カード（.bz-card--sm）ぶんで確保する。
+   これで こうかんに入っても下の席の位置が動かない。 */
+.bz-fu{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:99px}
+@media (min-width:768px){
+  .bz-fu{min-height:clamp(78px,11vh,98px)}
+  .bz-fu{min-height:clamp(78px,11dvh,98px)}
+}
 .bz-fu-item{position:relative;border-radius:12px;padding:2px;cursor:pointer;transition:transform .16s ease, box-shadow .16s ease}
 .bz-fu-item--sel{transform:translateY(-6px);box-shadow:0 0 0 3px rgba(91,157,255,.45);background:rgba(91,157,255,.14)}
 .bz-fu-item--taken{opacity:.55}
@@ -1235,18 +1295,18 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-screen{gap:10px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .dd-simple{align-items:center;text-align:center}
 .dd-simple > *{width:100%}
-/* タイトル行: 左〜中央が番手表示、右はしに音のON/OFF */
+/* タイトル行: 番手表示（音のON/OFFはヘッダーへ移した） */
 .dd-head{display:flex;align-items:center;gap:8px}
 .dd-head .dd-line{flex:1 1 auto;min-width:0;text-align:center}
-.dd-head .bbg-fx-toggle{position:static;flex:0 0 auto}
-.dd-fxwrap{display:flex;justify-content:flex-end}
-.dd-fxwrap .bbg-fx-toggle{position:static}
 .dd-remain{font-size:13px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 
-/* 3つの場 */
+/* 3つの場
+   山の大きさを決めるのは つねに いちばん上の1まいだけ。
+   下のカード(.dd-card--under)は position:absolute なので、枚数が増えても場の位置は動かない。
+   --dd-pad は .dd-pile の padding と同じ値。下のカードの inset に使う。 */
 .dd-pilesbox{padding:14px 10px}
 .dd-piles{display:flex;gap:10px;justify-content:center;align-items:center}
-.dd-pile{border-radius:14px;padding:6px;flex:0 1 auto}
+.dd-pile{position:relative;border-radius:14px;--dd-pad:6px;padding:var(--dd-pad);flex:0 1 auto}
 .dd-pile--last{background:rgba(91,157,255,.10);box-shadow:0 0 0 2px rgba(91,157,255,.45)}
 
 /* カード（プレースホルダー + 画像の重ね） */
@@ -1289,13 +1349,40 @@ body.bbg-demo-on .app{padding-bottom:104px}
 }
 .dd-card-img.is-loaded{opacity:1}
 
+/* 下に積まれている1まい。position:absolute なので山の大きさには影響しない
+   （.dd-card の position:relative を上書きするため、かならず .dd-card より後に置くこと）。 */
+.dd-card--under{
+  position:absolute;inset:var(--dd-pad,6px);width:auto;height:auto;z-index:0;
+  transform:translate(6px,-6px) rotate(3deg);
+  filter:brightness(.55) saturate(.7);
+  box-shadow:none;
+}
+.dd-card--under-deep{transform:translate(9px,-9px) rotate(4.5deg)}
+.dd-card--under .dd-card-ph,.dd-card--under .dd-card-img{opacity:.35}
+.dd-card--top{z-index:1}
+
+/* めくったカードが上から場に重なる（JS側 ddPlayCardDrop がワンショットで付ける） */
+.dd-card--drop{animation:ddCardDrop .42s cubic-bezier(.2,1.05,.35,1) both;z-index:2}
+@keyframes ddCardDrop{
+  0%{opacity:0;transform:translateY(-52%) scale(1.16) rotate(-8deg)}
+  55%{opacity:1;transform:translateY(0) scale(1.03) rotate(1.5deg)}
+  100%{opacity:1;transform:none}
+}
+/* ワニは box-shadow の脈動と同時に走らせる（脈動はカードが落ちきってから） */
+.dd-card--croc.dd-card--drop{
+  animation:ddCardDrop .42s cubic-bezier(.2,1.05,.35,1) both,
+            ddCrocPulse .5s ease-in-out .42s infinite alternate;
+}
+
 /* 自分ののこり枚数（大きく） */
 .dd-count{display:flex;align-items:baseline;justify-content:center;gap:8px;padding:4px 0 0}
 .dd-count span{font-size:15px;font-weight:800;color:var(--muted)}
 .dd-count b{font-size:56px;font-weight:900;line-height:1;color:var(--warn)}
 
-/* 一行の合図 */
-.dd-line{position:relative;font-size:17px;font-weight:900;color:var(--muted);padding:0;min-height:1.9em;display:flex;align-items:center;justify-content:center}
+/* 一行の合図。
+   min-height は em ではなく px。「🐊 ワニ！」で文字が大きくなっても行の高さが変わらないので、
+   すぐ下のカード（場）の位置が動かない。値は いちばん大きい文字（croc）が入る高さにすること。 */
+.dd-line{position:relative;font-size:17px;font-weight:900;color:var(--muted);padding:0;min-height:33px;display:flex;align-items:center;justify-content:center}
 /* 番手のポップアップ: 番手テキストの位置（カードより上）で1.2秒だけ。カードには重ねない */
 .dd-turnov{
   position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);
@@ -1379,7 +1466,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-card-name{font-size:16px}
   .dd-card-color{font-size:12px}
   .dd-count b{font-size:64px}
-  .dd-line{font-size:20px}
+  .dd-line{font-size:20px;min-height:38px}
   .dd-line--croc{font-size:26px}
   .dd-turnov b{font-size:26px}
   .dd-tapzone{font-size:22px}
@@ -1399,7 +1486,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-count{padding:0}
   .dd-count b{font-size:40px}
   .dd-count span{font-size:13px}
-  .dd-line{font-size:17px;min-height:1.3em}
+  .dd-line{font-size:17px;min-height:32px}
   .dd-simple > .dd-tapzone{width:min(100%,34vh)}
   .dd-simple > .dd-tapzone{width:min(100%,34dvh)}
   .dd-order{gap:4px}
@@ -1421,7 +1508,15 @@ body.bbg-demo-on .app{padding-bottom:104px}
 
   @supports selector(:has(*)){
     /* 外側の器: 幅520の上限を外し、画面の高さにぴったり収める（footerは出さない） */
-    .app:has(.dd-simple:not(.bz-table)){max-width:none;height:100vh;display:flex;flex-direction:column;padding:6px 10px}
+    .app:has(.dd-simple:not(.bz-table)){
+      max-width:none;height:100vh;display:flex;flex-direction:column;
+      padding:6px 10px;
+      /* 横置きはノッチが左右に来るので、左右の安全領域を必ず空ける */
+      padding-top:calc(6px + env(safe-area-inset-top, 0px));
+      padding-right:calc(10px + env(safe-area-inset-right, 0px));
+      padding-bottom:calc(6px + env(safe-area-inset-bottom, 0px));
+      padding-left:calc(10px + env(safe-area-inset-left, 0px));
+    }
     .app:has(.dd-simple:not(.bz-table)){height:100dvh}
     /* デモ中はコンパクトなデモバーのぶんだけ下をあける（上のpaddingショートハンドより後勝ち） */
     body.bbg-demo-on .app:has(.dd-simple:not(.bz-table)){padding-bottom:42px}
@@ -1438,7 +1533,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
       align-items:center;
     }
     .dd-simple:not(.bz-table) > .dd-head{grid-column:1;grid-row:1;min-width:0}
-    .dd-simple:not(.bz-table) .dd-head .dd-line{justify-content:flex-start;text-align:left;min-height:0;font-size:16px}
+    /* 横置きでも合図行の高さは固定（ワニで文字が大きくなってもカードの行が動かない） */
+    .dd-simple:not(.bz-table) .dd-head .dd-line{justify-content:flex-start;text-align:left;min-height:24px;font-size:16px}
     .dd-simple:not(.bz-table) .dd-line--croc{font-size:19px}
     .dd-simple:not(.bz-table) > .dd-count{width:auto;grid-column:2;grid-row:1;padding:0;gap:4px}
     .dd-simple:not(.bz-table) > .dd-count span{font-size:12px}
@@ -1463,7 +1559,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
     body.bbg-demo-on .dd-simple:not(.bz-table){--dd-vchrome:151px}
     .dd-simple:not(.bz-table) > .dd-pilesbox{grid-column:1/-1;grid-row:2;height:100%;min-height:0;padding:4px;display:flex;align-items:center;justify-content:center}
     .dd-simple:not(.bz-table) .dd-piles{width:100%;gap:12px}
-    .dd-simple:not(.bz-table) .dd-pile{flex:0 0 auto;padding:4px}
+    .dd-simple:not(.bz-table) .dd-pile{flex:0 0 auto;--dd-pad:4px;padding:var(--dd-pad)}
     .dd-simple:not(.bz-table) .dd-card{
       width:min(calc((100vw - var(--dd-hchrome)) / 3), calc((100vh - var(--dd-vchrome)) * .75));
       height:auto;
@@ -1608,7 +1704,14 @@ body.bbg-demo-on .app{padding-bottom:104px}
 
 /* ---------- 高さ820以下: コンパクトモード（全画面共通） ---------- */
 @media (max-height:820px){
-  .app{padding:10px}
+  /* padding のショートハンドで上書きするので、安全領域もここで入れ直す */
+  .app{
+    padding:10px;
+    padding-top:calc(10px + env(safe-area-inset-top, 0px));
+    padding-right:calc(10px + env(safe-area-inset-right, 0px));
+    padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px));
+    padding-left:calc(10px + env(safe-area-inset-left, 0px));
+  }
   .header{padding:4px 4px 8px}
   .header h1{font-size:16px}
   .header h1::before{font-size:17px}

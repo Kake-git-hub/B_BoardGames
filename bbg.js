@@ -503,19 +503,17 @@
     };
   })();
 
-  // 効果音トグル（HTML文字列 + バインド）。route系のバインド部から bindBbgFxToggle() を呼ぶ。
-  function bbgFxToggleHtml() {
-    var on = true;
+  // 効果音トグルは index.html のヘッダー（タイトルの横）に固定で置いてある。
+  // プレイ画面には出さない（場所を取るため）。設定は端末に保存されるので、
+  // ホームやロビーで切り替えておけばゲーム中もそのまま効く。
+  function syncBbgFxToggleIcon() {
     try {
-      on = bbgFx.isOn();
+      var b = document.getElementById('bbgFxToggle');
+      if (!b) return;
+      b.textContent = bbgFx.isOn() ? '🔊' : '🔇';
     } catch (e) {
-      on = true;
+      // ignore
     }
-    return (
-      '<button type="button" class="bbg-fx-toggle" id="bbgFxToggle" aria-label="効果音" title="効果音">' +
-      (on ? '🔊' : '🔇') +
-      '</button>'
-    );
   }
 
   function bindBbgFxToggle() {
@@ -4703,20 +4701,26 @@
   };
 
   // prompt / schema を差し替えられるようにしてある（リレーモードは別プロンプト・別スキーマ）。
-  function oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries) {
+  //
+  // noThinking について:
+  //   Gemini 2.5 系は既定で「考える」ぶんにも出力トークンを使う。出力上限に達すると
+  //   finishReason=MAX_TOKENS で本文が空のまま返り、JSONが取れず判定が失敗する。
+  //   そのため既定では thinkingConfig で考えるぶんを0にし、出力上限も明示する。
+  //   このフィールドを受け付けないモデルは400を返すので、その時だけ付けずに投げ直す。
+  function oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries, noThinking) {
     var parts = [{ text: String(prompt || '') }];
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
       parts.push({ text: '絵' + String(i + 1) + '（プレイヤー: ' + String(e.name || '?') + '）' });
       parts.push({ inline_data: { mime_type: e.mime || 'image/jpeg', data: e.b64 } });
     }
-    var body = {
-      contents: [{ parts: parts }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: schema || OEKAKI_JUDGE_SCHEMA
-      }
+    var gen = {
+      responseMimeType: 'application/json',
+      responseSchema: schema || OEKAKI_JUDGE_SCHEMA,
+      maxOutputTokens: 8192
     };
+    if (noThinking) gen.thinkingConfig = { thinkingBudget: 0 };
+    var body = { contents: [{ parts: parts }], generationConfig: gen };
     var url =
       'https://generativelanguage.googleapis.com/v1beta/models/' +
       encodeURIComponent(model) +
@@ -4739,6 +4743,7 @@
             }
             var err = new Error(msg);
             err.status = res.status;
+            err.model = model;
             throw err;
           });
         }
@@ -4746,11 +4751,18 @@
       })
       .then(function (json) {
         var text = '';
+        var finish = '';
+        var blocked = '';
         try {
-          var ps = json.candidates[0].content.parts || [];
+          var cand = (json && json.candidates && json.candidates[0]) || null;
+          finish = String((cand && cand.finishReason) || '');
+          var ps = (cand && cand.content && cand.content.parts) || [];
           for (var i2 = 0; i2 < ps.length; i2++) {
+            // 「考えた内容」(thought) は答えではないので混ぜない
+            if (ps[i2] && ps[i2].thought) continue;
             if (ps[i2] && typeof ps[i2].text === 'string') text += ps[i2].text;
           }
+          blocked = String((json && json.promptFeedback && json.promptFeedback.blockReason) || '');
         } catch (e3) {
           text = '';
         }
@@ -4760,25 +4772,44 @@
         } catch (e4) {
           parsed = null;
         }
-        if (!parsed || typeof parsed !== 'object') throw new Error('AI判定結果の解析に失敗しました');
+        if (!parsed || typeof parsed !== 'object') {
+          // 何が起きたか分かるように理由を残す（画面の赤い枠に出る）。
+          var why = '';
+          if (blocked) why = '安全フィルタでブロックされました (' + blocked + ')';
+          else if (finish === 'MAX_TOKENS') why = '回答が長すぎて途中で切れました';
+          else if (finish && finish !== 'STOP') why = '中断されました (' + finish + ')';
+          else if (!text) why = '空の回答が返りました';
+          else why = 'JSONとして読めませんでした';
+          var err2 = new Error('AI判定結果の解析に失敗しました: ' + why);
+          err2.model = model;
+          err2.parseFail = true;
+          throw err2;
+        }
         return parsed;
       });
   }
 
+  // モデル候補を順に試す。以前は404のときしか次へ進まなかったため、
+  // 「200で返ったが本文が空」のようなケースで1つ目のモデルのまま失敗していた。
+  // いまはどの失敗でも次の候補を試す（最後の失敗理由をそのまま返す）。
   function oekakiCallGemini(apiKey, prompt, schema, entries) {
     var idx = 0;
-    function tryNext(lastErr) {
+    function tryModel(lastErr) {
       if (idx >= OEKAKI_GEMINI_MODELS.length) {
         return Promise.reject(lastErr || new Error('Gemini APIに接続できません'));
       }
       var model = OEKAKI_GEMINI_MODELS[idx++];
-      return oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries).catch(function (e) {
-        // モデル名が無効(404)の場合のみ次の候補を試す。
-        if (e && e.status === 404 && idx < OEKAKI_GEMINI_MODELS.length) return tryNext(e);
-        throw e;
+      return oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries, true).catch(function (e) {
+        // thinkingConfig を受け付けないモデルは400になるので、付けずに1回だけ試す。
+        if (e && e.status === 400) {
+          return oekakiCallGeminiOnce(model, apiKey, prompt, schema, entries, false).catch(function (e2) {
+            return tryModel(e2);
+          });
+        }
+        return tryModel(e);
       });
     }
-    return tryNext(null);
+    return tryModel(null);
   }
 
   function oekakiParseDataUrl(dataUrl) {
@@ -6201,7 +6232,6 @@
         '<div class="ll-piles-box">' +
         '<div class="ll-piles-text">墓地 ' + escapeHtml(String(grave.length || 0)) + '</div>' +
         '<div class="hn-grave-icons">' + icons + '</div>' +
-        bbgFxToggleHtml() +
         '</div>';
     } catch (ePile) {
       pilesHtml = '';
@@ -6956,13 +6986,14 @@
         '</div>' +
         '</div>' +
         (pilesHtml || '') +
-        (startBannerHtml || '') +
         (resultHtml || '') +
         (nextHtml || '') +
         (privateHtml || '') +
         (confirmHtml || '') +
         (modalHtml || '') +
         (contentHtml || '') +
+        // 開始バナーは手札より下。ゲームが始まってバナーが消えても手札の位置が動かない。
+        (startBannerHtml || '') +
       '</div>'
     );
   }
@@ -10944,7 +10975,6 @@
       '<span class="bz-coins">🪙' + escapeHtml(String(me.coins)) + '</span>' +
       '</div>' +
       bzDeckInfoHtml(room) +
-      bbgFxToggleHtml() +
       '</div>';
 
     // ---- 自分の畑
@@ -11131,13 +11161,15 @@
 
     render(
       viewEl,
+      // 並び: ステータス → 畑 → そのフェーズの操作 → うえるまち。
+      // 高さが変わる操作ブロックを畑より下に置くことで、フェーズが進んでも畑の位置が動かない。
       '<div class="stack bz-screen bbg-wide">' +
       '<div class="bbg-2col">' +
       '<div class="bbg-col">' +
       statusHtml +
+      myFieldsHtml +
       actionHtml +
       pendingHtml +
-      myFieldsHtml +
       '</div>' +
       '<div class="bbg-col">' +
       myHandHtml +
@@ -11627,11 +11659,11 @@
       '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'てばんめ</span>' +
       bzDeckInfoHtml(room) +
       '</div>' +
-      bbgFxToggleHtml() +
       '</div>' +
-      (phase === 'trade'
-        ? '<div class="card bz-fubox"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' + (fuHtml || '<span class="muted">（なし）</span>') + '</div></div>'
-        : '') +
+      // 「めくれたカード」枠はプレイ中つねに出す（tradeのときだけ出すと席の位置が上下してしまう）。
+      '<div class="card bz-fubox"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' +
+      (phase === 'trade' && fuHtml ? fuHtml : '<span class="muted">' + (phase === 'trade' ? '（なし）' : '（こうかんのとき ここに出ます）') + '</span>') +
+      '</div></div>' +
       '<div class="bz-seats">' + seats + '</div>' +
       '<div class="card bz-logbox">' + bzLogHtml(room, 10) + '</div>' +
       (isHost
@@ -12570,6 +12602,8 @@
   }
 
   // 3つの場。いま出たカードの場だけ うっすら強調する（文字の情報は出さない）。
+  // 2まい以上の山は「1つ下のカード」を後ろに少しずらして重ね、カードが積まれている感じを出す
+  // （下のカードは absolute なので、山の幅・位置の計算にはいっさい影響しない）。
   function ddPilesHtml(room) {
     var piles = ddNormPiles(room && room.piles);
     var phase = String((room && room.phase) || '');
@@ -12579,14 +12613,32 @@
     var showLast = phase === 'call' || phase === 'croc';
     var out = '';
     for (var i = 0; i < 3; i++) {
-      var top = piles[i].length ? String(piles[i][piles[i].length - 1] || '') : '';
-      var isLast = showLast && i === lastPile && piles[i].length > 0;
+      var n = piles[i].length;
+      var top = n ? String(piles[i][n - 1] || '') : '';
+      var under = n >= 2 ? String(piles[i][n - 2] || '') : '';
+      var isLast = showLast && i === lastPile && n > 0;
+      // 下のカードは position:absolute（.dd-card--under）。山の幅・高さを決めるのは
+      // つねに いちばん上の1まいだけなので、枚数が増えても場の位置はまったく動かない。
       out +=
         '<div class="dd-pile' + (isLast ? ' dd-pile--last' : '') + '">' +
-        (top ? ddCardHtml(top, '') : '<div class="dd-card dd-card--empty"></div>') +
+        (under ? ddCardHtml(under, 'dd-card--under' + (n >= 3 ? ' dd-card--under-deep' : '')) : '') +
+        (top ? ddCardHtml(top, 'dd-card--top') : '<div class="dd-card dd-card--empty"></div>') +
         '</div>';
     }
     return '<div class="dd-piles">' + out + '</div>';
+  }
+
+  // いま めくれたカードを「上から場に置く」ワンショット演出。
+  // render() は毎回 innerHTML を差し替えるため、CSSで常時付けると再描画のたびに再生されてしまう。
+  // 呼び出し側が flippedAt の変化を見て、めくれた直後の1回だけ呼ぶ。
+  function ddPlayCardDrop(rootEl) {
+    try {
+      var el = rootEl && rootEl.querySelector ? rootEl.querySelector('.dd-pile--last > .dd-card--top') : null;
+      if (!el || !el.classList) return;
+      el.classList.add('dd-card--drop');
+    } catch (e) {
+      // ignore
+    }
   }
 
   // 一行の合図（プレイヤー画面・テーブルで共用）。meMid が空ならテーブル向けの言い回し。
@@ -12798,7 +12850,7 @@
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple">' +
-      '<div class="dd-head">' + ddLineHtml(room, playerId) + bbgFxToggleHtml() + '</div>' +
+      '<div class="dd-head">' + ddLineHtml(room, playerId) + '</div>' +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       '<div class="dd-tapzone' + zoneCls + (zoneLabel ? '' : ' dd-tapzone--idle') + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
       // ワニ中は のこり枚数を出さない（全員のタップ順が画面に収まるように）。
@@ -12854,6 +12906,7 @@
       lastTurnKey: '',
       lastSndKey: '',
       lastResultKey: '',
+      lastDropKey: '',
       tapBound: false,
       detachTap: null,
       lobbyReturnWatching: false,
@@ -12954,6 +13007,17 @@
 
       var phase = String((room && room.phase) || '');
       var turnMid = ddTurnMid(room);
+
+      // めくれた直後だけ、いま出たカードを上から重ねるアニメ（flippedAt はめくりごとに更新される）
+      try {
+        var dropKey = String(parseIntSafe(room && room.flippedAt, 0) || 0);
+        if (ui.fxReady && dropKey !== ui.lastDropKey && (phase === 'call' || phase === 'croc')) {
+          ddPlayCardDrop(viewEl);
+        }
+        ui.lastDropKey = dropKey;
+      } catch (eDrop) {
+        // ignore
+      }
 
       // 手番（ラウンド）が変わったら1回だけオーバーレイ
       try {
@@ -13347,7 +13411,7 @@
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple bz-table">' +
-      '<div class="dd-head">' + ddLineHtml(room, '') + bbgFxToggleHtml() + '</div>' +
+      '<div class="dd-head">' + ddLineHtml(room, '') + '</div>' +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       ddCrocOrderHtml(room) +
       '<div class="bz-seats">' + seats + '</div>' +
@@ -13398,7 +13462,7 @@
       lobbyId = '';
     }
 
-    var tUi = { cancelled: false, fxReady: false, lastTurnKey: '', lastSndKey: '', lastResultKey: '', inFlight: false };
+    var tUi = { cancelled: false, fxReady: false, lastTurnKey: '', lastSndKey: '', lastResultKey: '', lastDropKey: '', inFlight: false };
     var lobbyReturnWatching = false;
     var lobbyUnsub = null;
 
@@ -13468,6 +13532,18 @@
 
       var phase = String((room && room.phase) || '');
       var turnMid = ddTurnMid(room);
+
+      // めくれた直後だけ、いま出たカードを上から重ねるアニメ（プレイヤー画面と同じ）
+      try {
+        var dropKey = String(parseIntSafe(room && room.flippedAt, 0) || 0);
+        if (tUi.fxReady && dropKey !== tUi.lastDropKey && (phase === 'call' || phase === 'croc')) {
+          ddPlayCardDrop(viewEl);
+        }
+        tUi.lastDropKey = dropKey;
+      } catch (eDrop) {
+        // ignore
+      }
+
       try {
         var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
         if (tUi.fxReady && phase !== 'result' && turnKey !== tUi.lastTurnKey) {
@@ -13778,6 +13854,7 @@
     if (canUseGmLobbyReturn) {
       try {
         headerEl.style.display = '';
+        headerEl.classList.add('header--slim');
       } catch (eS1) {
         // ignore
       }
@@ -13866,10 +13943,31 @@
       return;
     }
 
-    // Hide header on lobby and non-GM player screens.
+    // 待っているだけのロビー画面はヘッダーを出す（細い1行）。
+    // 効果音の入切をここで済ませられるようにするため（プレイ画面には出さないので）。
+    // ホスト設定画面(lobby_host / lobby_assign)は中身が多くスクロールが出やすいので今までどおり隠す。
+    var isLobbyWaitScreen = scr === 'lobby_player' || scr === 'lobby_join' || scr === 'lobby_login' || scr === 'lobby_create';
+    if (isLobbyWaitScreen) {
+      try {
+        headerEl.style.display = '';
+        headerEl.classList.add('header--slim');
+      } catch (eS1b) {
+        // ignore
+      }
+      try {
+        titleEl.textContent = 'B_BoardGames';
+        titleEl.classList.remove('gm-lobby-return');
+      } catch (eT1b) {
+        // ignore
+      }
+      return;
+    }
+
+    // Hide header on lobby setup screens and non-GM player (in-game) screens.
     if (isLobbyAny || isGameScreen) {
       try {
         headerEl.style.display = 'none';
+        headerEl.classList.remove('header--slim');
       } catch (eS2) {
         // ignore
       }
@@ -13885,6 +13983,7 @@
     // Default screens: show normal header.
     try {
       headerEl.style.display = '';
+      headerEl.classList.remove('header--slim');
     } catch (eS3) {
       // ignore
     }
@@ -14590,7 +14689,7 @@
         gameKindEmoji(label) +
         '</div>\n          <div class="bbg-wait-title">' +
         escapeHtml(gameKindLabel(label)) +
-        ' がはじまっています！</div>\n          <span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>あそび中</span>\n        </div>'
+        ' がはじまっています！</div>\n          <span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>あそび中</span>\n          <div class="muted" style="font-size:13px">「▶ ゲームへ」で さんかできます。ちがうロビーへ 行きたいときは「ロビーを出る」。</div>\n        </div>'
       : '<div class="bbg-wait-hero">\n          <div class="bbg-wait-emoji">🎲</div>\n          <div class="bbg-wait-title">ホストの スタートを まっています<span class="bbg-wait-dots"><span>.</span><span>.</span><span>.</span></span></div>\n          <div class="muted" style="font-size:13px">ゲームがはじまると じどうで がめんが かわります</div>\n        </div>';
 
     render(
@@ -14914,6 +15013,32 @@
     return 'cn-card cn-revealed cn-neutral';
   }
 
+  // ヒント履歴（プレイヤー/テーブル共用）。最新のヒントが いちばん上。
+  // 一覧は高さ固定の内部スクロール: ヒントが増えても盤面や画面ぜんたいが動かない。
+  function codenamesClueHistoryHtml(room) {
+    var rows = '';
+    try {
+      var log = room && Array.isArray(room.clueLog) ? room.clueLog : [];
+      for (var li = log.length - 1; li >= 0; li--) {
+        var it = log[li] || {};
+        var t = it.team === 'red' ? '赤' : it.team === 'blue' ? '青' : '-';
+        var w = it.word ? String(it.word) : '';
+        var num = it.number != null ? String(it.number) : '0';
+        if (!w) continue;
+        var teamCls = it.team === 'red' ? ' cn-log-red' : it.team === 'blue' ? ' cn-log-blue' : '';
+        rows += '<div class="kv cn-log-row' + teamCls + '"><span class="muted">' + escapeHtml(t) + '</span><b>' + escapeHtml(w) + ' / ' + escapeHtml(num) + '</b></div>';
+      }
+    } catch (e) {
+      rows = '';
+    }
+    return (
+      '<hr /><div class="stack">' +
+      '<div class="big">ヒント履歴</div>' +
+      '<div class="cn-log">' + (rows || '<div class="muted">（まだありません）</div>') + '</div>' +
+      '</div>'
+    );
+  }
+
   function renderCodenamesPlayer(viewEl, opts) {
     var roomId = opts.roomId;
     var playerId = opts.playerId;
@@ -14937,10 +15062,10 @@
     var nameText = escapeHtml(formatPlayerDisplayName(player));
     var teamLabel = myTeam === 'red' ? '赤' : myTeam === 'blue' ? '青' : '-';
     var roleLabel = myRole === 'spymaster' ? 'スパイマスター' : myRole === 'operative' ? '諜報員' : '-';
+    // 2行きっちりで出す（片方だけのときも空行を残して、下の盤面が動かないようにする）。
     var roleHtml =
-      myTeam || myRole
-        ? '<div>' + escapeHtml(teamLabel) + '</div><div>' + escapeHtml(roleLabel) + '</div>'
-        : '-';
+      '<div>' + escapeHtml(myTeam || myRole ? teamLabel : '-') + '</div>' +
+      '<div>' + (myTeam || myRole ? escapeHtml(roleLabel) : '&nbsp;') + '</div>';
     var tt0 = phase === 'playing' && room && room.turn ? room.turn : {};
     var turnTeam = phase === 'playing' && room && room.turn ? room.turn.team : '';
     var turnLabel = turnTeam === 'red' ? '赤' : turnTeam === 'blue' ? '青' : '-';
@@ -15022,9 +15147,10 @@
         '</div>';
     }
 
+    // こちらも2行固定（「（スパイマスター）」の出没で盤面が上下しないように）。
     var turnHtml =
       '<div>' + escapeHtml(turnLabel + 'のターン') + '</div>' +
-      (who ? '<div class="muted">（' + escapeHtml(who) + '）</div>' : '');
+      '<div class="muted">' + (who ? '（' + escapeHtml(who) + '）' : '&nbsp;') + '</div>';
 
     var topLine =
       '<div class="cn-topline">' +
@@ -15130,6 +15256,8 @@
           '<div id="cnClueError" class="form-error" role="alert"></div>';
       } else {
         var clueLine = clueText ? escapeHtml(clueText) + ' / ' + escapeHtml(clueNum || '0') : '（未提示）';
+        // ターン終了はヒント行の右はしに置く（行の高さは固定なので、出没しても盤面が動かない）。
+        var canEndTurn = myTeam && tt.team === myTeam && tt.status === 'guessing' && myRole === 'operative';
         clueRowHtml =
           '<div class="cn-clue-row">' +
           '<div class="cn-clue-view">ヒント: <b>' +
@@ -15138,6 +15266,7 @@
           '<div class="cn-clue-left">残り: <b>' +
           escapeHtml(guessesLeft) +
           '</b></div>' +
+          (canEndTurn ? '<button id="cnEndTurn" class="ghost cn-endturn">ターン終了</button>' : '') +
           '</div>';
       }
     }
@@ -15168,52 +15297,23 @@
         '</div>';
     }
 
-    var actionsHtml = '';
-    if (phase === 'playing') {
-      var ttt = room.turn || {};
-      var myTurn = myTeam && ttt.team === myTeam;
-      if (myTurn && ttt.status === 'guessing' && myRole === 'operative') {
-        actionsHtml = '<hr /><div class="row"><button id="cnEndTurn" class="ghost">ターン終了</button></div>';
-      }
-    }
-
-    var finishedHtml = '';
+    // けっかは「ヒント行」と同じ高さのスロットに出す。盤面より上の高さが変わらないので、
+    // ゲームが終わっても盤面の位置は1ピクセルも動かない。注記は盤面の下に置く。
+    var finishedRowHtml = '';
+    var finishedNoteHtml = '';
     if (phase === 'finished') {
       var winner = room && room.result ? room.result.winner : '';
       var wLabel = winner === 'red' ? '赤の勝ち' : winner === 'blue' ? '青の勝ち' : '-';
-      finishedHtml =
-        '<div class="stack">' +
-        '<div class="big">結果</div>' +
-        '<div class="kv"><span class="muted">勝者</span><b>' +
-        escapeHtml(wLabel) +
-        '</b></div>' +
-        '<div class="muted">※ 次へ進むのはテーブル端末です。</div>' +
+      finishedRowHtml =
+        '<div class="cn-clue-row">' +
+        '<div class="cn-clue-view">けっか: <b>' + escapeHtml(wLabel) + '</b></div>' +
         '</div>';
+      finishedNoteHtml = '<div class="muted">※ 次へ進むのはテーブル端末です。</div>';
     }
 
     var clueHistoryHtml = '';
     if (phase === 'playing' || phase === 'finished') {
-      var rows = '';
-      try {
-        var log = room && Array.isArray(room.clueLog) ? room.clueLog : [];
-        var start = Math.max(0, log.length - 10);
-        for (var li = start; li < log.length; li++) {
-          var it = log[li] || {};
-          var t = it.team === 'red' ? '赤' : it.team === 'blue' ? '青' : '-';
-          var w = it.word ? String(it.word) : '';
-          var num = it.number != null ? String(it.number) : '0';
-          if (!w) continue;
-          rows += '<div class="kv"><span class="muted">' + escapeHtml(t) + '</span><b>' + escapeHtml(w) + ' / ' + escapeHtml(num) + '</b></div>';
-        }
-      } catch (e2) {
-        rows = '';
-      }
-
-      clueHistoryHtml =
-        '<hr /><div class="stack">' +
-        '<div class="big">ヒント履歴</div>' +
-        (rows || '<div class="muted">（まだありません）</div>') +
-        '</div>';
+      clueHistoryHtml = codenamesClueHistoryHtml(room);
     }
 
     render(
@@ -15226,9 +15326,9 @@
         '\n\n      ' +
         (phase === 'lobby' ? lobbyHtml : '') +
         (phase === 'playing' ? clueRowHtml : '') +
-        (phase === 'playing' ? actionsHtml : '') +
-        (phase === 'finished' ? finishedHtml : '') +
+        (phase === 'finished' ? finishedRowHtml : '') +
         boardHtml +
+        finishedNoteHtml +
         clueHistoryHtml +
         '\n    </div>\n  '
     );
@@ -15268,13 +15368,22 @@
 
     var turnCls = 'cn-turn' + (turnTeam === 'red' ? ' cn-turn-red' : turnTeam === 'blue' ? ' cn-turn-blue' : '');
 
-    // Table timer: show big between clue row and board.
+    // 盤面の上に置くカード。プレイ中はタイマー、おわったら けっか。
+    // どちらも同じ形（.card + muted1行 + big1行）なので高さが変わらず、盤面の位置が動かない。
     var timerMidHtml = '';
     if (phase === 'playing') {
       timerMidHtml =
         '<div class="card center" style="padding:12px">' +
         '<div class="muted" style="margin-bottom:6px">残り時間</div>' +
         '<div class="big"><b id="cnTimer">-:--</b></div>' +
+        '</div>';
+    } else if (phase === 'finished') {
+      var winnerMid0 = room && room.result ? room.result.winner : '';
+      var wLabelMid = winnerMid0 === 'red' ? '赤の勝ち' : winnerMid0 === 'blue' ? '青の勝ち' : '-';
+      timerMidHtml =
+        '<div class="card center" style="padding:12px">' +
+        '<div class="muted" style="margin-bottom:6px">けっか</div>' +
+        '<div class="big"><b>' + escapeHtml(wLabelMid) + '</b></div>' +
         '</div>';
     }
 
@@ -15295,8 +15404,9 @@
       lobbyHtml = '<div class="stack"><div class="big">待機中</div><div class="muted">ゲーム開始をお待ちください。</div></div>';
     }
 
+    // ヒント行はプレイ中もおわったあとも出す（消すと盤面が上へ動いてしまうため）。
     var clueRowHtml = '';
-    if (phase === 'playing') {
+    if (phase === 'playing' || phase === 'finished') {
       var tt = room.turn || {};
       var clue = tt.clue || { word: '', number: 0 };
       var clueText = clue && clue.word ? String(clue.word) : '';
@@ -15305,12 +15415,12 @@
       var clueLine = clueText ? escapeHtml(clueText) + ' / ' + escapeHtml(clueNum || '0') : '（未提示）';
       clueRowHtml =
         '<div class="cn-clue-row">' +
-        '<div class="cn-clue-view">ヒント: <b>' +
+        '<div class="cn-clue-view">' + (phase === 'finished' ? 'さいごのヒント' : 'ヒント') + ': <b>' +
         clueLine +
         '</b></div>' +
-        '<div class="cn-clue-left">残り: <b>' +
-        escapeHtml(guessesLeft) +
-        '</b></div>' +
+        (phase === 'finished'
+          ? ''
+          : '<div class="cn-clue-left">残り: <b>' + escapeHtml(guessesLeft) + '</b></div>') +
         '</div>';
     }
 
@@ -15336,48 +15446,17 @@
         '</div>';
     }
 
+    // 「次へ」は盤面の下に置く（勝者は盤面の上の けっかカードに出している）。
     var finishedHtml = '';
-    if (phase === 'finished') {
-      var winner = room && room.result ? room.result.winner : '';
-      var wLabel = winner === 'red' ? '赤の勝ち' : winner === 'blue' ? '青の勝ち' : '-';
-      finishedHtml =
-        '<div class="stack">' +
-        '<div class="big">結果</div>' +
-        '<div class="kv"><span class="muted">勝者</span><b>' +
-        escapeHtml(wLabel) +
-        '</b></div>' +
-        (lobbyId
-          ? '<hr />' +
-            (isHost
-              ? '<div class="row"><button id="cnNextToLobby" class="primary">次へ</button></div>'
-              : '<div class="muted">※ 次へ進むのはゲームマスターです。</div>')
-          : '') +
-        '</div>';
+    if (phase === 'finished' && lobbyId) {
+      finishedHtml = isHost
+        ? '<div class="row"><button id="cnNextToLobby" class="primary">次へ</button></div>'
+        : '<div class="muted">※ 次へ進むのはゲームマスターです。</div>';
     }
 
     var clueHistoryHtml = '';
     if (phase === 'playing' || phase === 'finished') {
-      var rows = '';
-      try {
-        var log = room && Array.isArray(room.clueLog) ? room.clueLog : [];
-        var start = Math.max(0, log.length - 10);
-        for (var li = start; li < log.length; li++) {
-          var it = log[li] || {};
-          var t = it.team === 'red' ? '赤' : it.team === 'blue' ? '青' : '-';
-          var w = it.word ? String(it.word) : '';
-          var num = it.number != null ? String(it.number) : '0';
-          if (!w) continue;
-          rows += '<div class="kv"><span class="muted">' + escapeHtml(t) + '</span><b>' + escapeHtml(w) + ' / ' + escapeHtml(num) + '</b></div>';
-        }
-      } catch (e2) {
-        rows = '';
-      }
-
-      clueHistoryHtml =
-        '<hr /><div class="stack">' +
-        '<div class="big">ヒント履歴</div>' +
-        (rows || '<div class="muted">（まだありません）</div>') +
-        '</div>';
+      clueHistoryHtml = codenamesClueHistoryHtml(room);
     }
 
     render(
@@ -15386,10 +15465,10 @@
         topLine +
         '\n\n      ' +
         (phase === 'lobby' ? lobbyHtml : '') +
-        (phase === 'playing' ? clueRowHtml : '') +
-        (phase === 'playing' ? timerMidHtml : '') +
-        (phase === 'finished' ? finishedHtml : '') +
+        (phase === 'playing' || phase === 'finished' ? clueRowHtml : '') +
+        timerMidHtml +
         boardHtml +
+        finishedHtml +
         clueHistoryHtml +
         '\n    </div>\n  '
     );
@@ -15823,7 +15902,8 @@
     if (turnLine) headerRightLines.push(String(turnLine));
     if (phase === 'discussion' && role !== 'majority') headerRightLines.push('残り ' + formatMMSS(remain));
 
-    var headerRightHtml = '<div class="muted" style="text-align:right;line-height:1.25">';
+    // 高さは CSS (.ww-headright) で2行ぶん固定。行数が変わってもワードカードの位置が動かない。
+    var headerRightHtml = '<div class="muted ww-headright">';
     for (var hri = 0; hri < headerRightLines.length; hri++) {
       headerRightHtml += '<div>' + escapeHtml(headerRightLines[hri]) + '</div>';
     }
@@ -18864,6 +18944,12 @@
     var mid = getOrCreateLobbyMemberId(lobbyId);
     // 退出処理を始めたら、遅れて届くスナップショットでロビー画面を描き直さない。
     var leaving = false;
+    // ロビーを開いた時点ですでに動いているゲームには、自動ではとばさない。
+    // （毎回とばすと、ホストが終わらせていない古いゲームがあるあいだ ロビー画面に
+    //   たどりつけず、「ロビーを出る」も押せない行き止まりになる＝別のロビーにも移れない）
+    // 自動でとぶのは「待っているあいだにホストが始めたとき」だけ。
+    // すでに動いているゲームには「▶ ゲームへ」ボタンで自分の意思で入る。
+    var sawFirstSnapshot = false;
 
     function goToCurrentGame(lobby) {
       var cg = (lobby && lobby.currentGame) || null;
@@ -18952,7 +19038,11 @@
             return;
           }
 
-          if (goToCurrentGame(lobby)) return;
+          // 1回目のスナップショット＝ロビーを開いた時点。ここで動いているゲームには自動でとばさない。
+          // 2回目以降＝待っているあいだにホストが始めた、ということなので自動でとぶ。
+          var autoOk = sawFirstSnapshot;
+          sawFirstSnapshot = true;
+          if (autoOk && goToCurrentGame(lobby)) return;
 
           renderLobbyPlayer(viewEl, { lobbyId: lobbyId, lobby: lobby });
           clearInlineError('lobbyPlayerError');
@@ -20844,7 +20934,6 @@
       (graveLatest
         ? '<img class="ll-piles-icon" alt="grave" src="' + escapeHtml((llCardDef(graveLatest) || {}).icon || '') + '" />'
         : '') +
-      bbgFxToggleHtml() +
       '</div>';
 
     function llCardImgHtml(rank) {
@@ -20989,6 +21078,13 @@
       } else {
         // 'none' を入れておくと、次に最初のプレイが来たときにアニメが出る（初期値''のときは出ない）。
         ui.lastPlayKey = 'none';
+        // プレイ中は空でも同じ高さの枠を出しておく（最初のプレイで手札の位置が下がらないように）。
+        if (phase === 'playing') {
+          lastPlayHtml =
+            '<div class="ll-lastplay ll-lastplay--empty" aria-hidden="true">' +
+            '<div class="ll-lastplay-text muted">まだ プレイは ありません</div>' +
+            '</div>';
+        }
       }
     } catch (eLP0) {
       lastPlayHtml = '';
@@ -23263,7 +23359,11 @@
         '</div>' +
         '</div>' +
         '</div>' +
-        (lastPlayHtml ? '<div class="ll-table-center-bottom">' + lastPlayHtml + '</div>' : '') +
+        // バナー枠は常設（最初のプレイで山札・墓地の位置が上へ寄らないように）。
+        '<div class="ll-table-center-bottom">' +
+        (lastPlayHtml ||
+          '<div class="ll-table-lastplay-banner ll-table-lastplay--empty" aria-hidden="true">まだ プレイは ありません</div>') +
+        '</div>' +
         '</div>';
     }
 
@@ -23381,9 +23481,6 @@
     render(
       viewEl,
       '\n    <div class="stack">\n      <div class="big">ラブレター（テーブル）</div>\n      ' +
-        '<div class="ll-fx-row">' +
-        bbgFxToggleHtml() +
-        '</div>' +
         '\n      ' +
         (forceHtml || '') +
         '\n      ' +
@@ -23982,6 +24079,7 @@
       }
 
       // 直近3枚を小さく表向きで並べる行（右端が最新）。
+      // 行そのものは空でも出しておく（最初の捨て札で中央の山の位置が動かないように・CSSで高さ確保）。
       var graveRecentHtml = '';
       try {
         var recentG = grave.length > 3 ? grave.slice(grave.length - 3) : grave.slice();
@@ -23991,10 +24089,10 @@
             hnCardImgHtml(String(recentG[rgi] || '')) +
             '</div>';
         }
-        if (graveRecentHtml) graveRecentHtml = '<div class="hn-grave-recent">' + graveRecentHtml + '</div>';
       } catch (eGR) {
         graveRecentHtml = '';
       }
+      graveRecentHtml = '<div class="hn-grave-recent">' + graveRecentHtml + '</div>';
 
       var lastPlay = hnLastPlayText(room);
 
@@ -24040,7 +24138,11 @@
         (graveRecentHtml || '') +
         '</div>' +
         '</div>' +
-        (lastPlayHtml ? '<div class="ll-table-center-bottom">' + lastPlayHtml + '</div>' : '') +
+        // バナー枠は常設（最初のプレイで墓地の位置が上へ寄らないように）。
+        '<div class="ll-table-center-bottom">' +
+        (lastPlayHtml ||
+          '<div class="ll-table-lastplay-banner ll-table-lastplay--empty" aria-hidden="true">まだ プレイは ありません</div>') +
+        '</div>' +
         '</div>';
 
       var arrowHtml = '';
@@ -24389,9 +24491,6 @@
     render(
       viewEl,
       '<div class="hn-table hn-table-only">' +
-        '<div class="ll-fx-row">' +
-        bbgFxToggleHtml() +
-        '</div>' +
         (forceHtml || '') +
         (pendingWaitHtml || '') +
         (hanninTableVizHtml() || '<div class="muted">（表示できません）</div>') +
@@ -25808,6 +25907,16 @@
         hostHtml += '<div id="okHostError" class="form-error" role="alert"></div>';
       }
 
+      // ホスト以外にも ロビーへ戻る道を用意する。
+      // これが無いと、ホストがゲームを終わらせるまで参加者は この画面から出られず、
+      // 別のロビーへ移ることもできなかった。
+      var leaveHtml = '';
+      if (!isHost && opts.lobbyId) {
+        leaveHtml =
+          '<hr /><div class="row"><button type="button" id="okBackToLobby" class="ghost" style="flex:1">🚪 ロビーへ もどる</button></div>' +
+          '<div class="muted">ゲームは つづいています。ロビーからは いつでも 入りなおせます。</div>';
+      }
+
       render(
         viewEl,
         '<div class="stack">' +
@@ -25823,6 +25932,7 @@
           '</div>' +
           missingHtml +
           hostHtml +
+          leaveHtml +
           '</div>'
       );
       return;
@@ -26687,7 +26797,9 @@
       judgeToken: '',
       lobbyReturnWatching: false,
       lobbyUnsub: null,
-      autoJoinInFlight: false
+      autoJoinInFlight: false,
+      // ロビーへ戻ったあとに遅れて届くスナップショットで描き直さないための印
+      cancelled: false
     });
 
     // キャンバス・ツール一式は共通の描画エンジンに任せる。
@@ -26699,6 +26811,21 @@
 
     function redirectToLobby() {
       if (!lobbyId) return;
+      // setQuery() は pushState なので popstate が起きない。
+      // 遷移前に自分で購読を解除しないと、ロビー画面をルームの更新で上書きしてしまう。
+      ui.cancelled = true;
+      try {
+        if (unsub) unsub();
+      } catch (eU0) {
+        // ignore
+      }
+      unsub = null;
+      try {
+        if (ui.lobbyUnsub) ui.lobbyUnsub();
+      } catch (eL0) {
+        // ignore
+      }
+      ui.lobbyUnsub = null;
       var q = {};
       var v = getCacheBusterParam();
       if (v) q.v = v;
@@ -26953,6 +27080,15 @@
 
 
     function bindResultButtons(room) {
+      // ホスト以外の「ロビーへ もどる」。ゲームは終わらせず、自分だけロビーへ戻る。
+      var backBtn = document.getElementById('okBackToLobby');
+      if (backBtn && !backBtn.__ok_bound) {
+        backBtn.__ok_bound = true;
+        backBtn.addEventListener('click', function () {
+          redirectToLobby();
+        });
+      }
+
       var replayBtn = document.getElementById('okReplay');
       if (replayBtn && !replayBtn.__ok_bound) {
         replayBtn.__ok_bound = true;
@@ -27020,6 +27156,7 @@
           playerId: playerId,
           isHost: isHost,
           isTableGmDevice: isTableGmDevice,
+          lobbyId: lobbyId,
           ui: ui
         });
         draw.setup();
@@ -27048,6 +27185,8 @@
     firebaseReady()
       .then(function () {
         return subscribeOekakiRoom(roomId, function (room) {
+          // ロビーへ戻ったあとに遅れて届いたぶんは捨てる（ロビー画面を上書きしないため）
+          if (ui.cancelled) return;
           if (!room) {
             renderError(viewEl, '部屋が見つかりません');
             return;
@@ -31401,6 +31540,10 @@
   try {
     viewEl = qs('#view');
     setupRulesButton();
+    // 効果音トグルはヘッダー（タイトルの横）の静的HTMLなので、起動時に1回だけつなぐ。
+    // 画面を描き直しても消えないため、再バインドは不要。
+    syncBbgFxToggleIcon();
+    bindBbgFxToggle();
     // --- Version string (use bundled asset cache-buster) ---
     var bundledV = '';
     try {

@@ -13,14 +13,17 @@
     <meta name="theme-color" content="#0b0f1a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="stylesheet" href="./bbg.css?v=20260827205536" />
+    <link rel="stylesheet" href="./bbg.css?v=20260829023155" />
   </head>
   <body>
     <main class="app">
       <header class="header">
         <div class="header-row">
-          <div>
+          <div class="header-title">
             <h1>B_BoardGames</h1>
+            <!-- 効果音の入切。プレイ画面の場所を取らないよう、タイトルの横だけに置く。
+                 設定は端末に保存されるので、ロビーで切り替えればゲーム中もそのまま効く。 -->
+            <button type="button" class="bbg-fx-toggle bbg-fx-toggle--header" id="bbgFxToggle" aria-label="効果音" title="効果音">🔊</button>
           </div>
           <div>
             <button id="headerLobbyBack" class="ghost" style="display:none">ロビーへ戻る</button>
@@ -44,9 +47,9 @@
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 
     <!-- Optional: embedded Firebase config (see bbg-config.js) -->
-    <script src="./bbg-config.js?v=20260827205536"></script>
+    <script src="./bbg-config.js?v=20260829023155"></script>
 
-    <script src="./bbg.js?v=20260827205536" defer></script>
+    <script src="./bbg.js?v=20260829023155" defer></script>
 
     <!-- PWA Service Worker (自動アップデート付き) -->
     <script>
