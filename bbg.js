@@ -957,6 +957,13 @@
               // ignore
             }
 
+            // 接続の見はり・スリープ復帰の再同期・在席（プレゼンス）を起動する
+            try {
+              bbgConnInit(db);
+            } catch (eConn) {
+              // ignore
+            }
+
             return db;
           });
       });
@@ -1006,6 +1013,336 @@
       .then(function (res) {
         return res.snapshot.val();
       });
+  }
+
+  // -------------------- 接続の見はり・復帰の再同期・在席（プレゼンス） --------------------
+  // スマホは「画面が消える／別アプリへ切替／スリープ／電波が切れる／ブラウザを閉じる」が
+  // 日常的に起きる。ここで一括して面倒を見る:
+  //  1) .info/connected を監視して、切断中は画面上部にバナーで知らせる
+  //  2) スリープ等から戻ったら goOnline()（長時間なら接続を張り直し）で全購読を再同期する
+  //  3) ロビーに参加中の端末は members/<mid> に online フラグを保ち、
+  //     切断時はサーバ側の onDisconnect で自動的に online:false になる
+  //     → 参加者一覧に「オフライン」と表示され、ホストが状況を把握できる
+
+  function bbgNoop() {
+    // ignore
+  }
+
+  var _bbgDb = null;
+  var _bbgConnected = false;
+  var _bbgEverConnected = false;
+  var _bbgHiddenAt = 0;
+  var _bbgOfflineSince = 0;
+  var _bbgConnBannerTimer = null;
+
+  function bbgConnBannerEl() {
+    var el = null;
+    try {
+      el = document.getElementById('bbgConnBanner');
+      if (!el && document.body) {
+        el = document.createElement('div');
+        el.id = 'bbgConnBanner';
+        el.setAttribute('role', 'status');
+        document.body.appendChild(el);
+      }
+    } catch (e) {
+      el = null;
+    }
+    return el;
+  }
+
+  function bbgConnHideBanner() {
+    try {
+      if (_bbgConnBannerTimer) {
+        clearTimeout(_bbgConnBannerTimer);
+        _bbgConnBannerTimer = null;
+      }
+      var el = document.getElementById('bbgConnBanner');
+      if (el) el.className = '';
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function bbgConnShowOfflineBanner() {
+    if (_bbgConnected || !_bbgOfflineSince) return;
+    var el = bbgConnBannerEl();
+    if (!el) return;
+    var longWait = nowMs() - _bbgOfflineSince > 15000;
+    el.className = 'bbg-conn--show';
+    el.innerHTML =
+      '<span>⚡ 接続が切れました。再接続しています…</span>' +
+      (longWait ? '<button id="bbgConnReload" type="button">🔄 再読み込み</button>' : '');
+    if (longWait) {
+      var btn = document.getElementById('bbgConnReload');
+      if (btn) {
+        btn.addEventListener('click', function () {
+          try {
+            location.reload();
+          } catch (e) {
+            // ignore
+          }
+        });
+      }
+    } else {
+      // 15秒たっても戻らなければ「再読み込み」ボタンを出す
+      if (_bbgConnBannerTimer) clearTimeout(_bbgConnBannerTimer);
+      _bbgConnBannerTimer = setTimeout(bbgConnShowOfflineBanner, 15500);
+    }
+  }
+
+  function bbgConnScheduleOfflineBanner() {
+    // 一瞬の切断（電波の揺らぎ・接続の張り直し）でいちいち出さないよう、少し待ってから出す
+    if (_bbgConnBannerTimer) clearTimeout(_bbgConnBannerTimer);
+    _bbgConnBannerTimer = setTimeout(bbgConnShowOfflineBanner, 2500);
+  }
+
+  function bbgConnShowRestoredBanner() {
+    var el = null;
+    try {
+      el = document.getElementById('bbgConnBanner');
+    } catch (e) {
+      el = null;
+    }
+    // オフラインのバナーが出ていたときだけ「戻りました」を短く見せる
+    if (!el || el.className.indexOf('bbg-conn--show') < 0) {
+      bbgConnHideBanner();
+      return;
+    }
+    el.className = 'bbg-conn--show bbg-conn--ok';
+    el.innerHTML = '<span>✅ 接続が戻りました</span>';
+    if (_bbgConnBannerTimer) clearTimeout(_bbgConnBannerTimer);
+    _bbgConnBannerTimer = setTimeout(bbgConnHideBanner, 1800);
+  }
+
+  // ---- 在席（プレゼンス）: ロビー参加中の端末が members/<mid> の online を保つ ----
+  var _bbgPresence = { path: '', armed: false, tickTimer: null };
+
+  function bbgPresenceDesiredPath() {
+    try {
+      var q = parseQuery();
+      var lobbyId = q.lobby ? String(q.lobby) : '';
+      // QR参加の制限端末は、URLにロビーが無い画面でもロビー在席あつかいにする
+      if (!lobbyId && isRestrictedDevice()) lobbyId = loadActiveLobbyId();
+      if (!lobbyId) return '';
+      var mid = '';
+      try {
+        mid = String(localStorage.getItem('bbg_lobby_member_' + lobbyId) || '');
+      } catch (e1) {
+        mid = '';
+      }
+      // まだ参加していない端末（見ているだけ）にはIDを作らない
+      if (!mid) return '';
+      return lobbyPath(lobbyId) + '/members/' + mid;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function bbgPresenceScheduleTick(delayMs) {
+    try {
+      if (_bbgPresence.tickTimer) clearTimeout(_bbgPresence.tickTimer);
+      _bbgPresence.tickTimer = setTimeout(bbgPresenceTick, delayMs || 500);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function bbgPresenceTick() {
+    var p = _bbgPresence;
+    if (!p.path || !_bbgDb || !_bbgConnected) return;
+    // バックグラウンドのタブでも onDisconnect の予約だけは必ず張る
+    // （張らないまま切断されると、いつまでも「オンライン」に見えてしまう）
+    var hidden = false;
+    try {
+      hidden = !!(document && document.hidden);
+    } catch (e0) {
+      hidden = false;
+    }
+    var path = p.path;
+    var ref = _bbgDb.ref(path);
+    ref
+      .once('value')
+      .then(function (snap) {
+        if (_bbgPresence.path !== path) return;
+        var m = snap.val();
+        if (!m || !m.name) {
+          // 参加処理（トランザクション）がまだ終わっていないだけかもしれないので、
+          // メンバーが実在しないあいだは何も書かない（消えたロビーを復活させない）
+          bbgPresenceScheduleTick(3000);
+          return;
+        }
+        // 書き込みはロビー画面の再描画を起こすので、必要なときだけにする。
+        // 「つながっているのに online:false のまま」はすぐ直す（タブが裏でも接続はある）。
+        // lastSeenAt の定期更新だけは、画面を見ているときに限る。
+        var last = parseIntSafe(m.lastSeenAt, 0);
+        var needWrite = m.online !== true || (!hidden && (!last || serverNowMs() - last > 5 * 60 * 1000));
+        if (needWrite) {
+          ref.update({ online: true, lastSeenAt: serverNowMs() }).catch(bbgNoop);
+        }
+        if (!p.armed) {
+          p.armed = true;
+          try {
+            ref
+              .onDisconnect()
+              .update({ online: false, lastSeenAt: firebase.database.ServerValue.TIMESTAMP })
+              .catch(bbgNoop);
+          } catch (e1) {
+            p.armed = false;
+          }
+        }
+      })
+      .catch(bbgNoop);
+  }
+
+  function bbgPresenceStop() {
+    var p = _bbgPresence;
+    var old = p.path;
+    p.path = '';
+    p.armed = false;
+    try {
+      if (p.tickTimer) {
+        clearTimeout(p.tickTimer);
+        p.tickTimer = null;
+      }
+    } catch (e0) {
+      // ignore
+    }
+    if (!old || !_bbgDb) return;
+    try {
+      var ref = _bbgDb.ref(old);
+      // 予約していた「切断時にoffline」をやめて、いま自分でofflineを書く
+      // （退出などでメンバーが消えたあとに onDisconnect が発火して
+      //   中身の無いゴーストメンバーを作らないように、実在チェックしてから書く）
+      ref.onDisconnect().cancel().catch(bbgNoop);
+      ref
+        .once('value')
+        .then(function (snap) {
+          var m = snap.val();
+          if (!m || !m.name) return;
+          ref.update({ online: false, lastSeenAt: serverNowMs() }).catch(bbgNoop);
+        })
+        .catch(bbgNoop);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 画面遷移のたびに route() から呼ばれる。「いまどのロビーに居るべきか」を見て
+  // プレゼンスの張り先を付け替える（同じロビー内の画面移動では何もしない）。
+  function bbgPresenceSync() {
+    var desired = bbgPresenceDesiredPath();
+    var p = _bbgPresence;
+    if (desired === p.path) {
+      if (desired) bbgPresenceScheduleTick(1500);
+      return;
+    }
+    bbgPresenceStop();
+    p.path = desired;
+    p.armed = false;
+    if (desired) bbgPresenceScheduleTick(500);
+  }
+
+  // ---- スリープ・バックグラウンドからの復帰 ----
+  function bbgResumeResync(light) {
+    var hiddenMs = _bbgHiddenAt ? nowMs() - _bbgHiddenAt : 0;
+    _bbgHiddenAt = 0;
+    if (!_bbgDb) return;
+    try {
+      if (!light && hiddenMs > 45000) {
+        // 長く眠っていた接続は「生きているつもりで死んでいる」ことがある（特にiOS）。
+        // いったん切って張り直すと、開いている全購読が最新データで再発火する。
+        _bbgDb.goOffline();
+        _bbgDb.goOnline();
+      } else {
+        _bbgDb.goOnline();
+      }
+    } catch (e) {
+      // ignore
+    }
+    bbgPresenceScheduleTick(400);
+  }
+
+  function bbgConnInit(db) {
+    if (_bbgDb) return;
+    _bbgDb = db;
+
+    try {
+      db.ref('.info/connected').on('value', function (snap) {
+        var c = !!(snap && snap.val && snap.val());
+        _bbgConnected = c;
+        if (c) {
+          _bbgEverConnected = true;
+          _bbgOfflineSince = 0;
+          // 再接続のたびに onDisconnect の予約は消えているので、張り直す
+          _bbgPresence.armed = false;
+          bbgPresenceScheduleTick(300);
+          bbgConnShowRestoredBanner();
+        } else {
+          if (!_bbgEverConnected) return; // 起動直後の未接続でバナーを出さない
+          _bbgOfflineSince = nowMs();
+          bbgConnScheduleOfflineBanner();
+        }
+      });
+    } catch (e) {
+      // ignore
+    }
+
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          _bbgHiddenAt = nowMs();
+        } else {
+          bbgResumeResync(false);
+        }
+      });
+      // bfcache（戻る/進むで丸ごと復元）から戻ったときも張り直す
+      window.addEventListener('pageshow', function (ev) {
+        if (ev && ev.persisted) bbgResumeResync(false);
+      });
+      window.addEventListener('focus', function () {
+        bbgResumeResync(true);
+      });
+      window.addEventListener('online', function () {
+        try {
+          _bbgDb.goOnline();
+        } catch (e1) {
+          // ignore
+        }
+        bbgPresenceScheduleTick(500);
+      });
+      window.addEventListener('offline', function () {
+        if (!_bbgEverConnected) return;
+        _bbgOfflineSince = nowMs();
+        bbgConnScheduleOfflineBanner();
+      });
+    } catch (e2) {
+      // ignore
+    }
+
+    // 保険の定期見なおし（再描画を避けるため、書き込みは必要なときだけ）
+    try {
+      setInterval(bbgPresenceTick, 60000);
+    } catch (e3) {
+      // ignore
+    }
+
+    bbgPresenceSync();
+  }
+
+  // 動作検証用（コンソールから現在の接続・在席状態を見る）
+  try {
+    window.__bbgConnState = function () {
+      return {
+        db: !!_bbgDb,
+        connected: _bbgConnected,
+        everConnected: _bbgEverConnected,
+        presencePath: _bbgPresence.path,
+        presenceArmed: _bbgPresence.armed
+      };
+    };
+  } catch (eDbg) {
+    // ignore
   }
 
   // -------------------- auto-cleanup old rooms --------------------
@@ -1430,7 +1767,7 @@
       };
       if (shouldJoin) {
         lobby.order = [mid];
-        lobby.members[mid] = { name: nm, joinedAt: now, isGmDevice: !!isGmDevice, lastSeenAt: now };
+        lobby.members[mid] = { name: nm, joinedAt: now, isGmDevice: !!isGmDevice, lastSeenAt: now, online: true };
       }
       return lobby;
     }).then(function (lobby) {
@@ -1457,10 +1794,11 @@
       if (!current.order || !Array.isArray(current.order)) current.order = [];
 
       if (!current.members[mid]) {
-        current.members[mid] = { name: nm, joinedAt: now, lastSeenAt: now };
+        current.members[mid] = { name: nm, joinedAt: now, lastSeenAt: now, online: true };
       } else {
         current.members[mid].name = nm;
         current.members[mid].lastSeenAt = now;
+        current.members[mid].online = true;
       }
 
       if (!!isGmDevice) current.members[mid].isGmDevice = true;
@@ -6464,7 +6802,7 @@
             var nm = hnPlayerName(room, tid);
             var sel = String(selectedPid || '') === String(tid);
             out +=
-              '<button class="ghost hnPickTarget" data-target="' +
+              '<button class="ghost bbg-holdbtn hnPickTarget" data-target="' +
               escapeHtml(String(tid)) +
               '" style="width:100%">' +
               (sel ? '✓ ' : '') +
@@ -6478,7 +6816,7 @@
           var out2 = '<div class="hn-rumor-row">';
           for (var k = 0; k < count; k++) {
             out2 +=
-              '<div class="hn-rumor-card ' +
+              '<div class="hn-rumor-card bbg-holdbtn ' +
               escapeHtml(cls) +
               (parseIntSafe(selectedIdx, -1) === k ? ' hn-card--selected' : '') +
               '" ' +
@@ -6554,9 +6892,14 @@
           '<div id="hnPlayError" class="form-error" role="alert"></div>' +
           '<div class="row ll-modal-actions" style="justify-content:space-between">' +
           '<button class="ghost" id="hnModalCancel">キャンセル</button>' +
-          '<button class="primary" id="hnModalOk" ' +
-          (canConfirm ? '' : 'disabled') +
-          '>使用</button>' +
+          // 使用ボタンは廃止：対象/カードそのものを ながおしで確定する
+          '<span class="bbg-hold-hint">' +
+          escapeHtml(
+            cardId === 'dog'
+              ? (step === 'pick' ? 'カードを ながおしで 使用' : '相手を タップで えらぶ')
+              : '相手を ながおしで 使用'
+          ) +
+          '</span>' +
           '</div>' +
           '</div>' +
           '</div>' +
@@ -6592,7 +6935,7 @@
         var outInfo = '';
         for (var iiInfo = 0; iiInfo < myHand.length; iiInfo++) {
           outInfo +=
-            '<div class="hn-rumor-card hnInfoPick' +
+            '<div class="hn-rumor-card bbg-holdbtn hnInfoPick' +
             (selInfo === iiInfo ? ' hn-card--selected' : '') +
             '" data-hn-info-idx="' +
             escapeHtml(String(iiInfo)) +
@@ -6607,7 +6950,7 @@
           '<div class="hn-rumor-row">' +
           outInfo +
           '</div>' +
-          '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+          '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       }
@@ -6644,8 +6987,8 @@
         var facedownHtml = '';
         for (var ri = 0; ri < rightCount; ri++) {
           facedownHtml +=
-            '<div class="hn-rumor-card hnRumorPick' +
-            (confirmedRumorIdx === ri ? ' hn-card--selected' : '') +
+            '<div class="hn-rumor-card bbg-holdbtn hnRumorPick' +
+            (confirmedRumorIdx === ri || selRumor === ri ? ' hn-card--selected' : '') +
             '" data-hn-rumor-idx="' +
             escapeHtml(String(ri)) +
             '">' +
@@ -6660,7 +7003,7 @@
           '<div class="hn-rumor-row">' +
           facedownHtml +
           '</div>' +
-          '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+          '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       }
@@ -6699,9 +7042,12 @@
             '</div>';
         } else {
           var outDeal2 = '';
+          var selDeal2 = parseIntSafe(ui.hnDealSelectedIndex, -1);
           for (var di2 = 0; di2 < myHand.length; di2++) {
             outDeal2 +=
-              '<div class="hn-rumor-card hnDealPick" data-hn-deal-idx="' +
+              '<div class="hn-rumor-card bbg-holdbtn hnDealPick' +
+              (selDeal2 === di2 ? ' hn-card--selected' : '') +
+              '" data-hn-deal-idx="' +
               escapeHtml(String(di2)) +
               '">' +
               hnCardImgHtml(String(myHand[di2] || '')) +
@@ -6720,7 +7066,7 @@
             '<div class="hn-rumor-row">' +
             outDeal2 +
             '</div>' +
-            '<div class="muted center hn-hint">カードをタップすると確認画面が出ます</div>' +
+            '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
             hnPendingProgressHtml(room) +
             '</div>';
         }
@@ -6751,6 +7097,17 @@
         var contW = Math.min(340, Math.max(200, Math.floor(vw0 * 0.9)));
         var cardW = Math.max(70, Math.min(150, Math.floor(contW * 0.46)));
         var cardH = Math.round((cardW * 4) / 3);
+        // スマホ横: 高さからも制限して、手札ペイン（FIX・スクロールなし）からはみ出さないようにする。
+        try {
+          var vh0 = typeof window !== 'undefined' && window && window.innerHeight ? window.innerHeight : 700;
+          var maxCardH = Math.max(96, Math.floor(vh0 * 0.44));
+          if (cardH > maxCardH) {
+            cardH = maxCardH;
+            cardW = Math.round((cardH * 3) / 4);
+          }
+        } catch (eVh) {
+          // ignore
+        }
         var offsetPx = 0;
         if (nCards > 1) {
           offsetPx = Math.min(Math.round(cardW * 0.62), Math.floor((contW - cardW) / (nCards - 1)));
@@ -6840,12 +7197,17 @@
             useDisabled0 = true;
             useNote0 = '犯人は最後の1枚のときだけ出せます';
           }
+          // 使用ボタンは廃止。えらんだカードを ながおしで出す（ドデリドと同じ操作感）。
           useHtml0 =
-            '<button type="button" id="hnUseBtn" class="primary bbg-start-btn"' +
-            (useDisabled0 ? ' disabled' : '') +
-            '>' +
-            escapeHtml(useLabel0) +
-            '</button>' +
+            '<div class="center bbg-hold-hint">' +
+            escapeHtml(
+              !selCard0
+                ? 'カードをえらんでください'
+                : useDisabled0
+                  ? 'このカードは いま だせません'
+                  : 'えらんだカードを ながおしで だします'
+            ) +
+            '</div>' +
             (useNote0 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote0) + '</div>' : '');
         }
 
@@ -6861,7 +7223,7 @@
           infoHtml0 +
           useHtml0 +
           '<div class="muted center hn-hint">' +
-          escapeHtml(isMyTurn ? 'カードをタップして選び、ボタンで出します' : 'あなたの手札（タップで効果を確認できます）') +
+          escapeHtml(isMyTurn ? 'タップで かくにん、ながおしで だします' : 'あなたの手札（タップで効果を確認できます）') +
           '</div>' +
           '</div>';
       }
@@ -7006,9 +7368,16 @@
       '<div class="stack ll-player">' +
         bbgPanesHtml('hn_player', 1, [
           {
+            // 上ペイン: テーブル端末と同じ円卓ビュー（下スワイプで見る）。
             cls: 'bbg-pane--field',
-            label: 'ば',
-            html: hnToplineHtml + (pilesHtml || '') + (resultHtml || '')
+            label: 'テーブル',
+            html:
+              hnToplineHtml +
+              // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
+              '<div class="bbg-lonly bbg-lonly--table">' +
+              (hnTableVizHtml(room, ui.tviz || (ui.tviz = {})) || '') +
+              '</div>' +
+              (resultHtml || '')
           },
           {
             cls: 'bbg-pane--hand',
@@ -7023,6 +7392,12 @@
               (contentHtml || '') +
               // 開始バナーは手札より下。ゲームが始まってバナーが消えても手札の位置が動かない。
               (startBannerHtml || '')
+          },
+          {
+            // 下ペイン: そのほかの情報（すてふだ一覧など）。
+            cls: 'bbg-pane--more',
+            label: 'すてふだ・その他',
+            html: (pilesHtml || '')
           }
         ]) +
         (modalHtml || '') +
@@ -7474,22 +7849,15 @@
         });
       }
 
-      // 使用ボタン（従来の長押しと同じ処理へ）
-      var useBtn = document.getElementById('hnUseBtn');
-      if (useBtn && !useBtn.__hn_bound) {
-        useBtn.__hn_bound = true;
-        useBtn.addEventListener('click', function (ev) {
-          if (ev && ev.preventDefault) ev.preventDefault();
-          if (ui.inFlight) return;
-          if (ui.hnAction || ui.hnConfirm) return;
-          var idx = parseIntSafe(ui.hnSelIndex, -1);
-          if (idx < 0) {
-            bbgShowToast('カードをえらんでください');
-            return;
-          }
-          tryPlayCard(idx);
-        });
-      }
+      // 手札カードの ながおし＝出す（使用ボタンは廃止・ドデリドと同じ操作感）
+      bbgHoldBindAll(viewEl, '.hnPCard', function (el) {
+        if (ui.inFlight) return;
+        if (ui.hnAction || ui.hnConfirm) return;
+        var idxH = parseIntSafe(el.getAttribute('data-hn-idx'), -1);
+        if (idxH < 0) return;
+        ui.hnSelIndex = idxH;
+        tryPlayCard(idxH);
+      });
 
       // Modal bindings
       var bg = document.getElementById('hnModalBg');
@@ -7625,37 +7993,49 @@
         });
       }
 
-      var pickTargets = document.querySelectorAll('.hnPickTarget');
-      for (var pt = 0; pt < pickTargets.length; pt++) {
-        var b = pickTargets[pt];
-        if (!b || b.__hn_bound) continue;
-        b.__hn_bound = true;
-        b.addEventListener('click', function (ev) {
-          var el = ev && ev.currentTarget ? ev.currentTarget : null;
-          if (!el) return;
-          var tid = String(el.getAttribute('data-target') || '');
+      // 対象ボタン: タップ=えらぶ（犬は 相手えらび→ふせカードへ）/ ながおし=そのまま使用
+      bbgHoldBindAll(
+        document,
+        '.hnPickTarget',
+        function (el) {
           if (!ui.hnAction) return;
+          var tid = String(el.getAttribute('data-target') || '');
+          if (!tid) return;
           ui.hnAction.targetPid = tid;
+          if (ui.hnAction.cardId === 'dog') {
+            ui.hnAction.step = 'pick';
+            renderNow(lastRoom);
+            return;
+          }
+          submitHnAction();
+        },
+        function (el) {
+          if (!ui.hnAction) return;
+          ui.hnAction.targetPid = String(el.getAttribute('data-target') || '');
           // Advance step for multi-step actions.
           if (ui.hnAction.cardId === 'dog') ui.hnAction.step = 'pick';
           renderNow(lastRoom);
-        });
-      }
+        }
+      );
 
-      var pickHidden = document.querySelectorAll('.hnPickHidden');
-      for (var ph = 0; ph < pickHidden.length; ph++) {
-        var h = pickHidden[ph];
-        if (!h || h.__hn_bound) continue;
-        h.__hn_bound = true;
-        h.addEventListener('click', function (ev) {
-          var el = ev && ev.currentTarget ? ev.currentTarget : null;
-          if (!el) return;
-          var idx = parseIntSafe(el.getAttribute('data-hidden'), -1);
+      // ふせカード（犬）: タップ=えらぶ / ながおし=そのまま使用
+      bbgHoldBindAll(
+        document,
+        '.hnPickHidden',
+        function (el) {
           if (!ui.hnAction) return;
-          if (ui.hnAction.cardId === 'dog') ui.hnAction.targetIndex = idx;
+          var idxHd = parseIntSafe(el.getAttribute('data-hidden'), -1);
+          if (idxHd < 0) return;
+          if (ui.hnAction.cardId === 'dog') ui.hnAction.targetIndex = idxHd;
+          submitHnAction();
+        },
+        function (el) {
+          if (!ui.hnAction) return;
+          var idxHd2 = parseIntSafe(el.getAttribute('data-hidden'), -1);
+          if (ui.hnAction.cardId === 'dog') ui.hnAction.targetIndex = idxHd2;
           renderNow(lastRoom);
-        });
-      }
+        }
+      );
 
       var pickGive = document.querySelectorAll('.hnPickGive');
       for (var pg = 0; pg < pickGive.length; pg++) {
@@ -7672,10 +8052,8 @@
         });
       }
 
-      var okBtn = document.getElementById('hnModalOk');
-      if (okBtn && !okBtn.__hn_bound) {
-        okBtn.__hn_bound = true;
-        okBtn.addEventListener('click', function () {
+      // アクションの送信（旧 使用ボタンの中身。対象/カードの ながおしから呼ばれる）
+      function submitHnAction() {
           if (!ui.hnAction || ui.inFlight) return;
           if (!canOperateThisDevice()) return;
           if (!lastRoom || !lastRoom.state) return;
@@ -7735,109 +8113,138 @@
             .finally(function () {
               ui.inFlight = false;
             });
-        });
       }
 
-      var rumorPicks = document.querySelectorAll('.hnRumorPick');
-      for (var rP = 0; rP < rumorPicks.length; rP++) {
-        var rpEl = rumorPicks[rP];
-        if (!rpEl) continue;
-
-        if (!rpEl.__hn_click_bound) {
-          rpEl.__hn_click_bound = true;
-          rpEl.addEventListener('click', function (ev) {
-            var t = ev && ev.currentTarget ? ev.currentTarget : null;
-            if (!t) return;
-            var idx = parseIntSafe(t.getAttribute('data-hn-rumor-idx'), -1);
-            if (idx < 0) return;
-            // Tap-select then confirm/cancel modal.
-            if (ui.inFlight) return;
-            try {
-              var st = lastRoom && lastRoom.state ? lastRoom.state : null;
-              if (!st || !st.pending || st.pending.type !== 'rumor') return;
-              if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return;
-            } catch (eTap) {
-              return;
-            }
-
-            ui.hnRumorSelectedIndex = idx;
-            ui.hnConfirm = { type: 'rumor', index: idx };
-            bbgFx.tap();
-            renderNow(lastRoom);
-          });
+      // うわさ: タップ=えらぶ / ながおし=そのまま決定（確認モーダルなし）
+      function hnRumorPickOk(idx) {
+        if (idx < 0 || ui.inFlight) return false;
+        try {
+          var st = lastRoom && lastRoom.state ? lastRoom.state : null;
+          if (!st || !st.pending || st.pending.type !== 'rumor') return false;
+          if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return false;
+        } catch (eTap) {
+          return false;
         }
+        return true;
       }
+      bbgHoldBindAll(
+        document,
+        '.hnRumorPick',
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-rumor-idx'), -1);
+          if (!hnRumorPickOk(idx)) return;
+          ui.hnRumorSelectedIndex = idx;
+          ui.inFlight = true;
+          bbgFx.play();
+          renderNow(lastRoom);
+          submitHanninRumorChoice(roomId, playerId, idx)
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              ui.inFlight = false;
+            });
+        },
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-rumor-idx'), -1);
+          if (!hnRumorPickOk(idx)) return;
+          ui.hnRumorSelectedIndex = idx;
+          bbgFx.tap();
+          renderNow(lastRoom);
+        }
+      );
 
-      var infoPicks = document.querySelectorAll('.hnInfoPick');
-      for (var iP = 0; iP < infoPicks.length; iP++) {
-        var ipEl = infoPicks[iP];
-        if (!ipEl) continue;
-        if (ipEl.__hn_click_bound) continue;
-        ipEl.__hn_click_bound = true;
-        ipEl.addEventListener('click', function (ev) {
-          var t = ev && ev.currentTarget ? ev.currentTarget : null;
-          if (!t) return;
-          if (ui.inFlight) return;
-          var idx = parseIntSafe(t.getAttribute('data-hn-info-idx'), -1);
-          if (idx < 0) return;
-          try {
-            var st = lastRoom && lastRoom.state ? lastRoom.state : null;
-            if (!st || !st.pending || st.pending.type !== 'info') return;
-            if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return;
-          } catch (eTap2) {
-            return;
-          }
+      // 情報操作: タップ=えらぶ / ながおし=そのまま決定
+      function hnInfoPickOk(idx) {
+        if (idx < 0 || ui.inFlight) return false;
+        try {
+          var st = lastRoom && lastRoom.state ? lastRoom.state : null;
+          if (!st || !st.pending || st.pending.type !== 'info') return false;
+          if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return false;
+        } catch (eTap2) {
+          return false;
+        }
+        return true;
+      }
+      bbgHoldBindAll(
+        document,
+        '.hnInfoPick',
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-info-idx'), -1);
+          if (!hnInfoPickOk(idx)) return;
           ui.hnInfoSelectedIndex = idx;
-          try {
-            var h = lastRoom && lastRoom.state && lastRoom.state.hands && Array.isArray(lastRoom.state.hands[playerId]) ? lastRoom.state.hands[playerId] : [];
-            var cid = idx >= 0 && idx < h.length ? String(h[idx] || '') : '';
-            ui.hnConfirm = { type: 'info', index: idx, cardId: cid };
-          } catch (eTap3) {
-            ui.hnConfirm = { type: 'info', index: idx, cardId: '' };
-          }
+          ui.inFlight = true;
+          bbgFx.play();
+          renderNow(lastRoom);
+          submitHanninInfoChoice(roomId, playerId, idx)
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              ui.inFlight = false;
+            });
+        },
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-info-idx'), -1);
+          if (!hnInfoPickOk(idx)) return;
+          ui.hnInfoSelectedIndex = idx;
           bbgFx.tap();
           renderNow(lastRoom);
-        });
+        }
+      );
+
+      // とりひき: タップ=えらぶ / ながおし=そのまま決定
+      function hnDealPickOk(idx) {
+        if (idx < 0 || ui.inFlight) return false;
+        try {
+          var st = lastRoom && lastRoom.state ? lastRoom.state : null;
+          if (!st || !st.pending || st.pending.type !== 'deal') return false;
+          var canChoose =
+            String(st.pending.targetPid || '') === String(playerId || '') ||
+            String(st.pending.actorId || '') === String(playerId || '');
+          if (!canChoose) return false;
+          if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return false;
+        } catch (eD) {
+          return false;
+        }
+        return true;
       }
-
-      var dealPicks = document.querySelectorAll('.hnDealPick');
-      for (var dP = 0; dP < dealPicks.length; dP++) {
-        var dpEl = dealPicks[dP];
-        if (!dpEl) continue;
-        if (dpEl.__hn_click_bound) continue;
-        dpEl.__hn_click_bound = true;
-        dpEl.addEventListener('click', function (ev) {
-          var t = ev && ev.currentTarget ? ev.currentTarget : null;
-          if (!t) return;
-          if (ui.inFlight) return;
-          var idx = parseIntSafe(t.getAttribute('data-hn-deal-idx'), -1);
-          if (idx < 0) return;
-          try {
-            var st = lastRoom && lastRoom.state ? lastRoom.state : null;
-            if (!st || !st.pending || st.pending.type !== 'deal') return;
-            var canChoose =
-              String(st.pending.targetPid || '') === String(playerId || '') ||
-              String(st.pending.actorId || '') === String(playerId || '');
-            if (!canChoose) return;
-            if (st.pending.choices && st.pending.choices[String(playerId)] !== undefined) return;
-          } catch (eD) {
-            return;
-          }
-
-          try {
-            var h = lastRoom && lastRoom.state && lastRoom.state.hands && Array.isArray(lastRoom.state.hands[playerId]) ? lastRoom.state.hands[playerId] : [];
-            var cid = idx >= 0 && idx < h.length ? String(h[idx] || '') : '';
-            ui.hnConfirm = { type: 'deal', index: idx, cardId: cid };
-          } catch (eD2) {
-            ui.hnConfirm = { type: 'deal', index: idx, cardId: '' };
-          }
+      bbgHoldBindAll(
+        document,
+        '.hnDealPick',
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-deal-idx'), -1);
+          if (!hnDealPickOk(idx)) return;
+          ui.hnDealSelectedIndex = idx;
+          ui.inFlight = true;
+          bbgFx.play();
+          renderNow(lastRoom);
+          submitHanninDealChoice(roomId, playerId, idx)
+            .catch(function (e) {
+              alert((e && e.message) || '失敗');
+            })
+            .finally(function () {
+              ui.inFlight = false;
+            });
+        },
+        function (el) {
+          var idx = parseIntSafe(el.getAttribute('data-hn-deal-idx'), -1);
+          if (!hnDealPickOk(idx)) return;
+          ui.hnDealSelectedIndex = idx;
           bbgFx.tap();
           renderNow(lastRoom);
-        });
-      }
+        }
+      );
 
       // 効果音トグル（再描画のたびに貼り直されるので毎回バインドする）
       bindBbgFxToggle();
+
+      // テーブルペインの円卓ビューに効果矢印を重ねる（描画後に実測が必要）
+      try {
+        updateHanninTableEffectArrow(viewEl, room);
+      } catch (eArrow) {
+        // ignore
+      }
 
       // 演出は最後にまとめて（ワンショット管理）
       hnRunOneShotFx(room);
@@ -7971,10 +8378,16 @@
         return;
       }
 
-      // Other cards: require confirm/cancel.
-      ui.hnConfirm = { type: 'play', cardIndex: idx, cardId: cardId };
+      // それ以外のカード: ながおし自体が「確定」なので、確認モーダルなしでそのまま出す。
+      ui.inFlight = true;
       bbgFx.play();
-      renderNow(lastRoom);
+      playHanninCard(roomId, playerId, idx, {})
+        .catch(function (e) {
+          alert((e && e.message) || '失敗');
+        })
+        .finally(function () {
+          ui.inFlight = false;
+        });
     }
 
     // NOTE: うわさ/情報操作の長押し確定は廃止（タップ→確認モーダルに一本化）したため、
@@ -11019,8 +11432,8 @@
       if (canOperate && cnt > 0) {
         var ok = bzCanHarvest(me.fields, fi);
         acts =
-          '<button type="button" class="ghost bz-btn bzHarvestBtn" data-bz-field="' + escapeHtml(String(fi)) + '"' +
-          (ok ? '' : ' disabled') + '>しゅうかく</button>' +
+          '<button type="button" class="ghost bz-btn bbg-holdbtn bzHarvestBtn" data-bz-field="' + escapeHtml(String(fi)) + '"' +
+          (ok ? '' : ' disabled') + '>ながおしで しゅうかく</button>' +
           (ok ? '' : '<div class="bz-note">1まいの畑は しゅうかくできません</div>');
       }
       fieldsHtml += bzFieldTileHtml(f, fi, { actionsHtml: acts ? '<div class="bz-field-acts">' + acts + '</div>' : '' });
@@ -11029,7 +11442,7 @@
       '<div class="card bz-mine">' +
       '<div class="bz-sec-title">あなたの畑</div>' +
       '<div class="bz-fields">' + fieldsHtml + '</div>' +
-      (canOperate && canBuy ? '<div class="row"><button type="button" id="bzBuyField" class="ghost bz-btn">3つめの畑を かう（-3きん）</button></div>' : '') +
+      (canOperate && canBuy ? '<div class="row"><button type="button" id="bzBuyField" class="ghost bz-btn bbg-holdbtn">ながおしで 3つめの畑を かう（-3きん）</button></div>' : '') +
       '</div>';
 
     // ---- 畑えらびボタン（うえる用）
@@ -11096,11 +11509,11 @@
           var gm = String(order[gi] || '');
           if (!gm) continue;
           giveTargets +=
-            '<button type="button" class="ghost bz-btn bzGiveFuBtn" data-bz-to="' + escapeHtml(gm) + '">' +
+            '<button type="button" class="ghost bz-btn bbg-holdbtn bzGiveFuBtn" data-bz-to="' + escapeHtml(gm) + '">' +
             escapeHtml(bzName(room, gm)) + (gm === playerId ? '（じぶん）' : '') + '</button>';
         }
         giveTargets =
-          '<div class="bz-give"><div class="bz-hint">だれに わたす？</div><div class="bz-pick">' + giveTargets +
+          '<div class="bz-give"><div class="bz-hint">わたす あいてを ながおし で けってい</div><div class="bz-pick">' + giveTargets +
           '<button type="button" id="bzGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
       }
 
@@ -11110,7 +11523,7 @@
         (faceUp.length ? '<div class="bz-fu">' + fuHtml + '</div>' : '<div class="muted">（なし）</div>') +
         (canOperate && isMyTurn ? '<div class="bz-hint">カードを タップして わたす あいてを えらびます</div>' : '<div class="bz-hint">こうかんは くちで そうだんして、' + escapeHtml(bzName(room, turnMid)) + 'が そうさします</div>') +
         giveTargets +
-        (canOperate && isMyTurn ? '<div class="row"><button type="button" id="bzEndTradeBtn" class="primary bz-btn">こうかん おわり</button></div>' : '') +
+        (canOperate && isMyTurn ? '<div class="row"><button type="button" id="bzEndTradeBtn" class="primary bz-btn bbg-holdbtn">ながおしで こうかん おわり</button></div>' : '') +
         '</div>';
     }
 
@@ -11142,7 +11555,7 @@
           '<div class="bz-hint">' + escapeHtml(fromLabel) + '</div>' +
           (canOperate ? fieldPickHtml(pe.bean, 'pend', pi2) : '') +
           (canOperate && phase === 'trade' && String(pe.from || '') === 'deck'
-            ? '<button type="button" class="ghost bz-btn bzReturnBtn" data-bz-pidx="' + escapeHtml(String(pi2)) + '">もどす</button>'
+            ? '<button type="button" class="ghost bz-btn bbg-holdbtn bzReturnBtn" data-bz-pidx="' + escapeHtml(String(pi2)) + '">ながおしで もどす</button>'
             : '') +
           (!bzHasPlantableField(me.fields, pe.bean) ? '<div class="bz-note bz-note--warn">おける畑が ありません。さきに しゅうかくしてください。</div>' : '') +
           '</div>' +
@@ -11168,10 +11581,10 @@
         var tm = String(order[ti] || '');
         if (!tm || tm === playerId) continue;
         if (!isMyTurn && tm !== turnMid) continue;
-        targets += '<button type="button" class="ghost bz-btn bzGiveHandBtn" data-bz-to="' + escapeHtml(tm) + '">' + escapeHtml(bzName(room, tm)) + 'に わたす</button>';
+        targets += '<button type="button" class="ghost bz-btn bbg-holdbtn bzGiveHandBtn" data-bz-to="' + escapeHtml(tm) + '">' + escapeHtml(bzName(room, tm)) + 'に わたす</button>';
       }
       handGive =
-        '<div class="bz-give"><div class="bz-hint">えらんだ 手札を わたします（とりけしできません）</div>' +
+        '<div class="bz-give"><div class="bz-hint">わたす あいてを ながおし で けってい（とりけしできません）</div>' +
         '<div class="bz-pick">' + targets + '<button type="button" id="bzHandGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
     }
     var myHandHtml =
@@ -11182,25 +11595,29 @@
       handGive +
       '</div>';
 
-    // ---- ほかの人
-    var othersHtml = '';
-    for (var oi = 0; oi < order.length; oi++) {
-      var om = String(order[oi] || '');
-      if (!om || om === playerId) continue;
-      othersHtml += bzOtherRowHtml(room, om, turnMid);
-    }
-    othersHtml = othersHtml ? '<div class="card bz-others"><div class="bz-sec-title">ほかの人</div>' + othersHtml + '</div>' : '';
-
     render(
       viewEl,
-      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場(畑)、上スワイプでみんな・きろく。
+      // スマホ横(基本形): 手札ペインをまんなか、上スワイプ(下ペイン)で畑・きろく、下スワイプ(上ペイン)でテーブル。
+      // 上ペインはテーブル端末と同じ部品（ばん・めくれたカード・みんなの席）を写す。
       // タブレット以上はペインをグリッドに並べて1画面表示（bbg.cssの.bz-screen .bbg-panes）。
-      // 高さが変わる操作ブロックを畑より下に置くことで、フェーズが進んでも畑の位置が動かない。
       '<div class="stack bz-screen bbg-wide">' +
       bbgPanesHtml('bz_player', 1, [
-        { cls: 'bbg-pane--field', label: 'ば（はたけ）', html: myFieldsHtml + pendingHtml },
-        { cls: 'bbg-pane--hand', label: 'てふだ', html: statusHtml + actionHtml + myHandHtml },
-        { cls: 'bbg-pane--more', label: 'みんな・きろく', html: othersHtml + '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' }
+        { cls: 'bbg-pane--field', label: 'テーブル', html: bzTableBarHtml(room) + bzFuBoxHtml(room) + bzSeatsHtml(room) },
+        {
+          cls: 'bbg-pane--hand',
+          label: 'てふだ',
+          html:
+            statusHtml +
+            actionHtml +
+            // うえる待ちは「はたけ」ペインにある。スマホ横では気づけるように案内を出す。
+            (me.pending.length
+              ? '<div class="bbg-lonly"><div class="card bz-hint">うえる まちの 豆 ' +
+                escapeHtml(String(me.pending.length)) +
+                'まい → 上スワイプの「はたけ」ペインで うえます</div></div>'
+              : '') +
+            myHandHtml
+        },
+        { cls: 'bbg-pane--more', label: 'はたけ・きろく', html: pendingHtml + myFieldsHtml + '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' }
       ]) +
       '</div>'
     );
@@ -11453,26 +11870,22 @@
         });
       }
 
-      // めくれ札を わたす
-      bindAll('.bzGiveFuBtn', function (el) {
+      // めくれ札を わたす（あいてボタンを ながおしで けってい。確認モーダルなし）
+      bbgHoldBindAll(viewEl, '.bzGiveFuBtn', function (el) {
         var to = String(el.getAttribute('data-bz-to') || '');
         var idx = parseIntSafe(ui.bzSelFaceUp, -1);
         if (!to || idx < 0 || ui.inFlight) return;
-        var nm = bzName(lastRoom, to);
-        if (!bbgConfirmClick(el, 'このカードを ' + nm + ' に わたしますか？', 'わたす')) return;
         ui.inFlight = true;
         ui.bzSelFaceUp = -1;
         bbgFx.play();
         bzGiveFaceUp(roomId, playerId, idx, to).catch(fail).then(done, done);
       });
 
-      // 手札を わたす（とりけし不可）
-      bindAll('.bzGiveHandBtn', function (el) {
+      // 手札を わたす（とりけし不可・あいてボタンを ながおし）
+      bbgHoldBindAll(viewEl, '.bzGiveHandBtn', function (el) {
         var to = String(el.getAttribute('data-bz-to') || '');
         var idx = parseIntSafe(ui.bzSelHand, -1);
         if (!to || idx < 0 || ui.inFlight) return;
-        var nm2 = bzName(lastRoom, to);
-        if (!bbgConfirmClick(el, '手札の カードを ' + nm2 + ' に わたします。\nとりけしは できません。', 'わたす')) return;
         ui.inFlight = true;
         ui.bzSelHand = -1;
         bbgFx.play();
@@ -11500,27 +11913,22 @@
         bzPlantPending(roomId, playerId, pidx, fidx2).catch(fail).then(done, done);
       });
 
-      // もどす
-      bindAll('.bzReturnBtn', function (el) {
+      // もどす（ながおしで けってい）
+      bbgHoldBindAll(viewEl, '.bzReturnBtn', function (el) {
         if (ui.inFlight) return;
         var pidx2 = parseIntSafe(el.getAttribute('data-bz-pidx'), -1);
         if (pidx2 < 0) return;
-        if (!bbgConfirmClick(el, 'このカードを めくれ札に もどしますか？', 'もどす')) return;
         ui.inFlight = true;
         bzReturnPending(roomId, playerId, pidx2).catch(fail).then(done, done);
       });
 
-      // しゅうかく
-      bindAll('.bzHarvestBtn', function (el) {
+      // しゅうかく（ながおしで けってい）
+      bbgHoldBindAll(viewEl, '.bzHarvestBtn', function (el) {
         if (ui.inFlight) return;
         var fidx3 = parseIntSafe(el.getAttribute('data-bz-field'), -1);
         if (fidx3 < 0) return;
         var me2 = bzPlayerOf(lastRoom, playerId);
         if (fidx3 >= me2.fields.length) return;
-        var fld = me2.fields[fidx3];
-        var gain = bzCoinsFor(fld.bean, fld.count);
-        var msg = bzBeanName(fld.bean) + ' ' + String(fld.count) + 'まいを しゅうかくします。\n' + String(gain) + 'きん もらえます。' + (gain === 0 ? '\n（0きんです！）' : '');
-        if (!bbgConfirmClick(el, msg, 'しゅうかく')) return;
         ui.inFlight = true;
         bbgFx.reveal();
         bzHarvest(roomId, playerId, fidx3).catch(fail).then(done, done);
@@ -11537,27 +11945,19 @@
         });
       }
 
-      var endTradeBtn = document.getElementById('bzEndTradeBtn');
-      if (endTradeBtn && !endTradeBtn.__bz_bound) {
-        endTradeBtn.__bz_bound = true;
-        endTradeBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          if (!bbgConfirmClick(endTradeBtn, 'こうかんを おわりますか？\nのこった めくれ札は あなたが うえます。', 'おわる')) return;
-          ui.inFlight = true;
-          bzEndTrade(roomId, playerId).catch(fail).then(done, done);
-        });
-      }
+      // こうかん おわり（ながおしで けってい）
+      bbgHoldBind(document.getElementById('bzEndTradeBtn'), function () {
+        if (ui.inFlight) return;
+        ui.inFlight = true;
+        bzEndTrade(roomId, playerId).catch(fail).then(done, done);
+      });
 
-      var buyBtn = document.getElementById('bzBuyField');
-      if (buyBtn && !buyBtn.__bz_bound) {
-        buyBtn.__bz_bound = true;
-        buyBtn.addEventListener('click', function () {
-          if (ui.inFlight) return;
-          if (!bbgConfirmClick(buyBtn, '3きん はらって 3つめの畑を かいますか？\nはらった コインは ゲームから なくなります。', 'かう')) return;
-          ui.inFlight = true;
-          bzBuyThirdField(roomId, playerId).catch(fail).then(done, done);
-        });
-      }
+      // 3つめの畑を かう（ながおしで けってい）
+      bbgHoldBind(document.getElementById('bzBuyField'), function () {
+        if (ui.inFlight) return;
+        ui.inFlight = true;
+        bzBuyThirdField(roomId, playerId).catch(fail).then(done, done);
+      });
 
       var nextBtn = document.getElementById('bzNextToLobby');
       if (nextBtn && !nextBtn.__bz_bound) {
@@ -11629,29 +12029,25 @@
 
   // -------------------- bohnanza: テーブル画面 --------------------
 
-  function renderBohnanzaTable(viewEl, opts) {
-    var room = opts.room;
-    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
-    var isHost = !!opts.isHost;
-
-    var order = Array.isArray(room && room.order) ? room.order : [];
+  // ---- テーブル画面の共通部品（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用） ----
+  function bzTableBarHtml(room) {
     var phase = String((room && room.phase) || '');
     var turnMid = bzTurnMid(room);
-    var faceUp = bzNormFaceUp(room && room.faceUp);
+    return (
+      '<div class="card bz-top bz-top--bar">' +
+      '<div class="bz-top-row">' +
+      '<span class="bz-phase">' + escapeHtml(bzPhaseLabel(phase)) + '</span>' +
+      '<span class="bz-turn bz-turn--me">' + escapeHtml(bzName(room, turnMid)) + 'の ばん</span>' +
+      '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'てばんめ</span>' +
+      bzDeckInfoHtml(room) +
+      '</div>' +
+      '</div>'
+    );
+  }
 
-    if (phase === 'result') {
-      render(
-        viewEl,
-        '<div class="stack bz-screen bz-table">' +
-        '<div class="bbg-title-row"><div class="big">🫘 ボーナンザ けっか</div></div>' +
-        bzRankingHtml(room, '') +
-        '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
-        (lobbyId ? '<div class="row"><button type="button" id="bzNextToLobby" class="primary">ロビーへもどる</button></div>' : '') +
-        '</div>'
-      );
-      return;
-    }
-
+  function bzSeatsHtml(room) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    var turnMid = bzTurnMid(room);
     var seats = '';
     for (var i = 0; i < order.length; i++) {
       var mid = String(order[i] || '');
@@ -11667,29 +12063,51 @@
         bzMiniFieldsHtml(p) +
         '</div>';
     }
+    return '<div class="bz-seats">' + seats + '</div>';
+  }
 
+  // 「めくれたカード」枠はプレイ中つねに出す（tradeのときだけ出すと席の位置が上下してしまう）。
+  function bzFuBoxHtml(room) {
+    var phase = String((room && room.phase) || '');
+    var faceUp = bzNormFaceUp(room && room.faceUp);
     var fuHtml = '';
     for (var k = 0; k < faceUp.length; k++) {
       var tag = String(faceUp[k].takenBy || '') ? '<div class="bz-card-tag">→' + escapeHtml(bzName(room, faceUp[k].takenBy)) + '</div>' : '';
       fuHtml += bzCardHtml(faceUp[k].bean, 'bz-card--sm', tag);
     }
+    return (
+      '<div class="card bz-fubox"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' +
+      (phase === 'trade' && fuHtml ? fuHtml : '<span class="muted">' + (phase === 'trade' ? '（なし）' : '（こうかんのとき ここに出ます）') + '</span>') +
+      '</div></div>'
+    );
+  }
+
+  function renderBohnanzaTable(viewEl, opts) {
+    var room = opts.room;
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var isHost = !!opts.isHost;
+
+    var phase = String((room && room.phase) || '');
+
+    if (phase === 'result') {
+      render(
+        viewEl,
+        '<div class="stack bz-screen bz-table">' +
+        '<div class="bbg-title-row"><div class="big">🫘 ボーナンザ けっか</div></div>' +
+        bzRankingHtml(room, '') +
+        '<div class="card">' + bzLogHtml(room, 10) + '</div>' +
+        (lobbyId ? '<div class="row"><button type="button" id="bzNextToLobby" class="primary">ロビーへもどる</button></div>' : '') +
+        '</div>'
+      );
+      return;
+    }
 
     render(
       viewEl,
       '<div class="stack bz-screen bz-table">' +
-      '<div class="card bz-top bz-top--bar">' +
-      '<div class="bz-top-row">' +
-      '<span class="bz-phase">' + escapeHtml(bzPhaseLabel(phase)) + '</span>' +
-      '<span class="bz-turn bz-turn--me">' + escapeHtml(bzName(room, turnMid)) + 'の ばん</span>' +
-      '<span class="bz-turncount">' + escapeHtml(String(parseIntSafe(room && room.turnCount, 0) || 0)) + 'てばんめ</span>' +
-      bzDeckInfoHtml(room) +
-      '</div>' +
-      '</div>' +
-      // 「めくれたカード」枠はプレイ中つねに出す（tradeのときだけ出すと席の位置が上下してしまう）。
-      '<div class="card bz-fubox"><div class="bz-sec-title">めくれた カード</div><div class="bz-fu">' +
-      (phase === 'trade' && fuHtml ? fuHtml : '<span class="muted">' + (phase === 'trade' ? '（なし）' : '（こうかんのとき ここに出ます）') + '</span>') +
-      '</div></div>' +
-      '<div class="bz-seats">' + seats + '</div>' +
+      bzTableBarHtml(room) +
+      bzFuBoxHtml(room) +
+      bzSeatsHtml(room) +
       '<div class="card bz-logbox">' + bzLogHtml(room, 10) + '</div>' +
       (isHost
         ? '<div class="row"><button type="button" id="bzHostForce" class="ghost">⚠ すすめる（だいり）</button>' +
@@ -13855,6 +14273,108 @@
     return false;
   }
 
+  // ながおし確定（ドデリド方式の共通化）。
+  // 「決定ボタン＋確認モーダル」のかわりに、対象そのものを ながおしして確定する。
+  // 押している間は .bbg-holding が付き、CSS(.bbg-holdbtn)で左から満ちる表示になる。
+  // 短いタップは opts.tap（省略時なにもしない）。発火後の合成clickは握りつぶす。
+  var BBG_HOLD_MS = 650;
+  function bbgHoldBind(el, fire, opts) {
+    if (!el || el.__bbg_holdBound) return;
+    el.__bbg_holdBound = true;
+    var o = opts || {};
+    var timer = null;
+    var fired = false;
+    var downX = 0;
+    var downY = 0;
+
+    function stopHold() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        if (el.classList) el.classList.remove('bbg-holding');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    el.addEventListener('pointerdown', function (ev) {
+      if (el.disabled) return;
+      if (ev && ev.isPrimary === false) return;
+      fired = false;
+      downX = ev.clientX;
+      downY = ev.clientY;
+      try {
+        if (el.classList) el.classList.add('bbg-holding');
+      } catch (e) {
+        // ignore
+      }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () {
+        timer = null;
+        fired = true;
+        stopHold();
+        try {
+          fire();
+        } catch (e2) {
+          // ignore
+        }
+      }, BBG_HOLD_MS);
+    });
+    el.addEventListener('pointermove', function (ev) {
+      if (!timer) return;
+      var dx = ev.clientX - downX;
+      var dy = ev.clientY - downY;
+      // 12px以上動いたら ながおし中止（スワイプ/スクロール操作とみなす）
+      if (dx * dx + dy * dy > 144) stopHold();
+    });
+    el.addEventListener('pointerup', stopHold);
+    el.addEventListener('pointercancel', stopHold);
+    el.addEventListener('pointerleave', stopHold);
+    el.addEventListener('click', function (ev) {
+      if (fired) {
+        fired = false;
+        try {
+          ev.preventDefault();
+          ev.stopPropagation();
+        } catch (e) {
+          // ignore
+        }
+        return;
+      }
+      if (o.tap) o.tap(ev);
+    });
+    el.addEventListener('contextmenu', function (ev) {
+      try {
+        ev.preventDefault();
+      } catch (e) {
+        // ignore
+      }
+    });
+  }
+
+  // querySelectorAll した要素ぜんぶに bbgHoldBind を張る（data-* を fire に渡す）。
+  function bbgHoldBindAll(rootEl, selector, makeFire, makeTap) {
+    var list = [];
+    try {
+      list = rootEl.querySelectorAll(selector);
+    } catch (e) {
+      list = [];
+    }
+    for (var i = 0; i < list.length; i++) {
+      (function (el) {
+        bbgHoldBind(
+          el,
+          function () {
+            makeFire(el);
+          },
+          makeTap ? { tap: function () { makeTap(el); } } : null
+        );
+      })(list[i]);
+    }
+  }
+
   function setHeaderLobbyId(lobbyId) {
     HEADER_LOBBY_ID = String(lobbyId || '').trim();
   }
@@ -14420,14 +14940,28 @@
         var m = members[mid] || {};
         var nm = String(m.name || '').trim();
         if (!nm) nm = '（無名）';
+        // 在席（プレゼンス）: online:false は切断中（スリープ・アプリ切替・ブラウザ閉じなど）。
+        // 古いデータには online が無いので、その場合は何も出さない。
+        var offCls = '';
+        var stHtml = '';
+        if (m.online === false) {
+          offCls = ' bbg-chip--off';
+          stHtml = '<span class="bbg-chip-offbadge">オフライン</span>';
+        } else if (m.online === true) {
+          stHtml = '<span class="bbg-chip-onl" title="オンライン"></span>';
+        }
         out +=
-          '<div class="bbg-chip" style="animation-delay:' +
+          '<div class="bbg-chip' +
+          offCls +
+          '" style="animation-delay:' +
           Math.min(i * 40, 400) +
           'ms"><span class="bbg-chip-num">' +
           (i + 1) +
           '</span><span>' +
           escapeHtml(nm) +
-          '</span></div>';
+          '</span>' +
+          stHtml +
+          '</div>';
       }
       if (out) return '<div class="bbg-chips">' + out + '</div>';
       var keys = Object.keys(members);
@@ -14718,7 +15252,17 @@
       escapeHtml(myName || loadPersistedName() || '') +
       '" style="flex:1" />\n          <button id="lobbyUpdateMyName" class="ghost">変更</button>\n        </div>\n        <div class="muted">※ 参加者一覧に反映されます。</div>\n      </div>';
 
-    var memberCount = Object.keys(members).length;
+    // 名前の無いノードは数えない（切断処理の書きこみ残りなどのゴースト対策）
+    var memberCount = 0;
+    try {
+      var mcKeys = Object.keys(members);
+      for (var mcI = 0; mcI < mcKeys.length; mcI++) {
+        var mcM = members[mcKeys[mcI]];
+        if (mcM && String(mcM.name || '').trim()) memberCount++;
+      }
+    } catch (eMc) {
+      memberCount = Object.keys(members).length;
+    }
 
     var currentStatusHtml = currentLabel
       ? '<div><span class="bbg-status bbg-status--live"><span class="bbg-dot"></span>いま ' +
@@ -15407,7 +15951,7 @@
         if (!isRev && showKey && phase === 'playing') cls += ' cn-keypreview';
         if (!isRev && pendingObj && pendingObj[String(i)]) cls += ' cn-pending';
         var disabled = phase !== 'playing' || isRev || myRole !== 'operative' || !myTeam || !room.turn || room.turn.team !== myTeam || room.turn.status !== 'guessing';
-        var tagStart = disabled ? '<button class="' + cls + '" disabled>' : '<button class="' + cls + ' cnPick" data-idx="' + i + '">';
+        var tagStart = disabled ? '<button class="' + cls + '" disabled>' : '<button class="' + cls + ' cnPick bbg-holdbtn" data-idx="' + i + '">';
         cells += tagStart + '<span class="cn-word">' + escapeHtml(word) + '</span></button>';
       }
 
@@ -19047,7 +19591,8 @@
           var k = keys[i];
           var m = members[k] || {};
           // Ignore volatile fields like lastSeenAt/joinedAt.
-          out.members[k] = { name: String(m.name || ''), isGmDevice: !!m.isGmDevice };
+          // online（在席表示）は見た目に出るので含める。
+          out.members[k] = { name: String(m.name || ''), isGmDevice: !!m.isGmDevice, online: m.online === false ? false : true };
         }
         return JSON.stringify(out);
       } catch (e) {
@@ -21346,12 +21891,17 @@
           useDisabled1 = true;
           useNote1 = '女侯爵(7)を必ず使用します';
         }
+        // 使用ボタンは廃止。えらんだカードを ながおしで使う（ドデリドと同じ操作感）。
         useHtml =
-          '<button type="button" id="llUseBtn" class="primary bbg-start-btn"' +
-          (useDisabled1 ? ' disabled' : '') +
-          '>' +
-          escapeHtml(useLabel1) +
-          '</button>' +
+          '<div class="center bbg-hold-hint">' +
+          escapeHtml(
+            !selCard1
+              ? 'カードをえらんでください'
+              : useDisabled1
+                ? 'このカードは つかえません'
+                : 'えらんだカードを ながおしで つかいます'
+          ) +
+          '</div>' +
           (useNote1 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote1) + '</div>' : '');
       }
 
@@ -21406,7 +21956,7 @@
             var sel = pending.target === tid;
             var prot = r && r.protected && r.protected[tid];
             targetBtns +=
-              '<button class="ghost llPickTarget" data-target="' +
+              '<button class="ghost bbg-holdbtn llPickTarget" data-target="' +
               escapeHtml(tid) +
               '" style="width:100%">' +
               (sel ? '✓ ' : '') +
@@ -21422,7 +21972,7 @@
           var gr = String(gv);
           var gsel = pending.guess === gr;
           guessBtns +=
-            '<button class="ghost llPickGuess" data-guess="' +
+            '<button class="ghost bbg-holdbtn llPickGuess" data-guess="' +
             escapeHtml(gr) +
             '">' +
             (gsel ? '✓ ' : '') +
@@ -21448,9 +21998,13 @@
         '<div id="llPlayError" class="form-error" role="alert"></div>' +
         '<div class="row ll-modal-actions" style="justify-content:space-between">' +
         '<button id="llCancelPlay" class="ghost">キャンセル</button>' +
-        '<button id="llConfirmPlay" class="primary" ' +
-        (canConfirm ? '' : 'disabled') +
-        '>使用</button>' +
+        // 使用ボタンは廃止：対象/推測そのものを ながおしで確定する。
+        // 対象にできる相手がいないときだけ、ながおしの確定ボタンを出す。
+        (needsTarget && !eligible.length
+          ? '<button id="llConfirmPlay" class="primary bbg-holdbtn">ながおしで 使用</button>' :
+          '<span class="bbg-hold-hint">' +
+          escapeHtml(needsGuess ? '数字を ながおしで 使用' : '相手を ながおしで 使用') +
+          '</span>') +
         '</div>' +
         '</div>' +
         '</div>';
@@ -21730,15 +22284,15 @@
       '\n    <div class="stack ll-player">\n      ' +
         bbgPanesHtml('ll_player', 1, [
           {
+            // 上ペイン: テーブル端末と同じ円卓ビュー（下スワイプで見る）。
             cls: 'bbg-pane--field',
-            label: 'ば',
+            label: 'テーブル',
             html:
-              '<div class="big ll-player-name">' +
-              escapeHtml(selfName) +
-              '</div>' +
-              pilesHtml +
               statusCardHtml +
-              (lastPlayHtml || '') +
+              // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
+              '<div class="bbg-lonly bbg-lonly--table">' +
+              llTableVizHtml(room, ui.tviz || (ui.tviz = {})) +
+              '</div>' +
               (resultHtml || '') +
               (spectateHtml || '')
           },
@@ -21746,6 +22300,17 @@
             cls: 'bbg-pane--hand',
             label: 'てふだ',
             html: '<div class="bbg-lonly">' + statusCardHtml + '</div>' + (handHtml || '')
+          },
+          {
+            // 下ペイン: そのほかの情報（名前・山札の箱・直近のプレイ）。
+            cls: 'bbg-pane--more',
+            label: 'その他',
+            html:
+              '<div class="big ll-player-name">' +
+              escapeHtml(selfName) +
+              '</div>' +
+              pilesHtml +
+              (lastPlayHtml || '')
           }
         ]) +
         '\n\n      ' +
@@ -23169,56 +23734,63 @@
         });
       }
 
-      // 使用ボタン（従来の長押しと同じ処理へ）
-      var useBtn = document.getElementById('llUseBtn');
-      if (useBtn && !useBtn.__ll_bound) {
-        useBtn.__ll_bound = true;
-        useBtn.addEventListener('click', function (ev) {
-          if (ev && ev.preventDefault) ev.preventDefault();
-          if (ui.pending || (ui.modal && ui.modal.type)) return;
-          try {
-            var rr2 = lastRoom && lastRoom.round ? lastRoom.round : null;
-            if (!rr2 || String(rr2.currentPlayerId || '') !== String(playerId || '')) return;
-            if (rr2.waitFor && rr2.waitFor.type) return;
-            if (rr2.eliminated && rr2.eliminated[playerId]) return;
+      // 手札カードの ながおし＝つかう（使用ボタンは廃止・ドデリドと同じ操作感）
+      bbgHoldBindAll(viewEl, '.ll-card2', function (cardEl2) {
+        if (ui.pending || (ui.modal && ui.modal.type)) return;
+        if (ui.playInFlight) return;
+        try {
+          var rr2 = lastRoom && lastRoom.round ? lastRoom.round : null;
+          if (!rr2 || String(rr2.currentPlayerId || '') !== String(playerId || '')) return;
+          if (rr2.waitFor && rr2.waitFor.type) return;
+          if (rr2.eliminated && rr2.eliminated[playerId]) return;
 
-            var myHand2 = rr2 && rr2.hands && Array.isArray(rr2.hands[playerId]) ? rr2.hands[playerId] : [];
-            var idx2 = myHand2.length <= 1 ? 0 : ui.selIndex;
-            if (!(idx2 === 0 || idx2 === 1)) {
-              // 女侯爵の強制がある場合は自動選択されている（renderと同じ判定）。
-              if (llMustPlayCountess(myHand2)) {
-                for (var ci2 = 0; ci2 < myHand2.length; ci2++) {
-                  if (String(myHand2[ci2] || '') === '7:countess') {
-                    idx2 = ci2;
-                    break;
-                  }
-                }
-              }
-            }
-            if (!(idx2 === 0 || idx2 === 1)) {
-              bbgShowToast('カードをえらんでください');
-              return;
-            }
-            var rank2 = String(myHand2[idx2] || '');
-            if (!rank2) return;
-            if (rank2 === '8') {
-              bbgShowToast('姫は捨てられません');
-              return;
-            }
-            if (llMustPlayCountess(myHand2) && rank2 !== '7:countess') {
-              bbgShowToast('女侯爵(7)を必ず使用します');
-              return;
-            }
-
-            ui.modal = null;
-            ui.pending = { card: rank2, target: '', guess: '' };
-            bbgFx.play();
-            renderNow(lastRoom);
-          } catch (e) {
-            // ignore
+          var myHand2 = rr2 && rr2.hands && Array.isArray(rr2.hands[playerId]) ? rr2.hands[playerId] : [];
+          var idx2 = myHand2.length <= 1 ? 0 : parseIntSafe(cardEl2.getAttribute('data-idx'), -1);
+          if (!(idx2 === 0 || idx2 === 1)) {
+            bbgShowToast('カードをえらんでください');
+            return;
           }
-        });
-      }
+          var rank2 = String(myHand2[idx2] || '');
+          if (!rank2) return;
+          if (rank2 === '8') {
+            bbgShowToast('姫は捨てられません');
+            return;
+          }
+          if (llMustPlayCountess(myHand2) && rank2 !== '7:countess') {
+            bbgShowToast('女侯爵(7)を必ず使用します');
+            return;
+          }
+
+          ui.selIndex = idx2;
+          ui.modal = null;
+
+          // 対象や推測の要らないカードは、ながおし自体が確定なのでそのまま使用する。
+          var pcH = llCardRankStr(rank2);
+          var needsChoiceH = pcH === '1' || pcH === '2' || pcH === '3' || pcH === '5' || pcH === '6';
+          if (!needsChoiceH) {
+            ui.playInFlight = true;
+            bbgFx.play();
+            playLoveLetterAction(roomId, playerId, { card: rank2 })
+              .then(function () {
+                ui.pending = null;
+                renderNow(lastRoom);
+              })
+              .catch(function () {
+                bbgShowToast('実行に失敗しました');
+              })
+              .finally(function () {
+                ui.playInFlight = false;
+              });
+            return;
+          }
+
+          ui.pending = { card: rank2, target: '', guess: '' };
+          bbgFx.play();
+          renderNow(lastRoom);
+        } catch (e) {
+          // ignore
+        }
+      });
 
       // 大臣の全員向け情報モーダル（ローカルで閉じるだけ。進行のゲートにはしない）
       var dismissBtn = document.getElementById('llRevealDismiss');
@@ -23235,80 +23807,110 @@
         });
       }
 
-      var pickTargets = document.querySelectorAll('.llPickTarget');
-      for (var t = 0; t < pickTargets.length; t++) {
-        pickTargets[t].addEventListener('click', function (ev) {
-          try {
-            var panel = document.querySelector('.ll-overlay-panel');
-            ui.modalScrollTop = panel ? panel.scrollTop : 0;
-          } catch (e0) {
-            ui.modalScrollTop = 0;
-          }
-          var el = ev && ev.currentTarget ? ev.currentTarget : null;
-          var tid = el ? String(el.getAttribute('data-target') || '') : '';
-          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
-          ui.pending.target = tid;
-          renderNow(room);
-        });
-      }
+      // モーダルの決定（対象/推測の ながおしから呼ばれる。旧 使用ボタンの中身）
+      function llSubmitPlay() {
+        var errId = 'llPlayError';
+        clearInlineError(errId);
+        if (!ui.pending || !ui.pending.card) {
+          setInlineError(errId, 'カードを選んでください。');
+          return;
+        }
+        if (ui.playInFlight) return;
 
-      var pickGuesses = document.querySelectorAll('.llPickGuess');
-      for (var g = 0; g < pickGuesses.length; g++) {
-        pickGuesses[g].addEventListener('click', function (ev) {
-          try {
-            var panel = document.querySelector('.ll-overlay-panel');
-            ui.modalScrollTop = panel ? panel.scrollTop : 0;
-          } catch (e1) {
-            ui.modalScrollTop = 0;
-          }
-          var el = ev && ev.currentTarget ? ev.currentTarget : null;
-          var gv = el ? String(el.getAttribute('data-guess') || '') : '';
-          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
-          ui.pending.guess = gv;
-          renderNow(room);
-        });
-      }
-
-      var confirmBtn = document.getElementById('llConfirmPlay');
-      if (confirmBtn) {
-        confirmBtn.addEventListener('click', function () {
-          var errId = 'llPlayError';
-          clearInlineError(errId);
-          if (!ui.pending || !ui.pending.card) {
-            setInlineError(errId, 'カードを選んでください。');
+        var card = String(ui.pending.card);
+        var payload = { card: card };
+        if (card === '1') {
+          payload.target = String(ui.pending.target || '');
+          payload.guess = String(ui.pending.guess || '');
+          if (!payload.guess) {
+            setInlineError(errId, '推測を選んでください。');
             return;
           }
+        } else if (card === '2' || card === '3' || card === '5' || card === '6') {
+          payload.target = String(ui.pending.target || '');
+        }
 
-          var card = String(ui.pending.card);
-          var payload = { card: card };
-          if (card === '1') {
-            payload.target = String(ui.pending.target || '');
-            payload.guess = String(ui.pending.guess || '');
-            if (!payload.guess) {
-              setInlineError(errId, '推測を選んでください。');
-              return;
-            }
-          } else if (card === '2' || card === '3' || card === '5' || card === '6') {
-            payload.target = String(ui.pending.target || '');
-          }
-
-          confirmBtn.disabled = true;
-          playLoveLetterAction(roomId, playerId, payload)
-            .then(function () {
-              ui.pending = null;
-              renderNow(lastRoom);
-            })
-            .catch(function () {
-              setInlineError(errId, '実行に失敗しました');
-            })
-            .finally(function () {
-              confirmBtn.disabled = false;
-            });
-        });
+        ui.playInFlight = true;
+        bbgFx.play();
+        playLoveLetterAction(roomId, playerId, payload)
+          .then(function () {
+            ui.pending = null;
+            renderNow(lastRoom);
+          })
+          .catch(function () {
+            setInlineError(errId, '実行に失敗しました');
+          })
+          .finally(function () {
+            ui.playInFlight = false;
+          });
       }
+
+      function llSaveModalScroll() {
+        try {
+          var panel = document.querySelector('.ll-overlay-panel');
+          ui.modalScrollTop = panel ? panel.scrollTop : 0;
+        } catch (e0) {
+          ui.modalScrollTop = 0;
+        }
+      }
+
+      // 対象: タップ=えらぶ / ながおし=そのまま使用（兵士は推測もえらんでから）
+      bbgHoldBindAll(
+        document,
+        '.llPickTarget',
+        function (el) {
+          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
+          llSaveModalScroll();
+          ui.pending.target = String(el.getAttribute('data-target') || '');
+          var pcT = llCardRankStr(String(ui.pending.card || ''));
+          if (pcT === '1' && !ui.pending.guess) {
+            renderNow(lastRoom);
+            return;
+          }
+          llSubmitPlay();
+        },
+        function (el) {
+          llSaveModalScroll();
+          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
+          ui.pending.target = String(el.getAttribute('data-target') || '');
+          renderNow(lastRoom);
+        }
+      );
+
+      // 推測（兵士）: タップ=えらぶ / ながおし=そのまま使用（対象がまだなら えらぶだけ）
+      bbgHoldBindAll(
+        document,
+        '.llPickGuess',
+        function (el) {
+          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
+          llSaveModalScroll();
+          ui.pending.guess = String(el.getAttribute('data-guess') || '');
+          if (!ui.pending.target) {
+            renderNow(lastRoom);
+            return;
+          }
+          llSubmitPlay();
+        },
+        function (el) {
+          llSaveModalScroll();
+          if (!ui.pending) ui.pending = { card: '', target: '', guess: '' };
+          ui.pending.guess = String(el.getAttribute('data-guess') || '');
+          renderNow(lastRoom);
+        }
+      );
+
+      // 対象にできる相手がいないときだけ出る、ながおしの確定ボタン
+      bbgHoldBind(document.getElementById('llConfirmPlay'), llSubmitPlay);
 
       // 効果音トグル（再描画のたびに貼り直されるので毎回バインドする）
       bindBbgFxToggle();
+
+      // テーブルペインの円卓ビューに効果矢印を重ねる（描画後に実測が必要）
+      try {
+        updateLoveLetterTableEffectArrow(viewEl, room);
+      } catch (eArrow) {
+        // ignore
+      }
 
       // 演出は最後にまとめて（ワンショット管理）
       llRunOneShotFx(room);
@@ -23379,13 +23981,10 @@
     });
   }
 
-  function renderLoveLetterTable(viewEl, opts) {
-    var roomId = opts.roomId;
-    var room = opts.room;
-    var isHost = !!opts.isHost;
-    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
-    var ui = opts.ui || {};
-    var stalled = !!opts.stalled;
+  // 円卓ビュー（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用）。
+  // tUi は lastPlay バナー/脱落シェイクのワンショット用の状態置き場（{} でよい）。
+  function llTableVizHtml(room, tUi) {
+    var ui = tUi || {};
 
     var phase = (room && room.phase) || 'lobby';
     var ps = (room && room.players) || {};
@@ -23620,6 +24219,30 @@
     var arrowHtml = '<svg class="ll-table-arrow" data-ll-arrow="1" preserveAspectRatio="none" aria-hidden="true"></svg>';
     var arrowIconHtml = '<div class="ll-table-arrow-icon" data-ll-arrow-icon="1" aria-hidden="true"></div>';
 
+    return (
+      '<div class="ll-table">' +
+      arrowHtml +
+      arrowIconHtml +
+      seatsHtml +
+      (facedownHtml || '') +
+      '<div class="ll-table-inner">' +
+      centerHtml +
+      '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderLoveLetterTable(viewEl, opts) {
+    var roomId = opts.roomId;
+    var room = opts.room;
+    var isHost = !!opts.isHost;
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var ui = opts.ui || {};
+    var stalled = !!opts.stalled;
+
+    var phase = (room && room.phase) || 'lobby';
+    var ps = (room && room.players) || {};
+
     var resultHtml = '';
     if (phase === 'finished' && room && room.result && Array.isArray(room.result.winners)) {
       var fs = [];
@@ -23660,15 +24283,7 @@
         (forceHtml || '') +
         '\n      ' +
         (phase === 'finished' ? resultHtml + '<hr />' : '') +
-        '<div class="ll-table">' +
-        arrowHtml +
-        arrowIconHtml +
-        seatsHtml +
-        (facedownHtml || '') +
-        '<div class="ll-table-inner">' +
-        centerHtml +
-        '</div>' +
-        '</div>' +
+        llTableVizHtml(room, ui) +
         '\n    </div>\n  '
     );
   }
@@ -24149,28 +24764,9 @@
     });
   }
 
-  function renderHanninTable(viewEl, opts) {
-    var viewerId = opts && opts.playerId ? String(opts.playerId) : '';
-    var roomId = opts.roomId;
-    var room = opts.room;
-    var isHost = !!opts.isHost;
-    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
-    var tUi = (opts && opts.ui) || {};
-    var stalled = !!(opts && opts.stalled);
-    var pendingStalled = !!(opts && opts.pendingStalled);
-
-    var players = (room && room.players) || {};
+  // 直近プレイの説明文（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用）。
+  function hnLastPlayText(room) {
     var st = (room && room.state) || {};
-    var order = Array.isArray(st.order) ? st.order : [];
-    var hands = (st && st.hands) || {};
-    var grave = Array.isArray(st.graveyard) ? st.graveyard : [];
-    var result = (st && st.result) || {};
-    var turn = (st && st.turn) || { index: 0, playerId: '' };
-    var phase = String((room && room.phase) || '');
-    var started = !!(st && st.started);
-    var pending = (st && st.pending) || null;
-
-    function hnLastPlayText(room) {
       try {
         var st0 = room && room.state ? room.state : null;
         var lp0 = st0 && st0.lastPlay ? st0.lastPlay : null;
@@ -24208,9 +24804,20 @@
         // ignore
       }
       return '';
-    }
+  }
 
-    function hanninTableVizHtml() {
+  // 円卓ビュー（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用）。
+  // tUi は lastPlay バナーのワンショットアニメ用の状態置き場（{} でよい）。
+  function hnTableVizHtml(room, tUi) {
+      if (!tUi) tUi = {};
+      var players = (room && room.players) || {};
+      var st = (room && room.state) || {};
+      var order = Array.isArray(st.order) ? st.order : [];
+      var hands = (st && st.hands) || {};
+      var grave = Array.isArray(st.graveyard) ? st.graveyard : [];
+      var result = (st && st.result) || {};
+      var turn = (st && st.turn) || { index: 0, playerId: '' };
+      var pending = (st && st.pending) || null;
       var order0 = Array.isArray(order) ? order : [];
       var nSeats = order0.length || 0;
       if (!nSeats) return '';
@@ -24413,6 +25020,31 @@
         '</div>' +
         '</div>'
       );
+  }
+
+  function renderHanninTable(viewEl, opts) {
+    var viewerId = opts && opts.playerId ? String(opts.playerId) : '';
+    var roomId = opts.roomId;
+    var room = opts.room;
+    var isHost = !!opts.isHost;
+    var lobbyId = opts.lobbyId ? String(opts.lobbyId) : '';
+    var tUi = (opts && opts.ui) || {};
+    var stalled = !!(opts && opts.stalled);
+    var pendingStalled = !!(opts && opts.pendingStalled);
+
+    var players = (room && room.players) || {};
+    var st = (room && room.state) || {};
+    var order = Array.isArray(st.order) ? st.order : [];
+    var hands = (st && st.hands) || {};
+    var grave = Array.isArray(st.graveyard) ? st.graveyard : [];
+    var result = (st && st.result) || {};
+    var turn = (st && st.turn) || { index: 0, playerId: '' };
+    var phase = String((room && room.phase) || '');
+    var started = !!(st && st.started);
+    var pending = (st && st.pending) || null;
+
+    function hanninTableVizHtml() {
+      return hnTableVizHtml(room, tUi);
     }
 
     var debugIframeHtml = '';
@@ -30650,6 +31282,13 @@
   }
 
   function route() {
+    // いまのURLに合わせて在席（プレゼンス）の張り先を付け替える
+    try {
+      bbgPresenceSync();
+    } catch (ePr) {
+      // ignore
+    }
+
     try {
       if (document && document.body && document.body.classList) {
         document.body.classList.remove('ll-player-screen');
@@ -31851,6 +32490,20 @@
                   clearTimeout(timer);
                   timer = null;
                 }
+                try {
+                  if (btn.classList) btn.classList.remove('bbg-holding');
+                } catch (eH) {
+                  // ignore
+                }
+              }
+
+              // ながおし中は 共通CSS(.bbg-holdbtn)で左から満ちる表示にする
+              function showHolding() {
+                try {
+                  if (btn.classList) btn.classList.add('bbg-holding');
+                } catch (eH) {
+                  // ignore
+                }
               }
 
               function getIdxFromEvent(ev) {
@@ -31881,6 +32534,7 @@
                   if (ev && ev.preventDefault) ev.preventDefault();
                   clearTimer();
                   longFired = false;
+                  showHolding();
                   var idx = getIdxFromEvent(ev);
                   timer = setTimeout(function () {
                     longFired = true;
@@ -31896,6 +32550,7 @@
                   if (ev && ev.preventDefault) ev.preventDefault();
                   clearTimer();
                   longFired = false;
+                  showHolding();
                   var idx = getIdxFromEvent(ev);
                   timer = setTimeout(function () {
                     longFired = true;
@@ -31910,6 +32565,7 @@
                   if (ev && ev.button != null && ev.button !== 0) return;
                   clearTimer();
                   longFired = false;
+                  showHolding();
                   var idx = getIdxFromEvent(ev);
                   timer = setTimeout(function () {
                     longFired = true;

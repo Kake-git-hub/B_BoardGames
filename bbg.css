@@ -165,6 +165,34 @@ hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 .bbg-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @keyframes bbgChipIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
+/* 在席（プレゼンス）表示: 参加者チップのオンライン/オフライン */
+.bbg-chip--off{opacity:.55;filter:grayscale(.5)}
+.bbg-chip-onl{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+.bbg-chip-offbadge{
+  font-size:10px;font-weight:900;color:var(--danger);
+  border:1px solid rgba(255,90,106,.5);border-radius:6px;padding:1px 5px;flex:0 0 auto;
+}
+
+/* 接続バナー: 切断中／再接続を画面上部に重ねて知らせる（レイアウトは動かさない） */
+#bbgConnBanner{
+  position:fixed;left:50%;transform:translateX(-50%);
+  top:calc(8px + env(safe-area-inset-top, 0px));
+  z-index:99999;display:none;align-items:center;gap:10px;
+  padding:8px 14px;border-radius:999px;font-size:13px;font-weight:800;
+  background:rgba(16,23,41,.94);color:var(--warn);
+  border:1px solid rgba(245,214,107,.5);
+  box-shadow:0 6px 24px rgba(0,0,0,.4);
+  max-width:calc(100vw - 24px);white-space:nowrap;
+}
+#bbgConnBanner.bbg-conn--show{display:inline-flex}
+#bbgConnBanner.bbg-conn--ok{color:var(--ok);border-color:rgba(53,208,127,.5)}
+#bbgConnBanner span{overflow:hidden;text-overflow:ellipsis}
+#bbgConnBanner button{
+  flex:0 0 auto;border:1px solid rgba(245,214,107,.6);border-radius:999px;
+  background:rgba(245,214,107,.12);color:var(--warn);
+  font-size:12px;font-weight:900;padding:4px 10px;cursor:pointer;
+}
+
 /* home hero */
 .bbg-hero{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 0 4px;text-align:center}
 .bbg-hero-logo{
@@ -1769,6 +1797,22 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .ll-table:not(.hn-table){min-height:min(520px,62vh)}
 .ll-table:not(.hn-table){min-height:min(520px,62dvh)}
 
+/* ==================== ながおし確定（ドデリドのおてつきと同型・全ゲーム共通） ==================== */
+/* 決定ボタン+確認モーダルのかわりに、対象そのものを ながおしして確定する。
+   JS側 bbgHoldBind が押している間だけ .bbg-holding を付ける。 */
+.bbg-holdbtn{position:relative;overflow:hidden;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+/* .bbg-holding は JS(bbgHoldBind)が押している間だけ付ける。
+   position/overflow を持つ要素（カード類）なら .bbg-holdbtn なしでもそのまま効く。 */
+.bbg-holding::after{
+  content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,rgba(255,90,106,.55),rgba(255,90,106,.30));
+  pointer-events:none;
+  animation:bbgHoldFill .65s linear both;
+}
+@keyframes bbgHoldFill{from{width:0}to{width:100%}}
+/* ながおしできることのヒント（ラベルの下に小さく） */
+.bbg-hold-hint{font-size:11px;font-weight:800;color:var(--muted)}
+
 /* ==================== 領域ペイン（スマホ横=基本形は上下スワイプで切り替え） ==================== */
 /* ふつうの表示（スマホ縦・タブレット）では、ペインはただの縦積み（.stack相当）。 */
 .bbg-panes{display:flex;flex-direction:column;gap:12px;min-width:0}
@@ -1781,9 +1825,26 @@ body.bbg-demo-on .app{padding-bottom:104px}
    スマホ横（高さ520px以下）と競合しないよう min-height で切り分ける。 */
 @media (min-width:768px) and (min-height:521px){
   .bz-screen .bbg-panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto;gap:14px;align-items:start}
-  .bz-screen .bbg-pane--field{grid-column:1;grid-row:1 / span 2}
+  .bz-screen .bbg-pane--field{grid-column:1;grid-row:1}
   .bz-screen .bbg-pane--hand{grid-column:2;grid-row:1}
-  .bz-screen .bbg-pane--more{grid-column:2;grid-row:2}
+  /* その他（うえるまち・はたけ・きろく）は下段の全幅3カラム */
+  .bz-screen .bbg-pane--more{grid-column:1 / -1;grid-row:2;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+  /* テーブルペインの席は2列に畳んで、1画面に収める */
+  .bz-screen .bbg-pane--field .bz-seats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .bz-screen .bbg-pane--field .bz-seat{padding:8px 10px}
+  .bz-screen .bbg-pane--more .bz-log{max-height:90px}
+  .bz-screen .bbg-pane--more .bz-pend-item .bz-card--sm{width:56px}
+  .bz-screen .bbg-pane--field .bz-top--bar{padding:6px 10px}
+  .bz-screen .bbg-pane--field .bz-fubox{padding:6px 10px}
+  .bz-screen .bbg-pane--field .bz-fu{min-height:0}
+  .bz-screen .bbg-pane--field .bz-fu .bz-card--sm{width:56px}
+  .bz-screen .bbg-pane--field .bz-seat-cnt{font-size:11px}
+  .bz-screen .bbg-pane--field .bz-sec-title{margin-bottom:0}
+  .bz-screen .bbg-pane--hand .card{padding:8px 12px}
+  .bz-screen .bbg-pane--hand .bz-card--lead{width:clamp(96px,13vh,124px)}
+  .bz-screen .bbg-pane--hand .bz-card--lead{width:clamp(96px,13dvh,124px)}
+  .bz-screen .bbg-pane--more .card{padding:8px 12px}
+  .bz-screen .bbg-pane--more .bz-field{padding:6px 8px}
 }
 
 /* スマホ横: 1画面に全部を詰めず、ペイン1枚だけを表示して上下スワイプ（右端ドット）で移動。
@@ -1804,13 +1865,18 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .app:has(.bbg-panes) #view{flex:1 1 auto;min-height:0;padding:6px 10px;overflow:hidden}
     .app:has(.bbg-panes) #view > .stack{height:100%;min-height:0;display:flex;flex-direction:column}
     .app:has(.bbg-panes) .bbg-panes{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;display:block;touch-action:pan-y}
+    /* ペイン自体は上下スクロールしない（FIX）。上下スワイプは常にペイン切替。
+       高さが伸びる一覧（ログ・みんな等）はペイン内の .bbg-scroll に入れて内部スクロールさせる。 */
     .app:has(.bbg-panes) .bbg-pane{
-      position:absolute;inset:0;overflow-y:auto;
+      position:absolute;inset:0;overflow:hidden;
       display:flex;flex-direction:column;gap:8px;
       padding:2px 26px 2px 2px;
       transition:transform .28s ease;
       transform:translateY(calc((var(--bbg-pane-n,0) - var(--bbg-pane-i,0)) * 100%));
     }
+    .app:has(.bbg-panes) .bbg-pane .bbg-scroll{flex:1 1 auto;min-height:0;overflow-y:auto}
+    /* あまったスペースは主要ブロックへ: .bbg-grow を付けた要素がペインの残り高さを使う */
+    .app:has(.bbg-panes) .bbg-pane .bbg-grow{flex:1 1 auto;min-height:0}
     .app:has(.bbg-panes) .bbg-pane-dots{
       display:flex;position:absolute;right:0;top:50%;transform:translateY(-50%);
       flex-direction:column;gap:10px;z-index:5;padding:4px 2px;
@@ -1822,4 +1888,62 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .app:has(.bbg-panes) .bbg-pane-dot.on{background:var(--accent);border-color:transparent}
     .app:has(.bbg-panes) .bbg-lonly{display:flex;flex-direction:column;gap:8px}
   }
+}
+
+/* ==================== スマホ横: ペインで空いたスペースを大きく使う（ゲーム別） ==================== */
+@media (orientation: landscape) and (max-height: 520px){
+  /* ---- ボーナンザ ---- */
+  /* 全ペイン: カード(枠)のpaddingと見出しを圧縮して1画面に収める */
+  .bz-screen .bbg-pane .card{padding:8px 10px}
+  .bz-screen .bbg-pane .bz-sec-title{font-size:11px;margin-bottom:2px}
+  /* 手札ペイン: 手札ブロックが残り高さをぜんぶ使い、カードを高さ連動で大きく */
+  .bz-screen .bz-handbox{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+  .bz-screen .bz-hand{flex:1 1 auto;min-height:0;align-items:center}
+  .bz-screen .bz-handbox .bz-card--sm{width:clamp(74px,22vh,120px)}
+  .bz-screen .bz-handbox .bz-card--sm{width:clamp(74px,22dvh,120px)}
+  .bz-screen .bz-handbox .bz-card--sm .bz-card-emoji{font-size:clamp(19px,6vh,30px)}
+  .bz-screen .bz-handbox .bz-card--sm .bz-card-name{font-size:clamp(10.5px,3.2vh,14px)}
+  .bz-screen .bbg-pane--hand .bz-card--lead{width:clamp(100px,26vh,150px)}
+  .bz-screen .bbg-pane--hand .bz-card--lead{width:clamp(100px,26dvh,150px)}
+  /* テーブルペイン: 席を2列グリッド・めくれ札はミニ表示で1画面に */
+  .bz-screen .bbg-pane--field .bz-seats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  .bz-screen .bbg-pane--field .bz-seat{padding:6px 8px}
+  .bz-screen .bbg-pane--field .bz-fu{min-height:0}
+  .bz-screen .bbg-pane--field .bz-card--sm{width:clamp(44px,12vh,64px)}
+  .bz-screen .bbg-pane--field .bz-card--sm{width:clamp(44px,12dvh,64px)}
+  /* 高さが伸びるブロックは内部スクロールに（ペイン自体はFIXのまま） */
+  .bz-screen .bbg-pane--hand .bz-act{flex:0 1 auto;min-height:64px;overflow-y:auto}
+  .bz-screen .bbg-pane--hand .bz-pend{flex:0 1 auto;min-height:48px;overflow-y:auto}
+  .bz-screen .bz-handbox{overflow-y:auto}
+  .bz-screen .bbg-pane--hand .bz-pick .bz-btn{padding:6px 8px;font-size:12px}
+  .bz-screen .bbg-pane--hand .bz-fu .bz-card--sm{width:clamp(44px,12vh,64px)}
+  .bz-screen .bbg-pane--hand .bz-fu .bz-card--sm{width:clamp(44px,12dvh,64px)}
+  .bz-screen .bbg-pane--hand .bz-fu{min-height:0}
+  .bz-screen .bbg-pane--field .bz-seats{flex:1 1 auto;min-height:0;overflow-y:auto;align-content:start}
+  /* きろくペイン: ログが残り高さで内部スクロール */
+  .bz-screen .bz-logbox{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
+  .bz-screen .bz-logbox .bz-log{flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}
+
+  /* ---- コードネーム ---- */
+  /* 盤面が残り高さをぜんぶ使う。マスは行を等分して大きく */
+  .bbg-pane .stack:has(.cn-board){flex:1 1 auto;min-height:0}
+  .bbg-pane .cn-board{flex:1 1 auto;min-height:0;grid-auto-rows:minmax(0,1fr)}
+  .bbg-pane .cn-card{min-height:0;height:100%;padding:4px 3px}
+  .bbg-pane .cn-word{font-size:clamp(12px,4vh,18px)}
+
+  /* ---- ラブレター / 犯人は踊る ---- */
+  /* 円卓ビュー（テーブルペイン）はペインの残り高さいっぱい */
+  .bbg-pane .bbg-lonly--table{flex:1 1 auto;min-height:0}
+  .bbg-pane .ll-table{min-height:0;flex:1 1 auto}
+  /* 墓地/山の箱は 右上固定をやめて「その他」ペインの中に置く */
+  body.ll-player-screen .app:has(.bbg-panes) .ll-piles-box{position:static;z-index:auto}
+  /* 手札ペイン: 空いた高さで手札カードを大きく */
+  .ll-player .bbg-pane--hand{gap:4px}
+  .ll-player .bbg-pane--hand .hn-hint,
+  .ll-player .bbg-pane--hand .ll-hint{font-size:11px}
+  .ll-player .bbg-pane--hand .ll-hand-wrap{flex:1 1 auto;min-height:0;justify-content:center}
+  .ll-player .ll-card2{width:min(32vh,40vw)}
+  .ll-player .ll-card2{width:min(32dvh,40vw)}
+  .ll-player .ll-card2--only{width:min(35vh,46vw)}
+  .ll-player .ll-card2--only{width:min(35dvh,46vw)}
 }
