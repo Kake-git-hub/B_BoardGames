@@ -11972,6 +11972,10 @@
 
   // 画像が無いカードを覚えておく（bohnanza と同じ仕組み）。
   var ddImgMissing = {};
+  // 読み込みずみのカード（再描画のときは最初から表示状態で出す＝チラつき防止）。
+  var ddImgReady = {};
+  var ddImgPreloaded = false;
+  var ddImgPreloadKeep = [];
 
   function ddRoomPath(roomId) {
     return 'dodelidoRooms/' + roomId;
@@ -12561,14 +12565,45 @@
     return src;
   }
 
+  // ぜんぶのカード画像を先に読み込んでおく。配られた瞬間に画像で出すため
+  //（<img> は再描画のたびに作りなおされるので、キャッシュが無いと1フレームぶん枠だけ出てしまう）。
+  function ddPreloadCardImages() {
+    if (ddImgPreloaded) return;
+    ddImgPreloaded = true;
+    try {
+      var keys = [];
+      for (var c = 0; c < DD_COLOR_KEYS.length; c++) {
+        for (var a = 0; a < DD_ANIMAL_KEYS.length; a++) keys.push(DD_COLOR_KEYS[c] + ':' + DD_ANIMAL_KEYS[a]);
+      }
+      for (var w = 0; w < DD_CROC_COPIES; w++) keys.push(DD_CROC_KEY + String(w + 1));
+      for (var i = 0; i < keys.length; i++) {
+        (function (k) {
+          var im = new Image();
+          ddImgPreloadKeep.push(im); // GCで捨てられないように保持
+          im.onload = function () {
+            if (im.naturalWidth > 0) ddImgReady[k] = true;
+            else ddImgMissing[k] = true;
+          };
+          im.onerror = function () {
+            ddImgMissing[k] = true;
+          };
+          im.src = ddCardImgSrc(k);
+        })(keys[i]);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // カード1まい。プレースホルダー（色わく+絵文字+どうぶつ名+色名）の上に画像を重ねる。
   function ddCardHtml(key, extraCls, cornerHtml) {
     var k = String(key || '');
     var info = ddCardInfo(k);
     var img = '';
     if (k && !ddImgMissing[k]) {
+      // 読み込みずみなら最初から is-loaded（load イベント待ちの1フレームで枠だけ見えるのを防ぐ）。
       img =
-        '<img class="dd-card-img" data-dd-img="' + escapeHtml(k) + '" alt="' + escapeHtml(String(info.name || k)) + '" src="' + escapeHtml(ddCardImgSrc(k)) + '" />';
+        '<img class="dd-card-img' + (ddImgReady[k] ? ' is-loaded' : '') + '" data-dd-img="' + escapeHtml(k) + '" decoding="sync" alt="' + escapeHtml(String(info.name || k)) + '" src="' + escapeHtml(ddCardImgSrc(k)) + '" />';
     }
     return (
       '<div class="dd-card ' + escapeHtml(String(extraCls || '')) + (info.croc ? ' dd-card--croc' : '') + '" style="--dd-col:' + escapeHtml(String(info.frame || '#6b7280')) + '">' +
@@ -12602,6 +12637,7 @@
           }
           if (im.complete) {
             if (im.naturalWidth > 0) {
+              if (key) ddImgReady[key] = true;
               try {
                 if (im.classList) im.classList.add('is-loaded');
               } catch (e2) {
@@ -12613,6 +12649,7 @@
             return;
           }
           im.addEventListener('load', function () {
+            if (key) ddImgReady[key] = true;
             try {
               if (im.classList) im.classList.add('is-loaded');
             } catch (e3) {
@@ -12892,6 +12929,7 @@
   }
 
   function routeDodelidoPlayer(roomId, isHost) {
+    ddPreloadCardImages(); // 画面に入った時点で全カード画像を先読み（配られた瞬間から画像で出す）
     var unsub = null;
     var lobbyId = '';
     try {
@@ -13451,6 +13489,7 @@
   }
 
   function routeDodelidoTable(roomId, isHost) {
+    ddPreloadCardImages(); // 画面に入った時点で全カード画像を先読み（配られた瞬間から画像で出す）
     try {
       if (document && document.body && document.body.classList) {
         document.body.classList.remove('ll-player-screen');
@@ -14610,6 +14649,7 @@
 
     var dodelidoSetupHtml = '';
     if (selectedKind === 'dodelido') {
+      ddPreloadCardImages(); // ロビーで選んだ時点から先読み（開始直後の1まいめも画像で出す）
       var ddSetL = normalizeDodelidoLobbySettings(lobby && lobby.dodelidoSettings);
       var ddHandVals = [0, 5, 8, 10, 12, 15, 20, 25];
       var ddHandOptions = '';
@@ -14754,6 +14794,7 @@
     var lobby = opts.lobby;
     var currentGame = (lobby && lobby.currentGame) || null;
     var label = currentGame && currentGame.kind ? String(currentGame.kind) : '';
+    if (label === 'dodelido' || String((lobby && lobby.lastKind) || '') === 'dodelido') ddPreloadCardImages();
     var roomId = currentGame && currentGame.roomId ? String(currentGame.roomId) : '';
     var canGo = !!(label && roomId);
 

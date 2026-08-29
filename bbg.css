@@ -1363,9 +1363,11 @@ body.bbg-demo-on .app{padding-bottom:104px}
   padding:1px 8px;border-radius:999px;
   background:rgba(0,0,0,.4);border:1px solid var(--dd-col,#6b7280);
 }
+/* 背景は透明にしておく：先読みずみのカードは最初から is-loaded で出すので、
+   万一その1フレームで絵がまだ描かれていなくても、下のプレースホルダーが見えるだけで済む。 */
 .dd-card-img{
   position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;
-  opacity:0;background:var(--card2);
+  opacity:0;background:transparent;
   -webkit-user-drag:none;user-drag:none;pointer-events:none;
 }
 .dd-card-img.is-loaded{opacity:1}

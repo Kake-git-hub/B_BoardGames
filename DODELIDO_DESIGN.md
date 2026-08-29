@@ -92,6 +92,8 @@ flip（手番の人のタップで1枚めくる）
 
 `./assets/dodelido/<いろ>_<どうぶつ>.png`（例 `blue_penguin.png`）と `croc1.png`〜`croc5.png`（ワニは絵ちがい5まい。デッキのキーも `croc1`〜`croc5`）を置くだけでプレースホルダー（色わく＋絵文字＋名前＋色名）から自動で切り替わる（bohnanza と同じ `ddImgMissing` 方式）。
 
+**先読み（チラつき防止）**: `<img>` は再描画のたびに作りなおされるので、load を待って `is-loaded` を付ける方式だと**配られた瞬間に枠だけ見える**。そこで `ddPreloadCardImages()` で全30キー（25組合せ＋croc1〜5）を先に読み、読み込みずみ（`ddImgReady`）のカードは**HTML生成の時点で `is-loaded` を付けて出す**（＋`decoding="sync"`）。呼ぶ場所は ロビー（ドデリド選択時／参加者側は currentGame・lastKind が dodelido のとき）と `routeDodelidoPlayer` / `routeDodelidoTable` の入口。`.dd-card-img` の背景は透明（万一まだ描けていないフレームでも、下のプレースホルダーが見えるだけで済む）。
+
 ### 2.5.1 ロビー設定（`lobbies/<id>/dodelidoSettings`）
 
 ホストのロビー画面（ドデリドを選んでいるときだけ表示）で2つ設定できる。`oekakiSettings` と同じパターン（`normalizeDodelidoLobbySettings` / `setLobbyDodelidoSettings` / `lobbyRenderKey` に追加）。
