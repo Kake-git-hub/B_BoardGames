@@ -1026,7 +1026,8 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 
 /* -------------------- デモ自動プレイ（開発者用） -------------------- */
 /* ホーム下部の目立たない入口 */
-.bbg-demo-entry{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:2px;opacity:.5}
+.bbg-demo-entry{display:flex;gap:8px;justify-content:center;align-items:center;flex-direction:column;margin-top:2px;opacity:.5}
+.bbg-demo-entry-menu{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 .bbg-demo-entry:hover{opacity:.95}
 .bbg-demo-entry .bbg-demo-entry-btn{
   font-size:12px;padding:6px 10px;border-radius:10px;
@@ -1767,3 +1768,58 @@ body.bbg-demo-on .app{padding-bottom:104px}
    （もともと あふれ0 なので縮める必要もない） */
 .ll-table:not(.hn-table){min-height:min(520px,62vh)}
 .ll-table:not(.hn-table){min-height:min(520px,62dvh)}
+
+/* ==================== 領域ペイン（スマホ横=基本形は上下スワイプで切り替え） ==================== */
+/* ふつうの表示（スマホ縦・タブレット）では、ペインはただの縦積み（.stack相当）。 */
+.bbg-panes{display:flex;flex-direction:column;gap:12px;min-width:0}
+.bbg-pane{display:flex;flex-direction:column;gap:12px;min-width:0}
+.bbg-pane-dots{display:none}
+/* .bbg-lonly = スマホ横のペイン表示のときだけ見せる要素（ペインをまたぐステータスの写しなど） */
+.bbg-lonly{display:none}
+
+/* タブレット以上のボーナンザ: 3ペインを2カラムに並べて1画面表示（旧 .bbg-2col 相当）。
+   スマホ横（高さ520px以下）と競合しないよう min-height で切り分ける。 */
+@media (min-width:768px) and (min-height:521px){
+  .bz-screen .bbg-panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:auto auto;gap:14px;align-items:start}
+  .bz-screen .bbg-pane--field{grid-column:1;grid-row:1 / span 2}
+  .bz-screen .bbg-pane--hand{grid-column:2;grid-row:1}
+  .bz-screen .bbg-pane--more{grid-column:2;grid-row:2}
+}
+
+/* スマホ横: 1画面に全部を詰めず、ペイン1枚だけを表示して上下スワイプ（右端ドット）で移動。
+   ペインは絶対配置で重ね、translateY で1画面ぶんずつスライドさせる。
+   --bbg-pane-n: 各ペインの番号（HTMLに焼き込み） / --bbg-pane-i: いま見ているペイン（JSが更新） */
+@media (orientation: landscape) and (max-height: 520px){
+  @supports selector(:has(*)){
+    .app:has(.bbg-panes){
+      max-width:none;height:100vh;height:100dvh;display:flex;flex-direction:column;
+      padding:6px 10px;
+      padding-left:calc(10px + env(safe-area-inset-left));
+      padding-right:calc(10px + env(safe-area-inset-right));
+      padding-bottom:calc(6px + env(safe-area-inset-bottom));
+    }
+    body.bbg-demo-on .app:has(.bbg-panes){padding-bottom:42px}
+    .app:has(.bbg-panes) .header{padding:0 4px 4px}
+    .app:has(.bbg-panes) .footer{display:none}
+    .app:has(.bbg-panes) #view{flex:1 1 auto;min-height:0;padding:6px 10px;overflow:hidden}
+    .app:has(.bbg-panes) #view > .stack{height:100%;min-height:0;display:flex;flex-direction:column}
+    .app:has(.bbg-panes) .bbg-panes{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;display:block;touch-action:pan-y}
+    .app:has(.bbg-panes) .bbg-pane{
+      position:absolute;inset:0;overflow-y:auto;
+      display:flex;flex-direction:column;gap:8px;
+      padding:2px 26px 2px 2px;
+      transition:transform .28s ease;
+      transform:translateY(calc((var(--bbg-pane-n,0) - var(--bbg-pane-i,0)) * 100%));
+    }
+    .app:has(.bbg-panes) .bbg-pane-dots{
+      display:flex;position:absolute;right:0;top:50%;transform:translateY(-50%);
+      flex-direction:column;gap:10px;z-index:5;padding:4px 2px;
+    }
+    .app:has(.bbg-panes) .bbg-pane-dot{
+      width:11px;height:11px;border-radius:50%;padding:0;
+      border:1px solid var(--line2);background:var(--card2);
+    }
+    .app:has(.bbg-panes) .bbg-pane-dot.on{background:var(--accent);border-color:transparent}
+    .app:has(.bbg-panes) .bbg-lonly{display:flex;flex-direction:column;gap:8px}
+  }
+}

@@ -6989,26 +6989,43 @@
       nextHtml = '';
     }
 
+    var hnToplineHtml =
+      '<div class="ll-topline">' +
+      '<div class="ll-status">犯人は踊る ' +
+      escapeHtml(playerId ? ('/ ' + hnPlayerName(room, playerId)) : '') +
+      '<span class="muted" style="margin-left:10px">' +
+      escapeHtml((turnPid ? hnPlayerName(room, turnPid) : '-') + 'のターン') +
+      '</span>' +
+      '</div>' +
+      '</div>';
+
     render(
       viewEl,
+      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場（山・すてふだ・けっか）へ。
+      // 確認・秘密ひらき・次へ などの操作ブロックは手札ペインに置き、操作を見のがさないようにする。
       '<div class="stack ll-player">' +
-        '<div class="ll-topline">' +
-        '<div class="ll-status">犯人は踊る ' +
-        escapeHtml(playerId ? ('/ ' + hnPlayerName(room, playerId)) : '') +
-        '<span class="muted" style="margin-left:10px">' +
-        escapeHtml((turnPid ? hnPlayerName(room, turnPid) : '-') + 'のターン') +
-        '</span>' +
-        '</div>' +
-        '</div>' +
-        (pilesHtml || '') +
-        (resultHtml || '') +
-        (nextHtml || '') +
-        (privateHtml || '') +
-        (confirmHtml || '') +
+        bbgPanesHtml('hn_player', 1, [
+          {
+            cls: 'bbg-pane--field',
+            label: 'ば',
+            html: hnToplineHtml + (pilesHtml || '') + (resultHtml || '')
+          },
+          {
+            cls: 'bbg-pane--hand',
+            label: 'てふだ',
+            html:
+              '<div class="bbg-lonly">' +
+              hnToplineHtml +
+              '</div>' +
+              (nextHtml || '') +
+              (privateHtml || '') +
+              (confirmHtml || '') +
+              (contentHtml || '') +
+              // 開始バナーは手札より下。ゲームが始まってバナーが消えても手札の位置が動かない。
+              (startBannerHtml || '')
+          }
+        ]) +
         (modalHtml || '') +
-        (contentHtml || '') +
-        // 開始バナーは手札より下。ゲームが始まってバナーが消えても手札の位置が動かない。
-        (startBannerHtml || '') +
       '</div>'
     );
   }
@@ -11176,22 +11193,15 @@
 
     render(
       viewEl,
-      // 並び: ステータス → 畑 → そのフェーズの操作 → うえるまち。
+      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場(畑)、上スワイプでみんな・きろく。
+      // タブレット以上はペインをグリッドに並べて1画面表示（bbg.cssの.bz-screen .bbg-panes）。
       // 高さが変わる操作ブロックを畑より下に置くことで、フェーズが進んでも畑の位置が動かない。
       '<div class="stack bz-screen bbg-wide">' +
-      '<div class="bbg-2col">' +
-      '<div class="bbg-col">' +
-      statusHtml +
-      myFieldsHtml +
-      actionHtml +
-      pendingHtml +
-      '</div>' +
-      '<div class="bbg-col">' +
-      myHandHtml +
-      othersHtml +
-      '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' +
-      '</div>' +
-      '</div>' +
+      bbgPanesHtml('bz_player', 1, [
+        { cls: 'bbg-pane--field', label: 'ば（はたけ）', html: myFieldsHtml + pendingHtml },
+        { cls: 'bbg-pane--hand', label: 'てふだ', html: statusHtml + actionHtml + myHandHtml },
+        { cls: 'bbg-pane--more', label: 'みんな・きろく', html: othersHtml + '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' }
+      ]) +
       '</div>'
     );
   }
@@ -15432,18 +15442,26 @@
 
     render(
       viewEl,
+      // スマホ横(基本形): 盤面ペインが主役。上スワイプでヒントのきろく・GMツールへ。
       '\n    <div class="stack">\n      ' +
-        '\n      ' +
-        topLine +
-        '\n      ' +
-        gmToolsHtml +
-        '\n\n      ' +
-        (phase === 'lobby' ? lobbyHtml : '') +
-        (phase === 'playing' ? clueRowHtml : '') +
-        (phase === 'finished' ? finishedRowHtml : '') +
-        boardHtml +
-        finishedNoteHtml +
-        clueHistoryHtml +
+        bbgPanesHtml('cn_player', 0, [
+          {
+            cls: 'bbg-pane--hand',
+            label: 'ばんめん',
+            html:
+              topLine +
+              (phase === 'lobby' ? lobbyHtml : '') +
+              (phase === 'playing' ? clueRowHtml : '') +
+              (phase === 'finished' ? finishedRowHtml : '') +
+              boardHtml +
+              finishedNoteHtml
+          },
+          {
+            cls: 'bbg-pane--more',
+            label: 'きろく・ツール',
+            html: gmToolsHtml + clueHistoryHtml
+          }
+        ]) +
         '\n    </div>\n  '
     );
 
@@ -21700,23 +21718,36 @@
       }
     }
 
+    var statusCardHtml =
+      '<div class="card ll-status-card" style="padding:10px"><div class="ll-topline"><div class="ll-status">' +
+      escapeHtml(statusText || '') +
+      '</div></div></div>';
+
     render(
       viewEl,
+      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場（山札・じょうきょう）へ。
+      // 手札ペインにもステータスを出す（.bbg-lonlyはスマホ横のペイン表示のときだけ見える）。
       '\n    <div class="stack ll-player">\n      ' +
-        '\n      <div class="big ll-player-name">' +
-        escapeHtml(selfName) +
-        '</div>\n\n      ' +
-        pilesHtml +
-        '\n\n      <div class="card ll-status-card" style="padding:10px">\n        <div class="ll-topline">\n          <div class="ll-status">' +
-        escapeHtml(statusText || '') +
-        '</div>\n        </div>\n      </div>\n\n      ' +
-        (lastPlayHtml || '') +
-        '\n\n      ' +
-        (resultHtml || '') +
-        '\n\n      ' +
-        (spectateHtml || '') +
-        '\n\n      ' +
-        (handHtml || '') +
+        bbgPanesHtml('ll_player', 1, [
+          {
+            cls: 'bbg-pane--field',
+            label: 'ば',
+            html:
+              '<div class="big ll-player-name">' +
+              escapeHtml(selfName) +
+              '</div>' +
+              pilesHtml +
+              statusCardHtml +
+              (lastPlayHtml || '') +
+              (resultHtml || '') +
+              (spectateHtml || '')
+          },
+          {
+            cls: 'bbg-pane--hand',
+            label: 'てふだ',
+            html: '<div class="bbg-lonly">' + statusCardHtml + '</div>' + (handHtml || '')
+          }
+        ]) +
         '\n\n      ' +
         (modalHtml || '') +
         '\n    </div>\n  '
@@ -27383,6 +27414,171 @@
     });
   }
 
+  // -------------------- スマホ横向け: 上下スワイプで切り替わる領域ペイン --------------------
+  // すべてのゲームはスマホ横画面を基本とする。1画面に全領域を詰め込まず、
+  // 手札などの主ペインをまんなかに置き、上下スワイプ（または右端のドット）で
+  // 場・みんな・きろく などの領域へ移り変わる。
+  // 画面は innerHTML 差し替えで頻繁に再描画されるため、
+  // いま見ているペイン番号はメモリ(bbgPaneIdx)に持ち、レンダー時にHTMLへ焼き込む。
+  // ジェスチャは document への委譲で起動時に1回だけ張る（再バインド不要）。
+  var bbgPaneIdx = {};
+
+  function bbgPanesActive() {
+    try {
+      return window.matchMedia('(orientation: landscape) and (max-height: 520px)').matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function bbgPaneIndex(key, count, defIdx) {
+    var v = bbgPaneIdx[key];
+    if (typeof v !== 'number' || v < 0 || v >= count) v = defIdx || 0;
+    return v;
+  }
+
+  // panes: [{cls, label, html}] / defIdx: 最初に見せるペイン（ふつうは手札）
+  function bbgPanesHtml(key, defIdx, panes) {
+    var idx = bbgPaneIndex(key, panes.length, defIdx);
+    bbgPaneIdx[key] = idx;
+    var inner = '';
+    var dots = '';
+    for (var i = 0; i < panes.length; i++) {
+      inner +=
+        '<div class="bbg-pane ' +
+        String(panes[i].cls || '') +
+        '" style="--bbg-pane-n:' +
+        String(i) +
+        '">' +
+        String(panes[i].html || '') +
+        '</div>';
+      dots +=
+        '<button type="button" class="bbg-pane-dot' +
+        (i === idx ? ' on' : '') +
+        '" data-pane-i="' +
+        String(i) +
+        '" title="' +
+        escapeHtml(String(panes[i].label || '')) +
+        '" aria-label="' +
+        escapeHtml(String(panes[i].label || '')) +
+        '"></button>';
+    }
+    return (
+      '<div class="bbg-panes" data-pane-key="' +
+      escapeHtml(String(key)) +
+      '" style="--bbg-pane-i:' +
+      String(idx) +
+      '">' +
+      inner +
+      '<div class="bbg-pane-dots">' +
+      dots +
+      '</div>' +
+      '</div>'
+    );
+  }
+
+  function bbgPaneSet(host, idx) {
+    if (!host) return;
+    var key = String(host.getAttribute('data-pane-key') || '');
+    var n = 0;
+    try {
+      n = host.querySelectorAll('.bbg-pane').length;
+    } catch (e) {
+      n = 0;
+    }
+    if (!n) return;
+    var i = Math.max(0, Math.min(n - 1, parseIntSafe(idx, 0)));
+    if (key) bbgPaneIdx[key] = i;
+    try {
+      host.style.setProperty('--bbg-pane-i', String(i));
+      var dots = host.querySelectorAll('.bbg-pane-dot');
+      for (var d = 0; d < dots.length; d++) {
+        if (dots[d].classList) dots[d].classList[d === i ? 'add' : 'remove']('on');
+      }
+    } catch (e2) {
+      // ignore
+    }
+  }
+
+  function bbgPaneStep(host, delta) {
+    if (!host) return;
+    var key = String(host.getAttribute('data-pane-key') || '');
+    var cur = typeof bbgPaneIdx[key] === 'number' ? bbgPaneIdx[key] : 0;
+    bbgPaneSet(host, cur + delta);
+  }
+
+  function bbgBindPaneGestures() {
+    var start = null; // {y, x, el, host}
+
+    document.addEventListener(
+      'pointerdown',
+      function (ev) {
+        start = null;
+        if (!bbgPanesActive()) return;
+        var t = ev.target;
+        if (!t || !t.closest) return;
+        if (t.closest('.bbg-pane-dot')) return; // ドットはクリックで切り替える
+        var host = t.closest('.bbg-panes');
+        if (!host) return;
+        start = { y: ev.clientY, x: ev.clientX, el: t, host: host };
+      },
+      true
+    );
+
+    document.addEventListener(
+      'pointercancel',
+      function () {
+        start = null;
+      },
+      true
+    );
+
+    document.addEventListener(
+      'pointerup',
+      function (ev) {
+        var s0 = start;
+        start = null;
+        if (!s0 || !bbgPanesActive()) return;
+        var dy = ev.clientY - s0.y;
+        var dx = ev.clientX - s0.x;
+        // 縦方向にはっきり動いたときだけペインを切り替える（誤タップ・横パンは無視）
+        if (Math.abs(dy) < 48 || Math.abs(dy) < Math.abs(dx) * 1.2) return;
+        // 途中に縦スクロールできる要素があれば、そちらのスクロールを優先する
+        var el = s0.el;
+        while (el && el !== s0.host) {
+          if (el.scrollHeight > el.clientHeight + 1) {
+            var ovf = '';
+            try {
+              ovf = String(getComputedStyle(el).overflowY || '');
+            } catch (eO) {
+              ovf = '';
+            }
+            if (ovf === 'auto' || ovf === 'scroll') {
+              if (dy < 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return;
+              if (dy > 0 && el.scrollTop > 0) return;
+            }
+          }
+          el = el.parentElement;
+        }
+        // 上へスワイプ(dy<0)で次のペイン、下へスワイプで前のペイン（場が上から降りてくる）
+        bbgPaneStep(s0.host, dy < 0 ? 1 : -1);
+      },
+      true
+    );
+
+    document.addEventListener(
+      'click',
+      function (ev) {
+        var t = ev.target;
+        if (!t || !t.closest) return;
+        var dot = t.closest('.bbg-pane-dot');
+        if (!dot) return;
+        bbgPaneSet(t.closest('.bbg-panes'), dot.getAttribute('data-pane-i'));
+      },
+      true
+    );
+  }
+
   // -------------------- demo (自動プレイ・目視デバッグ) --------------------
   // 開発者がUI・演出・間(ま)を目視確認するための自動プレイモード。
   // ・実際のルーム作成/参加/開始/プレイ関数をそのまま呼ぶので、本番と同じ画面・同じ演出が出る。
@@ -27426,6 +27622,25 @@
       if (v === 'bot' + String(i + 1)) return i;
     }
     return -1;
+  }
+
+  // いま画面に表示しているボットのID。この人の操作は自動で進めず、ユーザーの入力に任せる。
+  // テーブル視点('table')のときは '' を返し、全員が自動プレイになる。
+  function demoManualMid(s) {
+    var idx = demoViewIndex(s && s.view);
+    if (idx < 0) return '';
+    return String((s && s.botIds && s.botIds[idx]) || '');
+  }
+
+  // 「表示中プレイヤーの操作待ち」プラン。demoTick は run せず、状態表示だけして待つ。
+  function demoManualPlan(key) {
+    return {
+      key: 'man|' + String(key || ''),
+      manual: true,
+      min: 0,
+      max: 0,
+      label: '🎮 あなたの番です — この画面を操作してください'
+    };
   }
 
   function demoGameLabel(game) {
@@ -28078,6 +28293,16 @@
     }
     s.stallSince = 0;
 
+    // 表示中プレイヤーの操作待ち: 勝手に進めず、固まり判定・代理進行もしない。
+    if (plan.manual) {
+      s.actKey = plan.key;
+      s.actAt = 0;
+      s.actKeySince = 0;
+      s.forcedKey = '';
+      demoSetStatus(s, plan.label || '🎮 あなたの操作待ち');
+      return;
+    }
+
     if (plan.key !== s.actKey) {
       s.actKey = plan.key;
       s.actKeySince = nowMs();
@@ -28285,10 +28510,13 @@
     var r = room.round || null;
     if (!r || String(r.state || '') !== 'playing') return null;
 
+    var manual = demoManualMid(s);
+
     var wf = r.waitFor && r.waitFor.type ? r.waitFor : null;
     if (wf) {
       var by = String(wf.by || '');
       if (!by) return null;
+      if (by === manual) return demoManualPlan('ll_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''));
       return {
         key: 'll_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''),
         min: 1800,
@@ -28301,6 +28529,7 @@
     var actor = String(r.currentPlayerId || '');
     if (!actor) return null;
     if (r.eliminated && r.eliminated[actor]) return null;
+    if (actor === manual) return demoManualPlan('ll_turn|' + actor + '|' + String((r.lastPlay && r.lastPlay.at) || 0));
 
     var hand = r.hands && Array.isArray(r.hands[actor]) ? r.hands[actor] : [];
     if (hand.length < 2) return null;
@@ -28386,11 +28615,14 @@
   }
 
   // 同時選択(情報操作/うわさ/取引)で、まだ選んでいない人を1人だけ返す。
+  // 表示中プレイヤー(manual)は後回しにし、その人しか残っていなければ manual:true で返す。
   function demoHanninPendingNext(s, st, pending) {
+    var manual = demoManualMid(s);
     var order = Array.isArray(st.order) ? st.order : [];
     var hands = st.hands || {};
     var choices = pending.choices || {};
     var i, pid, h;
+    var manualWaiting = false;
 
     if (pending.type === 'info') {
       for (i = 0; i < order.length; i++) {
@@ -28399,9 +28631,13 @@
         h = Array.isArray(hands[pid]) ? hands[pid] : [];
         if (!h.length) continue;
         if (demoHnHasChosen(choices, pid)) continue;
+        if (pid === manual) {
+          manualWaiting = true;
+          continue;
+        }
         return { pid: pid, run: demoHnInfoRun(s, pid, h.length) };
       }
-      return null;
+      return manualWaiting ? { pid: manual, manual: true } : null;
     }
 
     if (pending.type === 'rumor') {
@@ -28414,9 +28650,13 @@
         var rh = right && Array.isArray(hands[right]) ? hands[right] : [];
         if (!right || !rh.length) continue;
         if (demoHnHasChosen(choices, pid)) continue;
+        if (pid === manual) {
+          manualWaiting = true;
+          continue;
+        }
         return { pid: pid, run: demoHnRumorRun(s, pid, rh.length) };
       }
-      return null;
+      return manualWaiting ? { pid: manual, manual: true } : null;
     }
 
     if (pending.type === 'deal') {
@@ -28427,9 +28667,13 @@
         if (demoHnHasChosen(choices, pid)) continue;
         h = Array.isArray(hands[pid]) ? hands[pid] : [];
         if (!h.length) continue;
+        if (pid === manual) {
+          manualWaiting = true;
+          continue;
+        }
         return { pid: pid, run: demoHnDealRun(s, pid, h.length) };
       }
-      return null;
+      return manualWaiting ? { pid: manual, manual: true } : null;
     }
 
     return null;
@@ -28536,10 +28780,13 @@
     if (!st) return null;
     if (st.result && st.result.decidedAt) return null;
 
+    var manual = demoManualMid(s);
+
     var wf = st.waitFor && st.waitFor.type ? st.waitFor : null;
     if (wf) {
       var by = String(wf.by || '');
       if (!by) return null;
+      if (by === manual) return demoManualPlan('hn_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''));
       return {
         key: 'hn_wf|' + String(wf.type || '') + '|' + by + '|' + String(wf.createdAt || ''),
         min: 1800,
@@ -28553,6 +28800,7 @@
     if (pending) {
       var need = demoHanninPendingNext(s, st, pending);
       if (!need) return null;
+      if (need.manual) return demoManualPlan('hn_pd|' + String(pending.type || '') + '|' + String(pending.createdAt || '') + '|' + need.pid);
       var cnt = 0;
       try {
         cnt = Object.keys(pending.choices || {}).length;
@@ -28566,6 +28814,11 @@
         label: hnPlayerName(room, need.pid) + ' が選択中',
         run: need.run
       };
+    }
+
+    var turnPid = String(st.turn && st.turn.playerId ? st.turn.playerId : '');
+    if (turnPid && turnPid === manual) {
+      return demoManualPlan('hn_turn|' + turnPid + '|' + String(st.turnCount || 0) + '|' + String((st.lastPlay && st.lastPlay.at) || 0));
     }
 
     var play = demoPickHanninPlay(s, room, st);
@@ -28725,11 +28978,13 @@
   }
 
   // 随時収穫: 「いま収穫すると2きん以上」の畑を、低確率で1つだけ選ぶ。
+  // 表示中プレイヤー(manual)の畑は勝手に収穫しない。
   function demoBzPickHarvest(s, room, phase, turnCount) {
+    var manual = demoManualMid(s);
     var order = demoBzOrder(room);
     for (var i = 0; i < order.length; i++) {
       var mid = String(order[i] || '');
-      if (!mid) continue;
+      if (!mid || mid === manual) continue;
       var fields = bzPlayerOf(room, mid).fields;
       for (var f = 0; f < fields.length; f++) {
         var cnt = fields[f].count;
@@ -28744,13 +28999,14 @@
     return null;
   }
 
-  // 3つめの畑（4〜5人プレイ・3きん）を30%で買う。
+  // 3つめの畑（4〜5人プレイ・3きん）を30%で買う。表示中プレイヤーの分は買わない。
   function demoBzPickBuyField(s, room, turnCount) {
+    var manual = demoManualMid(s);
     var order = demoBzOrder(room);
     if (order.length < 4) return null;
     for (var i = 0; i < order.length; i++) {
       var mid = String(order[i] || '');
-      if (!mid) continue;
+      if (!mid || mid === manual) continue;
       var p = bzPlayerOf(room, mid);
       if (p.fields.length !== 2) continue;
       if (p.coins < 3) continue;
@@ -28783,17 +29039,23 @@
   }
 
   // pending（うえる待ち）を持っている人を order 順に1人だけ返す。
-  function demoBzPickPending(room) {
+  // 表示中プレイヤー(manual)は後回しにし、その人しか残っていなければ manual:true で返す。
+  function demoBzPickPending(room, manual) {
     var order = demoBzOrder(room);
+    var manualWaiting = false;
     for (var i = 0; i < order.length; i++) {
       var mid = String(order[i] || '');
       if (!mid) continue;
       var p = bzPlayerOf(room, mid);
       if (!p.pending.length) continue;
+      if (mid === manual) {
+        manualWaiting = true;
+        continue;
+      }
       var bean = String(p.pending[0].bean || '');
       return { mid: mid, pendIdx: 0, bean: bean, pick: demoBzPickPlant(room, mid, bean) };
     }
-    return null;
+    return manualWaiting ? { mid: String(manual || ''), manual: true } : null;
   }
 
   // 相手の畑にいちばん合う手札を1枚えらぶ。
@@ -28828,11 +29090,13 @@
     }
     if (!others.length) return null;
 
+    var manual = demoManualMid(s);
     var toTurn = demoBzRoll(s, 'hgdir|' + seed) < 50;
     var best = null;
     for (var j = 0; j < others.length; j++) {
       var from = toTurn ? others[j] : turnMid;
       var to = toTurn ? turnMid : others[j];
+      if (from === manual) continue; // 表示中プレイヤーの手札は勝手に配らない
       var cand = demoBzBestHandCard(room, from, to);
       if (!cand) continue;
       if (!best || cand.score > best.score) best = { from: from, to: to, handIdx: cand.idx, bean: cand.bean, score: cand.score };
@@ -28874,7 +29138,10 @@
       };
     }
 
+    var manual = demoManualMid(s);
+
     if (phase === 'plant') {
+      if (turnMid === manual) return demoManualPlan('bz_plant|' + turnMid + '|' + String(turnCount));
       var tp = bzPlayerOf(room, turnMid);
       var planted = parseIntSafe(room && room.plantedThisTurn, 0) || 0;
       var wantPlant = false;
@@ -28905,21 +29172,29 @@
     }
 
     if (phase === 'trade') {
-      var fu = bzNormFaceUp(room && room.faceUp);
-      var fuSig = demoBzFaceUpSig(room);
-      for (var i = 0; i < fu.length; i++) {
-        if (String(fu[i].takenBy || '')) continue;
-        var toMid = demoBzPickReceiver(s, room, turnMid, fu[i].bean, turnCount, i);
-        return {
-          key: 'bz_give|' + turnMid + '|' + String(turnCount) + '|' + fuSig,
-          min: 700,
-          max: 1500,
-          label: bzBeanName(fu[i].bean) + ' を ' + bzName(room, toMid) + ' へ',
-          run: demoBzGiveFaceUpRun(s, turnMid, i, toMid)
-        };
+      // めくれ札の配り先を決めるのは手番プレイヤーの操作。表示中プレイヤーが手番なら任せる。
+      if (turnMid !== manual) {
+        var fu = bzNormFaceUp(room && room.faceUp);
+        var fuSig = demoBzFaceUpSig(room);
+        for (var i = 0; i < fu.length; i++) {
+          if (String(fu[i].takenBy || '')) continue;
+          var toMid = demoBzPickReceiver(s, room, turnMid, fu[i].bean, turnCount, i);
+          return {
+            key: 'bz_give|' + turnMid + '|' + String(turnCount) + '|' + fuSig,
+            min: 700,
+            max: 1500,
+            label: bzBeanName(fu[i].bean) + ' を ' + bzName(room, toMid) + ' へ',
+            run: demoBzGiveFaceUpRun(s, turnMid, i, toMid)
+          };
+        }
       }
 
-      var pd = demoBzPickPending(room);
+      var pd = demoBzPickPending(room, manual);
+      if (pd && pd.manual) {
+        // 表示中プレイヤーの「うえる」待ちだけが残った（他のボットの手は先に進めてある）
+        if (turnMid === manual) return demoManualPlan('bz_trade|' + turnMid + '|' + String(turnCount));
+        return demoManualPlan('bz_pend|' + pd.mid + '|' + String(turnCount) + '|' + demoBzPendSig(room));
+      }
       if (pd) {
         return {
           key: 'bz_pend|trade|' + String(turnCount) + '|' + pd.mid + '|' + demoBzPendSig(room),
@@ -28941,6 +29216,7 @@
         };
       }
 
+      if (turnMid === manual) return demoManualPlan('bz_end|' + turnMid + '|' + String(turnCount));
       return {
         key: 'bz_end|' + turnMid + '|' + String(turnCount),
         min: 800,
@@ -28951,8 +29227,9 @@
     }
 
     if (phase === 'plantAll') {
-      var pd2 = demoBzPickPending(room);
+      var pd2 = demoBzPickPending(room, manual);
       if (!pd2) return null; // 全員うえ終わっていれば本番側が自動で次の手番へ進む
+      if (pd2.manual) return demoManualPlan('bz_pend|plantAll|' + pd2.mid + '|' + String(turnCount) + '|' + demoBzPendSig(room));
       return {
         key: 'bz_pend|plantAll|' + String(turnCount) + '|' + pd2.mid + '|' + demoBzPendSig(room),
         min: 600,
@@ -28977,7 +29254,10 @@
     if (!turnMid) return null;
     var turnCount = parseIntSafe(room && room.turnCount, 0) || 0;
 
+    var manual = demoManualMid(s);
+
     if (phase === 'flip') {
+      if (turnMid === manual) return demoManualPlan('dd_flip|' + turnMid + '|' + String(turnCount));
       return {
         key: 'dd_flip|' + turnMid + '|' + String(turnCount),
         min: 700,
@@ -28996,12 +29276,16 @@
       var nextMid = String(order[(jIdx + 1) % order.length] || '');
       var jRoll = demoBzRoll(s, 'dd_judge|' + String(turnCount));
       var miss = jRoll < 15;
+      // 表示中プレイヤーには「わざと おてつき」をさせない（本人の操作に任せる）。
+      if (turnMid === manual) miss = false;
       // 遡りひきとり: まえに回答した人が あとから自分のまちがいに気づいて ながおし（新ルールの確認用）。
       var retroMid = '';
       if (!miss && jRoll < 22 && order.length > 1) {
         retroMid = String(order[(jIdx + order.length - 1) % order.length] || '');
-        if (!retroMid || retroMid === turnMid) retroMid = '';
+        if (!retroMid || retroMid === turnMid || retroMid === manual) retroMid = '';
       }
+      // つぎにタップするのが表示中プレイヤーなら、本人の操作を待つ。
+      if (!miss && !retroMid && nextMid === manual) return demoManualPlan('dd_judge|' + String(turnCount));
       var jLabel = miss
         ? ddName(room, turnMid) + ' が ながおしで ひきとり！'
         : retroMid
@@ -29029,16 +29313,22 @@
         if (taps[mid] === undefined) waiting.push(mid);
       }
       if (!waiting.length) return null; // ぜんいんたたけば ddCrocTap 側で自動的にけっかへ進む
+      // 表示中プレイヤーは自分でたたく。ボットだけが残りをたたく。
+      if (waiting.length === 1 && waiting[0] === manual) {
+        return demoManualPlan('dd_croc|' + String(turnCount));
+      }
       // ハッシュから疑似反応時間を作り、はやい人からたたく（けっかの順位も この時間で決まる）。
-      var best = waiting[0];
+      var best = '';
       var bestMs = -1;
       for (var w = 0; w < waiting.length; w++) {
+        if (waiting[w] === manual) continue;
         var ms = 350 + (demoBzHash(String(s.roomId || '') + '|ddcroc|' + String(turnCount) + '|' + waiting[w]) % 1400);
         if (bestMs < 0 || ms < bestMs) {
           bestMs = ms;
           best = waiting[w];
         }
       }
+      if (!best) return demoManualPlan('dd_croc|' + String(turnCount));
       var tappedN = order.length - waiting.length;
       return {
         key: 'dd_croc|' + String(turnCount) + '|' + String(tappedN),
@@ -29056,6 +29346,7 @@
     if (phase === 'crocResult') {
       var loserMid = String((room.crocResult && room.crocResult.loserMid) || '');
       if (!loserMid) return null;
+      if (loserMid === manual) return demoManualPlan('dd_next|' + String(turnCount));
       return {
         key: 'dd_next|' + String(turnCount),
         min: 1400,
@@ -29106,9 +29397,12 @@
     var status = String(turn.status || '');
     var turnNo = parseIntSafe(turn.turnNo, 0) || 0;
 
+    var manual = demoManualMid(s);
+
     if (status === 'awaiting_clue') {
       var smId = demoCnBotId(s, team, 'spymaster');
       if (!smId) return null;
+      if (smId === manual) return demoManualPlan('cn_clue|' + String(turnNo) + '|' + team);
       var prog = room.progress || {};
       var remain = parseIntSafe(team === 'red' ? prog.redRemaining : prog.blueRemaining, 1) || 1;
       var word = DEMO_CN_CLUE_WORDS[demoBzHash(String(s.roomId) + '|cnw|' + String(turnNo)) % DEMO_CN_CLUE_WORDS.length];
@@ -29127,6 +29421,7 @@
     if (status !== 'guessing') return null;
     var opId = demoCnBotId(s, team, 'operative');
     if (!opId) return null;
+    if (opId === manual) return demoManualPlan('cn_guess|' + String(turnNo) + '|' + team);
     var board = room.board || {};
     var words = Array.isArray(board.words) ? board.words : [];
     var bkey = Array.isArray(board.key) ? board.key : [];
@@ -29269,13 +29564,24 @@
       var box = document.createElement('div');
       box.id = 'bbgDemoEntry';
       box.className = 'bbg-demo-entry';
+      // 入口はボタン1つ。タップするとゲームの一覧がひらく。
       box.innerHTML =
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">🤖 デモ: ラブレター</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">🤖 デモ: 犯人は踊る</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">🤖 デモ: ボーナンザ</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_dodelido">🤖 デモ: ドデリド</a>' +
-        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_codenames">🤖 デモ: コードネーム</a>';
+        '<button type="button" class="btn ghost bbg-demo-entry-btn" id="bbgDemoEntryBtn">🤖 デモ（自動プレイ）</button>' +
+        '<div class="bbg-demo-entry-menu" id="bbgDemoEntryMenu" style="display:none">' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_loveletter">ラブレター</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_hannin">犯人は踊る</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_bohnanza">ボーナンザ</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_dodelido">ドデリド</a>' +
+        '<a class="btn ghost bbg-demo-entry-btn" href="?' + vq + 'screen=demo_codenames">コードネーム</a>' +
+        '</div>';
       host.appendChild(box);
+      var entryBtn = document.getElementById('bbgDemoEntryBtn');
+      if (entryBtn) {
+        entryBtn.addEventListener('click', function () {
+          var menu = document.getElementById('bbgDemoEntryMenu');
+          if (menu) menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+        });
+      }
     } catch (e) {
       // ignore
     }
@@ -31688,6 +31994,8 @@
     // 画面を描き直しても消えないため、再バインドは不要。
     syncBbgFxToggleIcon();
     bindBbgFxToggle();
+    // スマホ横のペイン切り替え（上下スワイプ）。documentへの委譲なので1回だけでよい。
+    bbgBindPaneGestures();
     // --- Version string (use bundled asset cache-buster) ---
     var bundledV = '';
     try {
