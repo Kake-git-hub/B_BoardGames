@@ -1635,6 +1635,21 @@
     };
   }
 
+  // ドデリドのロビー設定。handCount=0 は「じどう（山を人数でわけきる）」。
+  function normalizeDodelidoLobbySettings(s) {
+    var o = s && typeof s === 'object' ? s : {};
+    return {
+      handCount: clamp(parseIntSafe(o.handCount, 0), 0, 30),
+      crocCount: clamp(parseIntSafe(o.crocCount, DD_CROC_COPIES), 0, 10)
+    };
+  }
+
+  function setLobbyDodelidoSettings(lobbyId, settings) {
+    var out = normalizeDodelidoLobbySettings(settings);
+    out.updatedAt = serverNowMs();
+    return setValue(lobbyPath(lobbyId) + '/dodelidoSettings', out);
+  }
+
   function setLobbyOekakiSettings(lobbyId, settings) {
     var out = normalizeOekakiLobbySettings(settings);
     out.updatedAt = serverNowMs();
@@ -11949,6 +11964,11 @@
   var DD_COLOR_KEYS = ['white', 'pink', 'yellow', 'blue', 'green'];
 
   var DD_CROC_KEY = 'croc';
+  // ワニは絵ちがいが5まいある。カードキーは 'croc1'〜'croc5'（古い 'croc' も ワニ として あつかう）。
+  function ddIsCrocKey(key) {
+    var k = String(key || '');
+    return k === DD_CROC_KEY || /^croc[1-9]$/.test(k);
+  }
 
   // 画像が無いカードを覚えておく（bohnanza と同じ仕組み）。
   var ddImgMissing = {};
@@ -11964,7 +11984,7 @@
   // カードは 'いろ:どうぶつ' の文字列（ワニだけ 'croc'）。
   function ddCardInfo(key) {
     var k = String(key || '');
-    if (k === DD_CROC_KEY) {
+    if (ddIsCrocKey(k)) {
       return { croc: true, color: '', animal: '', name: 'ワニ！', emoji: '🐊', colorName: 'たたけ！', frame: '#ff5a6a' };
     }
     var parts = k.split(':');
@@ -11975,14 +11995,16 @@
     return { croc: false, color: c, animal: a, name: ad.name, emoji: ad.emoji, colorName: cd.name, frame: cd.color };
   }
 
-  function ddBuildDeck() {
+  function ddBuildDeck(crocCount) {
+    var crocN = crocCount === undefined || crocCount === null ? DD_CROC_COPIES : clamp(parseIntSafe(crocCount, DD_CROC_COPIES), 0, 10);
     var pool = [];
     for (var c = 0; c < DD_COLOR_KEYS.length; c++) {
       for (var a = 0; a < DD_ANIMAL_KEYS.length; a++) {
         for (var n = 0; n < DD_COPIES_PER_CARD; n++) pool.push(DD_COLOR_KEYS[c] + ':' + DD_ANIMAL_KEYS[a]);
       }
     }
-    for (var w = 0; w < DD_CROC_COPIES; w++) pool.push(DD_CROC_KEY);
+    // ワニは絵ちがい5しゅるい。6まい以上にするときは絵をくりかえす。
+    for (var w = 0; w < crocN; w++) pool.push(DD_CROC_KEY + String((w % DD_CROC_COPIES) + 1));
     return bzShuffle(pool);
   }
 
@@ -12209,7 +12231,8 @@
       });
   }
 
-  function createDodelidoRoom(roomId, lobbyId, members) {
+  function createDodelidoRoom(roomId, lobbyId, members, settings) {
+    var ddSet = normalizeDodelidoLobbySettings(settings);
     var list = Array.isArray(members) ? members : [];
     var order = [];
     var names = {};
@@ -12225,8 +12248,11 @@
     if (order.length < 2) return Promise.reject(new Error('ドデリドは2人からです'));
     if (order.length > 6) return Promise.reject(new Error('ドデリドは6人までです'));
 
-    var deck = ddBuildDeck();
-    var per = Math.floor(deck.length / order.length);
+    var deck = ddBuildDeck(ddSet.crocCount);
+    var maxPer = Math.floor(deck.length / order.length);
+    // 設定の初期手札枚数。0（じどう）なら山を人数でわけきる。多すぎるときは配れる分まで。
+    var per = ddSet.handCount > 0 ? Math.min(ddSet.handCount, maxPer) : maxPer;
+    if (per < 1) per = 1;
     var players = {};
     for (var pi = 0; pi < order.length; pi++) {
       var pid = order[pi];
@@ -12251,7 +12277,7 @@
       players: players,
       result: null,
       log: [
-        'ゲームかいし！ ひとり ' + String(per) + 'まいずつ' + (leftover ? '（あまり' + String(leftover) + 'まいは はこへ）' : ''),
+        'ゲームかいし！ ひとり ' + String(per) + 'まいずつ（ワニ ' + String(ddSet.crocCount) + 'まい' + (leftover ? '・あまり' + String(leftover) + 'まいは はこへ' : '') + '）',
         String(names[order[0]] || '') + 'の ばん'
       ]
     };
@@ -12337,7 +12363,7 @@
     st.pileIdx = (pi + 1) % 3;
     st.flippedAt = serverNowMs();
 
-    if (card === DD_CROC_KEY) {
+    if (ddIsCrocKey(card)) {
       st.phase = 'croc';
       st.croc = { startAt: serverNowMs(), taps: {} };
       st.crocResult = null;
@@ -12524,7 +12550,7 @@
 
   function ddCardImgSrc(key) {
     var k = String(key || '');
-    var file = k === DD_CROC_KEY ? 'croc' : k.replace(':', '_');
+    var file = ddIsCrocKey(k) ? k : k.replace(':', '_');
     var src = './assets/dodelido/' + file + '.png';
     try {
       var v = getCacheBusterParam();
@@ -14582,6 +14608,52 @@
         '</div>';
     }
 
+    var dodelidoSetupHtml = '';
+    if (selectedKind === 'dodelido') {
+      var ddSetL = normalizeDodelidoLobbySettings(lobby && lobby.dodelidoSettings);
+      var ddHandVals = [0, 5, 8, 10, 12, 15, 20, 25];
+      var ddHandOptions = '';
+      for (var ddHi = 0; ddHi < ddHandVals.length; ddHi++) {
+        var ddHv = ddHandVals[ddHi];
+        ddHandOptions +=
+          '<option value="' +
+          ddHv +
+          '"' +
+          (ddSetL.handCount === ddHv ? ' selected' : '') +
+          '>' +
+          (ddHv === 0 ? 'じどう（山をぜんぶ わける）' : escapeHtml(String(ddHv) + 'まい')) +
+          '</option>';
+      }
+      var ddCrocOptions = '';
+      for (var ddCi = 0; ddCi <= 10; ddCi++) {
+        ddCrocOptions +=
+          '<option value="' +
+          ddCi +
+          '"' +
+          (ddSetL.crocCount === ddCi ? ' selected' : '') +
+          '>' +
+          escapeHtml(String(ddCi) + 'まい' + (ddCi === DD_CROC_COPIES ? '（きほん）' : '')) +
+          '</option>';
+      }
+      dodelidoSetupHtml =
+        '<div class="stack bbg-setup">' +
+        '<div class="bbg-sec">🐊 せってい（ドデリド）</div>' +
+        '<div class="field">' +
+        '<label>さいしょの てふだ（ひとり）</label>' +
+        '<select id="ddHandCount">' +
+        ddHandOptions +
+        '</select>' +
+        '</div>' +
+        '<div class="field">' +
+        '<label>ワニの まいすう</label>' +
+        '<select id="ddCrocCount">' +
+        ddCrocOptions +
+        '</select>' +
+        '</div>' +
+        '<div class="muted">※ てふだが すくないほど 早くおわります。ワニを ふやすと たたく場面が ふえます。</div>' +
+        '</div>';
+    }
+
     var tableGmNoteHtml = '';
     if (isTableGmDevice) {
       tableGmNoteHtml =
@@ -14660,6 +14732,7 @@
         hanninSetupHtml +
         codenamesSetupHtml +
         oekakiSetupHtml +
+        dodelidoSetupHtml +
         '\n\n      <div class="row">\n        <button id="lobbyStartGame" class="primary bbg-start-btn">▶ ゲーム開始（' +
         escapeHtml(gameKindLabel(selectedKind)) +
         '）</button>\n      </div>\n\n      <div id="lobbyHostError" class="form-error" role="alert"></div>\n' +
@@ -18490,6 +18563,35 @@
         okCustomTopicEl.addEventListener('change', saveOekakiSettingsFromForm);
       }
 
+      // ドデリド設定: いまのフォームの値（無ければロビー保存値）。
+      function readDodelidoFormSettings() {
+        var lobD = currentLobby();
+        var curD = normalizeDodelidoLobbySettings(lobD && lobD.dodelidoSettings);
+        var elH = document.getElementById('ddHandCount');
+        if (elH) curD.handCount = clamp(parseIntSafe(elH.value, curD.handCount), 0, 30);
+        var elC = document.getElementById('ddCrocCount');
+        if (elC) curD.crocCount = clamp(parseIntSafe(elC.value, curD.crocCount), 0, 10);
+        return curD;
+      }
+
+      function saveDodelidoSettingsFromForm() {
+        setLobbyDodelidoSettings(lobbyId, readDodelidoFormSettings()).catch(function (e) {
+          setInlineError('lobbyHostError', (e && e.message) || '設定の保存に失敗しました');
+        });
+      }
+
+      var ddHandEl = document.getElementById('ddHandCount');
+      if (ddHandEl && !ddHandEl.__lobby_bound) {
+        ddHandEl.__lobby_bound = true;
+        ddHandEl.addEventListener('change', saveDodelidoSettingsFromForm);
+      }
+
+      var ddCrocEl = document.getElementById('ddCrocCount');
+      if (ddCrocEl && !ddCrocEl.__lobby_bound) {
+        ddCrocEl.__lobby_bound = true;
+        ddCrocEl.addEventListener('change', saveDodelidoSettingsFromForm);
+      }
+
       var startBtn = document.getElementById('lobbyStartGame');
       if (startBtn && !startBtn.__lobby_bound) {
         startBtn.__lobby_bound = true;
@@ -18773,7 +18875,7 @@
                 }
                 hostPidD = isTableGm ? '' : String(mid || '');
                 if (hostPidD && orderD.indexOf(hostPidD) === -1) hostPidD = '';
-                return createDodelidoRoom(roomId, lobbyId, listD).then(function () {
+                return createDodelidoRoom(roomId, lobbyId, listD, readDodelidoFormSettings()).then(function () {
                   return;
                 });
               }
@@ -18876,7 +18978,8 @@
           members: {},
           loveletterExtraCards: Array.isArray(lobby && lobby.loveletterExtraCards) ? lobby.loveletterExtraCards.slice() : [],
           codenamesAssign: lobby && lobby.codenamesAssign ? lobby.codenamesAssign : null,
-          oekakiSettings: lobby && lobby.oekakiSettings ? lobby.oekakiSettings : null
+          oekakiSettings: lobby && lobby.oekakiSettings ? lobby.oekakiSettings : null,
+          dodelidoSettings: lobby && lobby.dodelidoSettings ? lobby.dodelidoSettings : null
         };
         var members = (lobby && lobby.members) || {};
         var keys = Object.keys(members);

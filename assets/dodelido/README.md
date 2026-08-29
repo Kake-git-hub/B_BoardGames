@@ -4,7 +4,7 @@
 
 ## 置くファイル名
 
-ファイル名は `<いろ>_<どうぶつ>.png` です（ワニだけ `croc.png`）。
+ファイル名は `<いろ>_<どうぶつ>.png` です（ワニだけ `croc1.png`〜`croc5.png`）。
 
 | | flamingo（フラミンゴ） | penguin（ペンギン） | turtle（カメ） | camel（ラクダ） | zebra（シマウマ） |
 |---|---|---|---|---|---|
@@ -14,7 +14,7 @@
 | **blue（あお）** | `blue_flamingo.png` | `blue_penguin.png` | `blue_turtle.png` | `blue_camel.png` | `blue_zebra.png` |
 | **green（みどり）** | `green_flamingo.png` | `green_penguin.png` | `green_turtle.png` | `green_camel.png` | `green_zebra.png` |
 
-- `croc.png` … ワニ
+- `croc1.png` 〜 `croc5.png` … ワニ（5まいとも絵がちがうので、それぞれ別ファイル）
 - `back.png`（任意） … カード裏面
 
 ## 注意点

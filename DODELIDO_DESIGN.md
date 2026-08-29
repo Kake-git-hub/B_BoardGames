@@ -12,11 +12,11 @@
 - どうぶつ5種 × いろ5色 × 各4枚 = 100枚
   - どうぶつ: フラミンゴ🦩 / ペンギン🐧 / カメ🐢 / ラクダ🐫 / シマウマ🦓
   - いろ: しろ / ピンク / きいろ / あお / みどり
-- ワニ🐊 × 5枚
+- ワニ🐊 × 5枚（絵は5まいとも別。アプリではロビー設定で 0〜10枚に変更できる）
 
 ### 1.2 セットアップ・進行
 
-- 2〜6人。全カードをシャッフルして均等に配る（**あまりは箱へ＝ゲームから除外**）。各自 裏向きの山として持つ
+- 2〜6人。全カードをシャッフルして均等に配る（**あまりは箱へ＝ゲームから除外**）。各自 裏向きの山として持つ（アプリではロビー設定で さいしょの手札枚数を へらせる → §2.5.1）
 - 場の捨て札置き場は**人数に関係なく常に3つ**。カードは**1→2→3→1…の固定ローテーション**で置く（好きな山は選べない）
 - 手番の人が自分の山の一番上を1枚めくって場に置き、**めくった本人だけが即コール**する
 
@@ -90,7 +90,20 @@ flip（手番の人のタップで1枚めくる）
 
 ### 2.5 カード画像
 
-`./assets/dodelido/<いろ>_<どうぶつ>.png`（例 `blue_penguin.png`）と `croc.png` を置くだけでプレースホルダー（色わく＋絵文字＋名前＋色名）から自動で切り替わる（bohnanza と同じ `ddImgMissing` 方式）。
+`./assets/dodelido/<いろ>_<どうぶつ>.png`（例 `blue_penguin.png`）と `croc1.png`〜`croc5.png`（ワニは絵ちがい5まい。デッキのキーも `croc1`〜`croc5`）を置くだけでプレースホルダー（色わく＋絵文字＋名前＋色名）から自動で切り替わる（bohnanza と同じ `ddImgMissing` 方式）。
+
+### 2.5.1 ロビー設定（`lobbies/<id>/dodelidoSettings`）
+
+ホストのロビー画面（ドデリドを選んでいるときだけ表示）で2つ設定できる。`oekakiSettings` と同じパターン（`normalizeDodelidoLobbySettings` / `setLobbyDodelidoSettings` / `lobbyRenderKey` に追加）。
+
+| キー | 意味 | 値 | きほん |
+|---|---|---|---|
+| `handCount` | ひとりの さいしょの てふだ枚数 | `0`（じどう＝山を人数でわけきる）/ 5 / 8 / 10 / 12 / 15 / 20 / 25 | `0` |
+| `crocCount` | ワニの まいすう | 0〜10 | `5` |
+
+- `handCount` が配れる枚数より多いときは、配れるところまで（`Math.min(handCount, floor(deck/人数)))`）。あまったカードは これまでどおり はこへ
+- `crocCount` は `ddBuildDeck(crocCount)` に渡る。6まい以上にすると絵は `croc1`〜`croc5` をくりかえす
+- 設定は開始時のログ行（`ゲームかいし！ ひとり Nまいずつ（ワニ Mまい・あまり…）`）にも出る
 
 ### 2.6 DBスキーマ（dodelidoRooms/<roomId>）
 
@@ -126,7 +139,7 @@ flip（手番の人のタップで1枚めくる）
 
 1. `cleanupOldRooms()` の paths に `dodelidoRooms`
 2. `GAME_KIND_META` / `gameKinds` に `dodelido`（🦩・min 2）
-3. ロビー開始: 人数ゲート 2〜6人 → `createDodelidoRoom(roomId, lobbyId, members)`（配札まで一括）→ `dodelido_player` / `dodelido_table` へ
+3. ロビー開始: 人数ゲート 2〜6人 → `createDodelidoRoom(roomId, lobbyId, members, settings)`（配札まで一括）→ `dodelido_player` / `dodelido_table` へ
 4. `routeLobbyPlayer.goToCurrentGame` に dodelido 分岐（`player=<mid>`）
 5. 制限端末の allowed に `dodelido_player` / `demo_dodelido`
 6. ルーティング: `dodelido_table`（非ホストは player へ回す）/ `dodelido_player` / `demo_dodelido`
