@@ -6893,13 +6893,7 @@
           '<div class="row ll-modal-actions" style="justify-content:space-between">' +
           '<button class="ghost" id="hnModalCancel">キャンセル</button>' +
           // 使用ボタンは廃止：対象/カードそのものを ながおしで確定する
-          '<span class="bbg-hold-hint">' +
-          escapeHtml(
-            cardId === 'dog'
-              ? (step === 'pick' ? 'カードを ながおしで 使用' : '相手を タップで えらぶ')
-              : '相手を ながおしで 使用'
-          ) +
-          '</span>' +
+          '<span></span>' +
           '</div>' +
           '</div>' +
           '</div>' +
@@ -6950,7 +6944,6 @@
           '<div class="hn-rumor-row">' +
           outInfo +
           '</div>' +
-          '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       }
@@ -7003,7 +6996,6 @@
           '<div class="hn-rumor-row">' +
           facedownHtml +
           '</div>' +
-          '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       }
@@ -7066,8 +7058,7 @@
             '<div class="hn-rumor-row">' +
             outDeal2 +
             '</div>' +
-            '<div class="muted center hn-hint">タップで えらぶ / ながおしで けってい</div>' +
-            hnPendingProgressHtml(room) +
+              hnPendingProgressHtml(room) +
             '</div>';
         }
       } else {
@@ -7086,35 +7077,45 @@
       if (!myHand.length) {
         contentHtml = '<div class="muted center">（手札なし）</div>';
       } else {
-        // カード幅・重なり幅を画面幅から求める（n枚がコンテナ幅に収まるようにする）。
+        // カード幅・重なり幅を画面から求める（n枚がコンテナに収まるようにする）。
         var vw0 = 420;
+        var vh0 = 700;
         try {
           if (typeof window !== 'undefined' && window && window.innerWidth) vw0 = window.innerWidth;
+          if (typeof window !== 'undefined' && window && window.innerHeight) vh0 = window.innerHeight;
         } catch (eVw) {
           vw0 = 420;
+          vh0 = 700;
         }
         var nCards = myHand.length;
-        var contW = Math.min(340, Math.max(200, Math.floor(vw0 * 0.9)));
-        var cardW = Math.max(70, Math.min(150, Math.floor(contW * 0.46)));
-        var cardH = Math.round((cardW * 4) / 3);
-        // スマホ横: 高さからも制限して、手札ペイン（FIX・スクロールなし）からはみ出さないようにする。
-        try {
-          var vh0 = typeof window !== 'undefined' && window && window.innerHeight ? window.innerHeight : 700;
-          var maxCardH = Math.max(96, Math.floor(vh0 * 0.44));
-          if (cardH > maxCardH) {
-            cardH = maxCardH;
-            cardW = Math.round((cardH * 3) / 4);
+        var landscape0 = bbgPanesActive();
+        var cardW;
+        var cardH;
+        var overlap0 = 0.62;
+        if (landscape0) {
+          // スマホ横: カードは上下いっぱい。横は「左のカード欄」に収まるところまで。
+          // 高さから幅を決める（幅を先に決めないと Safari/Firefox で重なるため、ここでpx確定させる）。
+          cardH = Math.max(120, Math.floor(vh0 - 78));
+          cardW = Math.round((cardH * 3) / 4);
+          // 右の説明欄(.bbg-split-side 30%)とたてタブ(40px)を除いた、左のカード欄のはば。
+          var availW0 = Math.max(160, Math.floor((vw0 - 64) * 0.63));
+          var needW0 = cardW * (1 + overlap0 * (nCards - 1));
+          if (needW0 > availW0) {
+            cardW = Math.max(64, Math.floor(availW0 / (1 + overlap0 * (nCards - 1))));
+            cardH = Math.round((cardW * 4) / 3);
           }
-        } catch (eVh) {
-          // ignore
+        } else {
+          var contW0 = Math.min(340, Math.max(200, Math.floor(vw0 * 0.9)));
+          cardW = Math.max(70, Math.min(150, Math.floor(contW0 * 0.46)));
+          cardH = Math.round((cardW * 4) / 3);
         }
         var offsetPx = 0;
         if (nCards > 1) {
-          offsetPx = Math.min(Math.round(cardW * 0.62), Math.floor((contW - cardW) / (nCards - 1)));
+          offsetPx = Math.round(cardW * overlap0);
           if (offsetPx < 12) offsetPx = 12;
         }
         var wrapW = cardW + offsetPx * (nCards - 1);
-        var wrapH = cardH + 18;
+        var wrapH = cardH + (landscape0 ? 0 : 18);
 
         // 選択インデックス（範囲外はリセット）。
         var selIdx0 = parseIntSafe(ui.hnSelIndex, -1);
@@ -7161,10 +7162,7 @@
             '<div class="hn-card-info-desc muted">' + escapeHtml(String(sDef0.desc || '')) + '</div>' +
             '</div>';
         } else {
-          infoHtml0 =
-            '<div class="hn-card-info">' +
-            '<div class="hn-card-info-empty muted">カードをタップすると、なにが起きるか見られます</div>' +
-            '</div>';
+          infoHtml0 = '<div class="hn-card-info"><div class="hn-card-info-empty muted"></div></div>';
         }
 
         // 使用ボタン（自分の番のみ）。出せない理由は注記で伝える。
@@ -7197,22 +7195,14 @@
             useDisabled0 = true;
             useNote0 = '犯人は最後の1枚のときだけ出せます';
           }
-          // 使用ボタンは廃止。えらんだカードを ながおしで出す（ドデリドと同じ操作感）。
-          useHtml0 =
-            '<div class="center bbg-hold-hint">' +
-            escapeHtml(
-              !selCard0
-                ? 'カードをえらんでください'
-                : useDisabled0
-                  ? 'このカードは いま だせません'
-                  : 'えらんだカードを ながおしで だします'
-            ) +
-            '</div>' +
-            (useNote0 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote0) + '</div>' : '');
+          // 使用ボタンは廃止（カードのながおしで出す）。出せない理由だけ注記する。
+          useHtml0 = useNote0 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote0) + '</div>' : '';
         }
 
+        // スマホ横: カードを左でめいっぱい・カードの説明を右のあいたところに（.bbg-split）。
         contentHtml =
-          '<div class="hn-hand-wrap ll-hand-wrap">' +
+          '<div class="hn-hand-wrap ll-hand-wrap bbg-split">' +
+          '<div class="bbg-split-main">' +
           '<div class="hn-hand hn-hand--fan" id="hnHand" style="width:' +
           escapeHtml(String(wrapW)) +
           'px;height:' +
@@ -7220,10 +7210,10 @@
           'px">' +
           cardsHtml +
           '</div>' +
+          '</div>' +
+          '<div class="bbg-split-side">' +
           infoHtml0 +
           useHtml0 +
-          '<div class="muted center hn-hint">' +
-          escapeHtml(isMyTurn ? 'タップで かくにん、ながおしで だします' : 'あなたの手札（タップで効果を確認できます）') +
           '</div>' +
           '</div>';
       }
@@ -11433,7 +11423,7 @@
         var ok = bzCanHarvest(me.fields, fi);
         acts =
           '<button type="button" class="ghost bz-btn bbg-holdbtn bzHarvestBtn" data-bz-field="' + escapeHtml(String(fi)) + '"' +
-          (ok ? '' : ' disabled') + '>ながおしで しゅうかく</button>' +
+          (ok ? '' : ' disabled') + '>しゅうかく</button>' +
           (ok ? '' : '<div class="bz-note">1まいの畑は しゅうかくできません</div>');
       }
       fieldsHtml += bzFieldTileHtml(f, fi, { actionsHtml: acts ? '<div class="bz-field-acts">' + acts + '</div>' : '' });
@@ -11442,7 +11432,7 @@
       '<div class="card bz-mine">' +
       '<div class="bz-sec-title">あなたの畑</div>' +
       '<div class="bz-fields">' + fieldsHtml + '</div>' +
-      (canOperate && canBuy ? '<div class="row"><button type="button" id="bzBuyField" class="ghost bz-btn bbg-holdbtn">ながおしで 3つめの畑を かう（-3きん）</button></div>' : '') +
+      (canOperate && canBuy ? '<div class="row"><button type="button" id="bzBuyField" class="ghost bz-btn bbg-holdbtn">3つめの畑を かう（-3きん）</button></div>' : '') +
       '</div>';
 
     // ---- 畑えらびボタン（うえる用）
@@ -11513,7 +11503,7 @@
             escapeHtml(bzName(room, gm)) + (gm === playerId ? '（じぶん）' : '') + '</button>';
         }
         giveTargets =
-          '<div class="bz-give"><div class="bz-hint">わたす あいてを ながおし で けってい</div><div class="bz-pick">' + giveTargets +
+          '<div class="bz-give"><div class="bz-hint">だれに わたす？</div><div class="bz-pick">' + giveTargets +
           '<button type="button" id="bzGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
       }
 
@@ -11521,9 +11511,9 @@
         '<div class="card bz-act">' +
         '<div class="bz-sec-title">めくれた カード</div>' +
         (faceUp.length ? '<div class="bz-fu">' + fuHtml + '</div>' : '<div class="muted">（なし）</div>') +
-        (canOperate && isMyTurn ? '<div class="bz-hint">カードを タップして わたす あいてを えらびます</div>' : '<div class="bz-hint">こうかんは くちで そうだんして、' + escapeHtml(bzName(room, turnMid)) + 'が そうさします</div>') +
+        (canOperate && isMyTurn ? '' : '<div class="bz-hint">こうかんは くちで そうだんして、' + escapeHtml(bzName(room, turnMid)) + 'が そうさします</div>') +
         giveTargets +
-        (canOperate && isMyTurn ? '<div class="row"><button type="button" id="bzEndTradeBtn" class="primary bz-btn bbg-holdbtn">ながおしで こうかん おわり</button></div>' : '') +
+        (canOperate && isMyTurn ? '<div class="row"><button type="button" id="bzEndTradeBtn" class="primary bz-btn bbg-holdbtn">こうかん おわり</button></div>' : '') +
         '</div>';
     }
 
@@ -11555,7 +11545,7 @@
           '<div class="bz-hint">' + escapeHtml(fromLabel) + '</div>' +
           (canOperate ? fieldPickHtml(pe.bean, 'pend', pi2) : '') +
           (canOperate && phase === 'trade' && String(pe.from || '') === 'deck'
-            ? '<button type="button" class="ghost bz-btn bbg-holdbtn bzReturnBtn" data-bz-pidx="' + escapeHtml(String(pi2)) + '">ながおしで もどす</button>'
+            ? '<button type="button" class="ghost bz-btn bbg-holdbtn bzReturnBtn" data-bz-pidx="' + escapeHtml(String(pi2)) + '">もどす</button>'
             : '') +
           (!bzHasPlantableField(me.fields, pe.bean) ? '<div class="bz-note bz-note--warn">おける畑が ありません。さきに しゅうかくしてください。</div>' : '') +
           '</div>' +
@@ -11584,14 +11574,13 @@
         targets += '<button type="button" class="ghost bz-btn bbg-holdbtn bzGiveHandBtn" data-bz-to="' + escapeHtml(tm) + '">' + escapeHtml(bzName(room, tm)) + 'に わたす</button>';
       }
       handGive =
-        '<div class="bz-give"><div class="bz-hint">わたす あいてを ながおし で けってい（とりけしできません）</div>' +
+        '<div class="bz-give"><div class="bz-hint">だれに わたす？（とりけしできません）</div>' +
         '<div class="bz-pick">' + targets + '<button type="button" id="bzHandGiveCancel" class="ghost bz-btn">やめる</button></div></div>';
     }
     var myHandHtml =
       '<div class="card bz-handbox">' +
       '<div class="bz-sec-title">あなたの 手札（' + escapeHtml(String(me.hand.length)) + 'まい・ならびかえ できません）</div>' +
       (me.hand.length ? '<div class="bz-hand" id="bzHand">' + handHtml + '</div>' : '<div class="muted">（からっぽ）</div>') +
-      (canOperate && phase === 'trade' && me.hand.length ? '<div class="bz-hint">カードを タップすると わたせます</div>' : '') +
       handGive +
       '</div>';
 
@@ -11604,18 +11593,25 @@
       bbgPanesHtml('bz_player', 1, [
         { cls: 'bbg-pane--field', label: 'テーブル', html: bzTableBarHtml(room) + bzFuBoxHtml(room) + bzSeatsHtml(room) },
         {
+          // スマホ横: 手札を左でめいっぱい・じょうきょう/操作を右のあいたところに（.bbg-split）。
           cls: 'bbg-pane--hand',
           label: 'てふだ',
           html:
+            '<div class="bbg-split">' +
+            '<div class="bbg-split-side">' +
             statusHtml +
             actionHtml +
-            // うえる待ちは「はたけ」ペインにある。スマホ横では気づけるように案内を出す。
+            // うえる待ちは「はたけ」ペインにある。スマホ横では気づけるように出しておく。
             (me.pending.length
               ? '<div class="bbg-lonly"><div class="card bz-hint">うえる まちの 豆 ' +
                 escapeHtml(String(me.pending.length)) +
-                'まい → 上スワイプの「はたけ」ペインで うえます</div></div>'
+                'まい（「はたけ」タブ）</div></div>'
               : '') +
-            myHandHtml
+            '</div>' +
+            '<div class="bbg-split-main">' +
+            myHandHtml +
+            '</div>' +
+            '</div>'
         },
         { cls: 'bbg-pane--more', label: 'はたけ・きろく', html: pendingHtml + myFieldsHtml + '<div class="card bz-logbox">' + bzLogHtml(room, 6) + '</div>' }
       ]) +
@@ -15956,7 +15952,7 @@
       }
 
       boardHtml =
-        '<hr /><div class="stack">' +
+        '<div class="cn-boardbox">' +
         '<div class="cn-board" style="grid-template-columns: repeat(' +
         escapeHtml(String(size)) +
         ', 1fr);">' +
@@ -15993,12 +15989,20 @@
             cls: 'bbg-pane--hand',
             label: 'ばんめん',
             html:
+              // スマホ横: 盤面を左でめいっぱい・ヒント等の文字は右のあいたところに（.bbg-split）。
+              // DOMの並びは たて画面の見た目（ヒント→盤面）のまま。左右の入れかえは横画面のCSS(order)で行う。
+              '<div class="bbg-split">' +
+              '<div class="bbg-split-side">' +
               topLine +
               (phase === 'lobby' ? lobbyHtml : '') +
               (phase === 'playing' ? clueRowHtml : '') +
               (phase === 'finished' ? finishedRowHtml : '') +
+              finishedNoteHtml +
+              '</div>' +
+              '<div class="bbg-split-main">' +
               boardHtml +
-              finishedNoteHtml
+              '</div>' +
+              '</div>'
           },
           {
             cls: 'bbg-pane--more',
@@ -21869,7 +21873,7 @@
           '<div class="ll-card-info-desc muted">' + escapeHtml(String(selDef1.desc || '')) + '</div>' +
           '</div>';
       } else {
-        infoHtml = '<div class="ll-card-info"><div class="ll-card-info-empty muted">カードをタップすると効果が見られます</div></div>';
+        infoHtml = '<div class="ll-card-info"><div class="ll-card-info-empty muted"></div></div>';
       }
 
       // 使用ボタン（自分の番のみ表示。押せない理由は注記で伝える）
@@ -21891,28 +21895,22 @@
           useDisabled1 = true;
           useNote1 = '女侯爵(7)を必ず使用します';
         }
-        // 使用ボタンは廃止。えらんだカードを ながおしで使う（ドデリドと同じ操作感）。
-        useHtml =
-          '<div class="center bbg-hold-hint">' +
-          escapeHtml(
-            !selCard1
-              ? 'カードをえらんでください'
-              : useDisabled1
-                ? 'このカードは つかえません'
-                : 'えらんだカードを ながおしで つかいます'
-          ) +
-          '</div>' +
-          (useNote1 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote1) + '</div>' : '');
+        // 使用ボタンは廃止（カードのながおしで使う）。出せない理由だけ注記する。
+        useHtml = useNote1 ? '<div class="ll-use-note">※ ' + escapeHtml(useNote1) + '</div>' : '';
       }
 
+      // スマホ横: カードを左でめいっぱい・カードの説明を右のあいたところに（.bbg-split）。
       handHtml =
-        '<div class="ll-hand-wrap">' +
+        '<div class="ll-hand-wrap bbg-split">' +
+        '<div class="bbg-split-main">' +
         '<div class="ll-hand2" id="llHand2">' +
         cardsHtml +
         '</div>' +
+        '</div>' +
+        '<div class="bbg-split-side">' +
         infoHtml +
         useHtml +
-        (isMyTurn ? '' : '<div class="muted center ll-hint">あなたの手札</div>') +
+        '</div>' +
         '</div>';
     }
 
@@ -22001,10 +21999,8 @@
         // 使用ボタンは廃止：対象/推測そのものを ながおしで確定する。
         // 対象にできる相手がいないときだけ、ながおしの確定ボタンを出す。
         (needsTarget && !eligible.length
-          ? '<button id="llConfirmPlay" class="primary bbg-holdbtn">ながおしで 使用</button>' :
-          '<span class="bbg-hold-hint">' +
-          escapeHtml(needsGuess ? '数字を ながおしで 使用' : '相手を ながおしで 使用') +
-          '</span>') +
+          ? '<button id="llConfirmPlay" class="primary bbg-holdbtn">使用</button>' :
+          '<span></span>') +
         '</div>' +
         '</div>' +
         '</div>';
@@ -28074,7 +28070,7 @@
     var idx = bbgPaneIndex(key, panes.length, defIdx);
     bbgPaneIdx[key] = idx;
     var inner = '';
-    var dots = '';
+    var tabs = '';
     for (var i = 0; i < panes.length; i++) {
       inner +=
         '<div class="bbg-pane ' +
@@ -28084,16 +28080,17 @@
         '">' +
         String(panes[i].html || '') +
         '</div>';
-      dots +=
-        '<button type="button" class="bbg-pane-dot' +
+      // 切り替えは「右端のたてタブ」を1回タップ。どのペインへも1手で飛べる。
+      tabs +=
+        '<button type="button" class="bbg-pane-tab' +
         (i === idx ? ' on' : '') +
         '" data-pane-i="' +
         String(i) +
-        '" title="' +
-        escapeHtml(String(panes[i].label || '')) +
         '" aria-label="' +
         escapeHtml(String(panes[i].label || '')) +
-        '"></button>';
+        '"><span>' +
+        escapeHtml(String(panes[i].label || '')) +
+        '</span></button>';
     }
     return (
       '<div class="bbg-panes" data-pane-key="' +
@@ -28102,8 +28099,8 @@
       String(idx) +
       '">' +
       inner +
-      '<div class="bbg-pane-dots">' +
-      dots +
+      '<div class="bbg-pane-tabs">' +
+      tabs +
       '</div>' +
       '</div>'
     );
@@ -28123,9 +28120,9 @@
     if (key) bbgPaneIdx[key] = i;
     try {
       host.style.setProperty('--bbg-pane-i', String(i));
-      var dots = host.querySelectorAll('.bbg-pane-dot');
-      for (var d = 0; d < dots.length; d++) {
-        if (dots[d].classList) dots[d].classList[d === i ? 'add' : 'remove']('on');
+      var tabs = host.querySelectorAll('.bbg-pane-tab');
+      for (var d = 0; d < tabs.length; d++) {
+        if (tabs[d].classList) tabs[d].classList[d === i ? 'add' : 'remove']('on');
       }
     } catch (e2) {
       // ignore
@@ -28149,7 +28146,7 @@
         if (!bbgPanesActive()) return;
         var t = ev.target;
         if (!t || !t.closest) return;
-        if (t.closest('.bbg-pane-dot')) return; // ドットはクリックで切り替える
+        if (t.closest('.bbg-pane-tab')) return; // たてタブはクリックで切り替える
         var host = t.closest('.bbg-panes');
         if (!host) return;
         start = { y: ev.clientY, x: ev.clientX, el: t, host: host };
@@ -28173,8 +28170,9 @@
         if (!s0 || !bbgPanesActive()) return;
         var dy = ev.clientY - s0.y;
         var dx = ev.clientX - s0.x;
-        // 縦方向にはっきり動いたときだけペインを切り替える（誤タップ・横パンは無視）
-        if (Math.abs(dy) < 48 || Math.abs(dy) < Math.abs(dx) * 1.2) return;
+        // 縦方向にはっきり動いたときだけペインを切り替える（誤タップ・横パンは無視）。
+        // 切り替えの主役は右端のたてタブなので、ここは誤爆しにくい値でよい。
+        if (Math.abs(dy) < 40 || Math.abs(dy) < Math.abs(dx)) return;
         // 途中に縦スクロールできる要素があれば、そちらのスクロールを優先する
         var el = s0.el;
         while (el && el !== s0.host) {
@@ -28203,9 +28201,9 @@
       function (ev) {
         var t = ev.target;
         if (!t || !t.closest) return;
-        var dot = t.closest('.bbg-pane-dot');
-        if (!dot) return;
-        bbgPaneSet(t.closest('.bbg-panes'), dot.getAttribute('data-pane-i'));
+        var tab = t.closest('.bbg-pane-tab');
+        if (!tab) return;
+        bbgPaneSet(t.closest('.bbg-panes'), tab.getAttribute('data-pane-i'));
       },
       true
     );
