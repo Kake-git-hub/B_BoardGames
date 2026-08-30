@@ -17,7 +17,7 @@
          ノッチの無い端末では env(safe-area-inset-top) が 0 のままなので
          充電・電波マークと重なってしまう（CSS側では避けきれない）。 -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
-    <link rel="stylesheet" href="./bbg.css?v=20260830015857" />
+    <link rel="stylesheet" href="./bbg.css?v=20260830192719" />
   </head>
   <body>
     <main class="app">
@@ -29,7 +29,10 @@
                  設定は端末に保存されるので、ロビーで切り替えればゲーム中もそのまま効く。 -->
             <button type="button" class="bbg-fx-toggle bbg-fx-toggle--header" id="bbgFxToggle" aria-label="効果音" title="効果音">🔊</button>
           </div>
-          <div>
+          <div class="header-actions">
+            <!-- 画面ごとの小さな表示スロット（JS: bbgSetHeaderExtra）。
+                 プレイ画面の高さをけずらずに1つだけ情報を出したいとき用。 -->
+            <span class="bbg-head-extra" id="bbgHeaderExtra"></span>
             <button id="headerLobbyBack" class="ghost" style="display:none">ロビーへ戻る</button>
           </div>
         </div>
@@ -51,9 +54,9 @@
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
 
     <!-- Optional: embedded Firebase config (see bbg-config.js) -->
-    <script src="./bbg-config.js?v=20260830015857"></script>
+    <script src="./bbg-config.js?v=20260830192719"></script>
 
-    <script src="./bbg.js?v=20260830015857" defer></script>
+    <script src="./bbg.js?v=20260830192719" defer></script>
 
     <!-- PWA Service Worker (自動アップデート付き) -->
     <script>

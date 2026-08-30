@@ -549,6 +549,21 @@
     }
   }
 
+  // タイトルバー右の小さな表示スロット（index.html の #bbgHeaderExtra）。
+  // プレイ画面の高さをけずらずに1つだけ情報を出したいとき用（いまは ドデリドの のこり枚数）。
+  // 画面を出るときに残らないよう route() のあたまで空にする。
+  function bbgSetHeaderExtra(html) {
+    try {
+      var el = document.getElementById('bbgHeaderExtra');
+      if (!el) return;
+      var s = String(html == null ? '' : html);
+      if (el.innerHTML === s) return; // 毎スナップショットの書きかえで再描画させない
+      el.innerHTML = s;
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // ターン開始オーバーレイ（約1.2秒で自動消滅・タップは奪わない）
   var _bbgTurnOverlayTimer = null;
 
@@ -12491,6 +12506,22 @@
     return String(order[i] || '');
   }
 
+  // 画面に出す「番手」＝ いま タップして めくる人。
+  // turnIdx は「さいごにめくった人」を指すので、コールちゅう(call)は そのつぎの人が番手になる
+  //（せいかいの確認と じぶんのめくりを 1タップで まとめて行うため）。
+  // これを使わないと「タップしてから じぶんの番と出る」= 1つ ズレて見える。
+  function ddActorMid(room) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    if (!order.length) return '';
+    var phase = String((room && room.phase) || '');
+    if (phase === 'croc') return ''; // 全員がたたく＝番手なし
+    if (phase === 'crocResult') return String((room && room.crocResult && room.crocResult.loserMid) || '');
+    var i = parseIntSafe(room && room.turnIdx, 0) || 0;
+    if (i < 0 || i >= order.length) i = 0;
+    if (phase === 'call') i = (i + 1) % order.length;
+    return String(order[i] || '');
+  }
+
   function ddPhaseLabel(phase) {
     var p = String(phase || '');
     if (p === 'flip') return 'めくる';
@@ -13131,14 +13162,15 @@
   // 一行の合図（プレイヤー画面・テーブルで共用）。meMid が空ならテーブル向けの言い回し。
   function ddLineHtml(room, meMid) {
     var phase = String((room && room.phase) || '');
-    var turnMid = ddTurnMid(room);
+    // 番手は ddActorMid（＝つぎに めくる人）。タップする前から その人の名前が出る。
+    var actorMid = ddActorMid(room);
     var me = String(meMid || '');
     var text = '';
     var cls = '';
     if (phase === 'flip' || phase === 'call') {
-      var mine = !!(me && String(turnMid) === me);
-      text = mine ? 'あなたの ばん' : escapeHtml(ddName(room, turnMid)) + 'の ばん';
-      if (mine && phase === 'flip') cls = ' dd-line--me';
+      var mine = !!(me && String(actorMid) === me);
+      text = mine ? 'あなたの ばん' : escapeHtml(ddName(room, actorMid)) + 'の ばん';
+      if (mine) cls = ' dd-line--me';
     } else if (phase === 'croc') {
       text = '🐊 ワニ！';
       cls = ' dd-line--croc';
@@ -13149,6 +13181,29 @@
       if (loserMe) cls = ' dd-line--me';
     }
     return '<div class="dd-line' + cls + '">' + text + '</div>';
+  }
+
+  // 全プレイヤーを 順番どおりに たてに並べる（スマホ横置きで カードの左のあきスペースに出す）。
+  // いまの番手＝ddActorMid をハイライトするので、つぎがだれかが ひと目でわかる。
+  // たて画面では CSS で display:none（番手は上の1行で出す）。
+  function ddSeatsHtml(room, meMid) {
+    var order = Array.isArray(room && room.order) ? room.order : [];
+    if (!order.length) return '';
+    var actorMid = ddActorMid(room);
+    var me = String(meMid || '');
+    var out = '';
+    for (var i = 0; i < order.length; i++) {
+      var mid = String(order[i] || '');
+      if (!mid) continue;
+      var isActor = !!(actorMid && mid === actorMid);
+      var isMe = !!(me && mid === me);
+      out +=
+        '<div class="dd-seat' + (isActor ? ' dd-seat--turn' : '') + (isMe ? ' dd-seat--me' : '') + '">' +
+        '<span class="dd-seat-no">' + escapeHtml(String(i + 1)) + '</span>' +
+        '<span class="dd-seat-name">' + escapeHtml(ddName(room, mid)) + '</span>' +
+        '</div>';
+    }
+    return '<div class="dd-seats">' + out + '</div>';
   }
 
   // ワニのタップ順（croc 中は途中経過をはやい順に、crocResult は確定順。最遅に🐊印）。
@@ -13268,6 +13323,7 @@
     if (phase === 'result') {
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
       var backHtml = lobbyId && isHost ? '<button id="ddNextToLobby" class="primary">ロビーへもどる</button>' : '';
+      bbgSetHeaderExtra('');
       render(
         viewEl,
         '<div class="stack bz-screen dd-screen">' +
@@ -13281,6 +13337,7 @@
     }
 
     if (!inGame && !isTableGmDevice) {
+      bbgSetHeaderExtra('');
       render(
         viewEl,
         '<div class="stack bz-screen dd-screen">' +
@@ -13307,14 +13364,14 @@
     var zoneCls = '';
     if (canOperate && inGame) {
       if (phase === 'flip' && isMyTurn) {
-        zoneLabel = 'タップで めくる';
-        zoneCls = ' dd-tapzone--on';
+        zoneLabel = 'めくる！';
+        zoneCls = ' dd-tapzone--on dd-tapzone--go';
       } else if (phase === 'call' && isMyTurn) {
         zoneLabel = 'まちがえたら ながおし';
         zoneCls = ' dd-tapzone--hint';
       } else if (phase === 'call' && isNextMe) {
-        zoneLabel = 'タップで つぎへ';
-        zoneCls = ' dd-tapzone--on';
+        zoneLabel = 'めくる！';
+        zoneCls = ' dd-tapzone--on dd-tapzone--go';
       } else if (phase === 'call') {
         // コール中は だれでも「ながおし」で 自分のまちがいに遡って気づいて ひきとれる
         zoneLabel = 'まちがいに きづいたら ながおし';
@@ -13327,17 +13384,27 @@
       } else if (phase === 'crocResult') {
         var crZ = (room && room.crocResult) || {};
         if (String(crZ.loserMid || '') === playerId) {
-          zoneLabel = 'タップで さいかい';
-          zoneCls = ' dd-tapzone--on';
+          zoneLabel = 'めくる！';
+          zoneCls = ' dd-tapzone--on dd-tapzone--go';
         }
       }
     }
 
-    // 並び: 番手（カードの上）→ 3つの場 → 正方形のタップエリア → のこり枚数 → ワニのタップ順
+    // のこり枚数は タイトルバーの右へ（スマホ横置きで カードの高さを かせぐため）。
+    // たて画面では CSS で出さず、画面内の .dd-count のほうを見せる。
+    bbgSetHeaderExtra(
+      inGame && !isTableGmDevice
+        ? '<span class="bbg-head-remain">のこり<b>' + escapeHtml(String(me.deck.length)) + '</b>まい</span>'
+        : ''
+    );
+
+    // 並び: 番手（カードの上）→ 順番リスト（横置きは左） → 3つの場 → タップエリア（横置きは右）
+    //       → のこり枚数 → ワニのタップ順
     render(
       viewEl,
       '<div class="stack bz-screen dd-screen dd-simple">' +
       '<div class="dd-head">' + ddLineHtml(room, playerId) + '</div>' +
+      ddSeatsHtml(room, playerId) +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
       '<div class="dd-tapzone' + zoneCls + (zoneLabel ? '' : ' dd-tapzone--idle') + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
       // ワニ中は のこり枚数を出さない（全員のタップ順が画面に収まるように）。
@@ -13397,6 +13464,7 @@
       lastDropKey: '',
       tapBound: false,
       detachTap: null,
+      beatTimer: null,
       lobbyReturnWatching: false,
       lobbyUnsub: null
     };
@@ -13494,7 +13562,6 @@
       bindBbgFxToggle();
 
       var phase = String((room && room.phase) || '');
-      var turnMid = ddTurnMid(room);
 
       // めくれた直後だけ、いま出たカードを上から重ねるアニメ（flippedAt はめくりごとに更新される）
       try {
@@ -13507,11 +13574,13 @@
         // ignore
       }
 
-      // 手番（ラウンド）が変わったら1回だけオーバーレイ
+      // 番手が変わったら1回だけオーバーレイ。
+      // 出すのは ddActorMid（つぎに めくる人）なので、めくった直後に「つぎはだれか」が出る。
       try {
-        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
-        if (ui.fxReady && phase !== 'result' && turnKey !== ui.lastTurnKey) {
-          ddShowTurnOverlay(viewEl, String(turnMid) === String(playerId) ? 'あなたの ばん！' : ddName(room, turnMid) + 'の ばん');
+        var actorMid = ddActorMid(room);
+        var turnKey = String(room && room.turnCount) + '|' + phase + '|' + String(actorMid);
+        if (ui.fxReady && actorMid && (phase === 'flip' || phase === 'call') && turnKey !== ui.lastTurnKey) {
+          ddShowTurnOverlay(viewEl, String(actorMid) === String(playerId) ? 'あなたの ばん！' : ddName(room, actorMid) + 'の ばん');
         }
         ui.lastTurnKey = turnKey;
       } catch (eT) {
@@ -13554,6 +13623,10 @@
     // （redirectToLobby と popstate で解除）。ながおし中に指が画面外へ出ても取りこぼさないよう、
     // move/up/cancel は window に張る。
     var DD_HOLD_MS = 650;
+    // タップしてから カードが配られるまでの「一拍」。
+    // 即座に配ると リズムが取れないので、わざと ひと呼吸おいてから めくる
+    //（この間はタップエリアが光る＝タップは受けつけた、という合図）。
+    var DD_BEAT_MS = 550;
     var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false };
 
     // ながおし中はタップエリア自体が左から赤く満ちていく（はなすと消える）。
@@ -13614,6 +13687,46 @@
       }
     }
 
+    // 「一拍」おいてから めくる。タップした瞬間に音とタップエリアの光で受付を伝え、
+    // 実際の書きこみ（＝カードが配られる）は DD_BEAT_MS だけ待つ。
+    // ui.inFlight はタップの瞬間から立てるので、待っている間の連打は無視される。
+    function ddBeatThen(run) {
+      ui.inFlight = true;
+      ddBeatShow();
+      try {
+        if (ui.beatTimer) clearTimeout(ui.beatTimer);
+      } catch (e0) {
+        // ignore
+      }
+      ui.beatTimer = setTimeout(function () {
+        ui.beatTimer = null;
+        ddBeatHide();
+        if (ui.cancelled) {
+          ui.inFlight = false;
+          return;
+        }
+        run().catch(fail).then(done, done);
+      }, DD_BEAT_MS);
+    }
+
+    function ddBeatShow() {
+      try {
+        var z = document.getElementById('ddTapZone');
+        if (z && z.classList) z.classList.add('dd-tapzone--beat');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function ddBeatHide() {
+      try {
+        var z = document.getElementById('ddTapZone');
+        if (z && z.classList) z.classList.remove('dd-tapzone--beat');
+      } catch (e) {
+        // ignore
+      }
+    }
+
     // タップの振り分け（フェーズと自分の役割で決まる。関係ない人のタップは何もしない）。
     function ddHandleTap() {
       if (ui.cancelled || ui.inFlight || !playerId || !lastRoom) return;
@@ -13623,9 +13736,10 @@
 
       if (phase === 'flip') {
         if (String(ddTurnMid(room)) !== playerId) return;
-        ui.inFlight = true;
-        bbgFx.reveal();
-        ddFlip(roomId, playerId).catch(fail).then(done, done);
+        bbgFx.tap();
+        ddBeatThen(function () {
+          return ddFlip(roomId, playerId);
+        });
         return;
       }
 
@@ -13638,9 +13752,10 @@
         if (playerId !== next) return;
         var fa = parseIntSafe(room && room.flippedAt, 0) || 0;
         if (fa && serverNowMs() - fa < 700) return;
-        ui.inFlight = true;
-        bbgFx.reveal();
-        ddTapNext(roomId, playerId).catch(fail).then(done, done);
+        bbgFx.tap();
+        ddBeatThen(function () {
+          return ddTapNext(roomId, playerId);
+        });
         return;
       }
 
@@ -13649,9 +13764,10 @@
         if (String(cr.loserMid || '') !== playerId) return;
         var at = parseIntSafe(cr.at, 0) || 0;
         if (at && serverNowMs() - at < 700) return;
-        ui.inFlight = true;
-        bbgFx.play();
-        ddCrocResume(roomId, playerId).catch(fail).then(done, done);
+        bbgFx.tap();
+        ddBeatThen(function () {
+          return ddCrocResume(roomId, playerId);
+        });
         return;
       }
     }
@@ -13758,6 +13874,12 @@
         ui.tapBound = false;
         ddCancelHold();
         try {
+          if (ui.beatTimer) clearTimeout(ui.beatTimer);
+        } catch (eB) {
+          // ignore
+        }
+        ui.beatTimer = null;
+        try {
           viewEl.removeEventListener('pointerdown', onDdPointerDown);
           viewEl.removeEventListener('contextmenu', onDdContextMenu);
           window.removeEventListener('pointermove', onDdPointerMove);
@@ -13771,6 +13893,8 @@
 
     function bindPlayerActions() {
       ensureTapHandlers();
+      // 一拍まちの最中に再描画が来たら、光り（受付ずみの合図）を付けなおす。
+      if (ui.beatTimer) ddBeatShow();
 
       var crocCloseBtn = document.getElementById('ddCrocCloseBtn');
       if (crocCloseBtn && !crocCloseBtn.__dd_bound) {
@@ -13865,7 +13989,8 @@
 
     var order = Array.isArray(room && room.order) ? room.order : [];
     var phase = String((room && room.phase) || '');
-    var turnMid = ddTurnMid(room);
+    // 席のハイライトも「つぎに めくる人」（プレイヤー画面と同じ ddActorMid）。
+    var turnMid = ddActorMid(room);
 
     if (phase === 'result') {
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
@@ -14020,7 +14145,6 @@
       bindBbgFxToggle();
 
       var phase = String((room && room.phase) || '');
-      var turnMid = ddTurnMid(room);
 
       // めくれた直後だけ、いま出たカードを上から重ねるアニメ（プレイヤー画面と同じ）
       try {
@@ -14034,9 +14158,10 @@
       }
 
       try {
-        var turnKey = String(room && room.turnCount) + '|' + String(turnMid);
-        if (tUi.fxReady && phase !== 'result' && turnKey !== tUi.lastTurnKey) {
-          ddShowTurnOverlay(viewEl, ddName(room, turnMid) + 'の ばん');
+        var actorMidT = ddActorMid(room);
+        var turnKey = String(room && room.turnCount) + '|' + phase + '|' + String(actorMidT);
+        if (tUi.fxReady && actorMidT && (phase === 'flip' || phase === 'call') && turnKey !== tUi.lastTurnKey) {
+          ddShowTurnOverlay(viewEl, ddName(room, actorMidT) + 'の ばん');
         }
         tUi.lastTurnKey = turnKey;
       } catch (eT) {
@@ -31284,6 +31409,13 @@
     try {
       bbgPresenceSync();
     } catch (ePr) {
+      // ignore
+    }
+
+    // タイトルバー右の表示は画面ごとの持ち物。持ちこさないよう毎回リセットする。
+    try {
+      bbgSetHeaderExtra('');
+    } catch (eHX) {
       // ignore
     }
 

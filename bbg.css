@@ -48,6 +48,10 @@ body{
 .header-row{display:flex;justify-content:space-between;gap:12px;align-items:center}
 /* タイトルと効果音ボタンを横に並べる */
 .header-title{display:flex;align-items:center;gap:8px;min-width:0}
+/* タイトルバー右がわ。画面ごとの小さな表示スロット（JS: bbgSetHeaderExtra）＋ロビーへ戻る */
+.header-actions{display:flex;align-items:center;gap:8px;min-width:0}
+/* 既定では出さない。出したい画面の CSS で display を上書きする（いまはドデリドの横置きだけ）。 */
+.bbg-head-extra{display:none;align-items:baseline;gap:4px;min-width:0}
 /* ロビー・GM画面のヘッダーは細く（縦の場所を取らない） */
 .header--slim{padding:2px 4px 6px}
 .header--slim h1{font-size:15px}
@@ -1350,6 +1354,34 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-head .dd-line{flex:1 1 auto;min-width:0;text-align:center}
 .dd-remain{font-size:13px;font-weight:900;color:var(--warn);white-space:nowrap;margin-left:auto}
 
+/* タイトルバー右の のこり枚数（スマホ横置きのときだけ出す） */
+.bbg-head-remain{display:inline-flex;align-items:baseline;gap:3px;font-size:11px;font-weight:800;color:var(--muted);white-space:nowrap}
+.bbg-head-remain b{font-size:20px;font-weight:900;line-height:1;color:var(--warn)}
+
+/* 全プレイヤーの順番リスト。スマホ横置きで カードの左のあきスペースに出す
+  （たて画面は上の1行の番手表示があるので出さない）。 */
+.dd-seats{display:none}
+.dd-seat{
+  display:flex;align-items:center;gap:4px;min-width:0;
+  padding:3px 6px;border-radius:999px;
+  border:1px solid transparent;background:var(--card2);
+  font-size:12px;font-weight:800;color:var(--muted);
+}
+.dd-seat-no{
+  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:999px;
+  background:rgba(255,255,255,.08);font-size:10px;font-weight:900;
+}
+.dd-seat-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-seat--me .dd-seat-name{text-decoration:underline;text-underline-offset:2px}
+/* いまの番手（＝つぎに めくる人） */
+.dd-seat--turn{
+  border-color:var(--accent);color:var(--accent);
+  background:rgba(91,157,255,.14);
+  animation:ddLinePulse 1.1s ease-in-out infinite alternate;
+}
+.dd-seat--turn .dd-seat-no{background:var(--accent);color:#0b0f1a}
+
 /* 3つの場
    山の大きさを決めるのは つねに いちばん上の1まいだけ。
    下のカード(.dd-card--under)は position:absolute なので、枚数が増えても場の位置は動かない。
@@ -1475,7 +1507,20 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-simple > .dd-tapzone{width:min(100%,36vh)}
 .dd-simple > .dd-tapzone{width:min(100%,36dvh)}
 .dd-tapzone--on{border-style:solid;border-color:var(--accent);color:var(--accent);background:rgba(91,157,255,.08);animation:ddLinePulse 1.1s ease-in-out infinite alternate}
+/* 「めくる！」は 自分がタップする番だと ひと目でわかるように大きく。
+   下のタブレット用 media query に .dd-tapzone{font-size:22px} があるので、
+   クラス2つ分の詳細度にして負けないようにしておく。 */
+.dd-tapzone.dd-tapzone--go{font-size:clamp(28px,9vw,46px);letter-spacing:.06em}
 .dd-tapzone--hint{font-size:14px}
+/* タップは受けつけた、の合図（この一拍のあとに カードが配られる） */
+.dd-tapzone--beat{
+  border-style:solid;border-color:var(--accent);color:var(--accent);
+  background:rgba(91,157,255,.22);animation:ddBeatFlash .55s ease-out forwards;
+}
+@keyframes ddBeatFlash{
+  0%{transform:scale(1.04);box-shadow:0 0 0 0 rgba(91,157,255,.55)}
+  100%{transform:scale(1);box-shadow:0 0 0 14px rgba(91,157,255,0)}
+}
 .dd-tapzone--croc{
   border-style:solid;border-color:#ff5a6a;color:#fff;font-size:26px;
   background:linear-gradient(180deg,#ff5a6a,#c2273a);animation:ddCrocPulse .5s ease-in-out infinite alternate;
@@ -1545,9 +1590,10 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .dd-ord{font-size:12px;padding:2px 8px}
 }
 
-/* スマホ横置き（横向き・高さ520以下）: カードを画面いっぱいに、情報は上の1行だけ。
-   1行目 = 番手 / のこり枚数 / タップ案内ピル。2行目 = 3つの場（のこり全高さ）。
-   タップエリアは画面ぜんたい（JS側 ddPhoneLandscape が同じ条件を見る）。
+/* スマホ横置き（横向き・高さ520以下）: 上下いっぱいに 3まいのカード。よこ1列で
+   左 = 全プレイヤーの順番リスト（番手をハイライト）／中 = 3つの場／右 = タップ枠「めくる！」。
+   番手の1行と のこり枚数は出さない（のこり枚数はタイトルバーの右へ移した）。
+   タップは画面ぜんたいで受ける（JS側 ddPhoneLandscape が同じ条件を見る）。右の枠は めやす。
    テーブル画面(.bz-table)は対象外。:has() 非対応の古いブラウザは従来の縦積みのまま。 */
 @media (orientation:landscape) and (max-height:520px){
   /* デモバー: 横置きでは1行のコンパクト表示（statusは出さない）。
@@ -1574,44 +1620,65 @@ body.bbg-demo-on .app{padding-bottom:104px}
     body.bbg-demo-on .app:has(.dd-simple:not(.bz-table)){padding-bottom:42px}
     .app:has(.dd-simple:not(.bz-table)) .header{padding:0 4px 4px}
     .app:has(.dd-simple:not(.bz-table)) .footer{display:none}
-    .app:has(.dd-simple:not(.bz-table)) #view{flex:1 1 auto;min-height:0;padding:6px 10px;overflow:hidden}
+    .app:has(.dd-simple:not(.bz-table)) #view{flex:1 1 auto;min-height:0;padding:4px 6px;overflow:hidden}
 
+    /* のこり枚数は タイトルバーの右へ（画面内の .dd-count は出さない） */
+    .app:has(.dd-simple:not(.bz-table)) .bbg-head-extra{display:flex}
+
+    /* よこ1列: 順番リスト / 3つの場 / タップ枠。行は1本だけなので上下はカードが使いきる。
+       左右の列は固定はば（トラック幅が動かない＝ゲームが進んでもカードの位置がズレない）。 */
     .dd-simple:not(.bz-table){
       height:100%;
       display:grid;
-      grid-template-columns:minmax(0,1fr) auto auto;
-      grid-template-rows:auto minmax(0,1fr);
-      gap:6px 10px;
-      align-items:center;
+      grid-template-columns:clamp(58px,8.8vw,92px) minmax(0,1fr) clamp(42px,5.5vw,62px);
+      grid-template-rows:minmax(0,1fr);
+      gap:0 6px;
+      align-items:stretch;
     }
-    .dd-simple:not(.bz-table) > .dd-head{grid-column:1;grid-row:1;min-width:0}
-    /* 横置きでも合図行の高さは固定（ワニで文字が大きくなってもカードの行が動かない） */
-    .dd-simple:not(.bz-table) .dd-head .dd-line{justify-content:flex-start;text-align:left;min-height:24px;font-size:16px}
-    .dd-simple:not(.bz-table) .dd-line--croc{font-size:19px}
-    .dd-simple:not(.bz-table) > .dd-count{width:auto;grid-column:2;grid-row:1;padding:0;gap:4px}
-    .dd-simple:not(.bz-table) > .dd-count span{font-size:12px}
-    .dd-simple:not(.bz-table) > .dd-count b{font-size:22px}
+    /* 番手の1行（＋そのポップアップ）と のこり枚数は 横置きでは出さない */
+    .dd-simple:not(.bz-table) > .dd-head{display:none}
+    .dd-simple:not(.bz-table) > .dd-count{display:none}
+
+    /* 左: 全プレイヤーを順番に。番手が光るので、つぎがだれかが ひと目でわかる */
+    .dd-simple:not(.bz-table) > .dd-seats{
+      grid-column:1;grid-row:1;
+      display:flex;flex-direction:column;justify-content:center;gap:4px;
+      width:auto;min-width:0;overflow:hidden;
+    }
+    /* 名前に幅を回すため、番号は まるい台なしの小さな文字にする */
+    .dd-simple:not(.bz-table) .dd-seat{padding:3px 4px;font-size:11px;gap:3px}
+    .dd-simple:not(.bz-table) .dd-seat-no{width:auto;height:auto;background:none;font-size:9px;opacity:.75}
+    .dd-simple:not(.bz-table) .dd-seat--turn .dd-seat-no{background:none;color:inherit;opacity:1}
+
+    /* 右: タップ枠。文字はたて書きで大きく（細い列でも「めくる！」が1行で読める）。
+       じっさいのタップは画面のどこでも効くので、これは めやすの枠。
+       自分の番でないときも枠は消さない（消すと カードの幅が動いてしまうため）。 */
     .dd-simple:not(.bz-table) > .dd-tapzone{
       grid-column:3;grid-row:1;
-      width:auto;aspect-ratio:auto;
-      padding:5px 14px;border-radius:999px;font-size:14px;
+      width:auto;height:100%;aspect-ratio:auto;
+      padding:6px 1px;border-radius:14px;
+      writing-mode:vertical-rl;text-orientation:upright;
+      font-size:13px;line-height:1.05;letter-spacing:.04em;
     }
-    .dd-simple:not(.bz-table) > .dd-tapzone--hint{font-size:12px}
-    .dd-simple:not(.bz-table) > .dd-tapzone--croc{font-size:16px}
-    /* 文言がないとき（自分は何もできない番）はピルごと出さない */
-    .dd-simple:not(.bz-table) > .dd-tapzone--idle{display:none}
+    .dd-simple:not(.bz-table) > .dd-tapzone--go{font-size:clamp(22px,8vh,34px)}
+    .dd-simple:not(.bz-table) > .dd-tapzone--hint{font-size:11px}
+    .dd-simple:not(.bz-table) > .dd-tapzone--croc{font-size:clamp(18px,6vh,28px)}
+    /* 自分の番でないときも枠は残す（消すと 中の列の幅が動いてカードがズレる） */
+    .dd-simple:not(.bz-table) > .dd-tapzone--idle{opacity:.3}
 
     /* カード: 3まいが かならず横に並ぶよう、幅を先に決める（高さは aspect-ratio が出す）。
        ※ height:100%（親の高さのパーセント）+ aspect-ratio で幅を導くと、
          Safari/Firefox は .dd-pile の intrinsic width を「文字ぶん」しか取らないため
          山が細く並び カードだけが本来の幅で描かれて3まいが重なる。
          幅を先に決めればどのブラウザでも同じ位置に並ぶ。
-       --dd-hchrome / --dd-vchrome はカード以外に使う余白の合計（実測値）。 */
-    .dd-simple:not(.bz-table){--dd-hchrome:100px;--dd-vchrome:115px}
-    body.bbg-demo-on .dd-simple:not(.bz-table){--dd-vchrome:151px}
-    .dd-simple:not(.bz-table) > .dd-pilesbox{grid-column:1/-1;grid-row:2;height:100%;min-height:0;padding:4px;display:flex;align-items:center;justify-content:center}
-    .dd-simple:not(.bz-table) .dd-piles{width:100%;gap:12px}
-    .dd-simple:not(.bz-table) .dd-pile{flex:0 0 auto;--dd-pad:4px;padding:var(--dd-pad)}
+       --dd-hchrome / --dd-vchrome はカード以外に使う余白の合計（左右の列こみの実測値）。
+       ↓の @supports (container-type) が効く端末では、この実測値ではなく
+         場の枠じたいの大きさ(cqw/cqh)から出すので、はしたなく余ることがない。 */
+    .dd-simple:not(.bz-table){--dd-hchrome:190px;--dd-vchrome:74px}
+    body.bbg-demo-on .dd-simple:not(.bz-table){--dd-vchrome:110px}
+    .dd-simple:not(.bz-table) > .dd-pilesbox{grid-column:2;grid-row:1;height:100%;min-height:0;min-width:0;padding:4px;display:flex;align-items:center;justify-content:center}
+    .dd-simple:not(.bz-table) .dd-piles{width:100%;gap:6px}
+    .dd-simple:not(.bz-table) .dd-pile{flex:0 0 auto;--dd-pad:3px;padding:var(--dd-pad)}
     .dd-simple:not(.bz-table) .dd-card{
       width:min(calc((100vw - var(--dd-hchrome)) / 3), calc((100vh - var(--dd-vchrome)) * .75));
       height:auto;
@@ -1619,12 +1686,21 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .dd-simple:not(.bz-table) .dd-card{
       width:min(calc((100vw - var(--dd-hchrome)) / 3), calc((100dvh - var(--dd-vchrome)) * .75));
     }
+    /* コンテナクエリ単位が使えるなら、場の枠の実寸から出す（余白のとりこぼしなし）。
+       --dd-piles-chrome = カードのあいだの gap 2つ + .dd-pile の padding 6つ。 */
+    @supports (container-type:size){
+      .dd-simple:not(.bz-table) > .dd-pilesbox{container-type:size}
+      .dd-simple:not(.bz-table){--dd-piles-chrome:30px}
+      .dd-simple:not(.bz-table) .dd-card{
+        width:min(calc((100cqw - var(--dd-piles-chrome)) / 3), calc(100cqh * .75));
+      }
+    }
     .dd-simple:not(.bz-table) .dd-card-emoji{font-size:clamp(34px,11vh,56px)}
     .dd-simple:not(.bz-table) .dd-card-name{font-size:16px}
     .dd-simple:not(.bz-table) .dd-card-color{font-size:12px}
 
-    /* ワニのタップ順: カードの下はしに重ねる（croc中は のこり枚数が消えるぶん1行目はそのまま） */
-    .dd-simple:not(.bz-table) > .dd-order{grid-column:1/-1;grid-row:2;align-self:end;justify-self:center;z-index:2;width:auto;max-width:100%;padding-bottom:2px}
+    /* ワニのタップ順: 場の下はしに重ねる（カードの位置は動かさない） */
+    .dd-simple:not(.bz-table) > .dd-order{grid-column:2;grid-row:1;align-self:end;justify-self:center;z-index:2;width:auto;max-width:100%;padding-bottom:2px}
   }
 }
 
