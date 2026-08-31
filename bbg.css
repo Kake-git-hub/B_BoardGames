@@ -61,6 +61,10 @@ body{
 .bbg-head-btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 /* ロビー・GM画面のヘッダーは細く（縦の場所を取らない） */
 .header--slim{padding:2px 4px 6px}
+/* ドデリドのプレイ画面のヘッダー＝タイトルバー（のこり枚数 / ⇄ / 効果音）。
+   たて画面は画面内に のこり枚数があるので出さない（縦の場所を取らないため）。
+   スマホ横置きのときだけ下の media query で出す。 */
+.header--dd{display:none}
 .header--slim h1{font-size:15px}
 .header h1{
   margin:0;font-size:17px;font-weight:900;letter-spacing:.3px;
@@ -477,6 +481,7 @@ body.ll-table-screen .app{max-width:980px}
 .ll-table-center--ll{flex-direction:column;flex-wrap:nowrap;align-items:center;gap:10px}
 .ll-table-center--ll .ll-table-center-top{display:flex;gap:24px;align-items:flex-start;justify-content:center;margin-top:-8px;flex-wrap:wrap}
 .ll-table-center--ll .ll-table-center-bottom{width:100%;display:flex;justify-content:center}
+.ll-table-center--hn{margin-top:-18px}
 
 .ll-table-facedown{position:absolute;left:14px;top:14px;display:flex;flex-direction:column;gap:8px;align-items:center}
 .ll-table-facedown-card{width:72px;aspect-ratio:3/4;border-radius:10px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
@@ -583,6 +588,18 @@ body.ll-table-screen .app{max-width:980px}
   user-select:none;
   touch-action:manipulation;
 }
+
+/* 「まえの人が つかったカード」。手札ペインのあいたところに小さく出す。 */
+.ll-lastcard{display:flex;flex-direction:column;gap:4px;min-width:0;border-top:1px solid var(--line);padding-top:6px;margin-top:2px}
+.ll-lastcard-head{font-size:11px;font-weight:800;letter-spacing:.04em}
+.ll-lastcard-row{display:flex;gap:8px;align-items:center;min-width:0}
+.ll-lastcard-img{flex:0 0 auto;width:46px;aspect-ratio:3/4;border-radius:6px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
+.ll-lastcard-txt{min-width:0;display:flex;flex-direction:column;gap:2px}
+.ll-lastcard-name{font-weight:900;font-size:13px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ll-lastcard-by{font-size:11px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* まだプレイが無いときの空枠。大きさは同じなので、最初の1枚で手札の位置が動かない。 */
+.ll-lastcard--empty{opacity:.45}
+.ll-lastcard--empty .ll-lastcard-img{border-style:dashed;background:transparent}
 
 /* Modal spacing tweaks */
 .ll-overlay-panel .stack{gap:14px}
@@ -966,20 +983,8 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 /* 使用できない理由の注記 */
 .ll-use-note{font-size:13px;line-height:1.4;font-weight:800;color:var(--warn);text-align:center}
 
-/* プレイヤー画面の「直近のプレイ」バナー。
-   まだプレイが無いときも同じ高さの空枠を出すので、最初のプレイで手札が下がらない。 */
-.ll-lastplay{
-  display:flex;gap:8px;align-items:center;justify-content:center;
-  border:1px solid var(--line);border-radius:12px;background:var(--card2);
-  padding:8px 10px;min-height:54px;
-}
-.ll-lastplay--empty{opacity:.5;border-style:dashed}
-.ll-lastplay-icon{width:24px;height:24px;object-fit:contain;border-radius:6px;flex:0 0 auto;background:#0f1520}
-/* 文は最大2行。長い文でも枠の高さが変わらないので、下の手札の位置が動かない。 */
-.ll-lastplay-text{
-  min-width:0;font-size:13px;line-height:1.4;font-weight:800;text-align:left;
-  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;
-}
+/* （プレイヤー画面の「直近のプレイ」バナー .ll-lastplay は廃止。
+    かわりに .ll-lastcard「まえの人が つかったカード」を手札ペインに出している） */
 
 /* テーブル画面の直近プレイ(アイコン付き)。
    空のときも同じ高さの枠を出す（最初のプレイで山札・墓地が上へ寄らないように）。 */
@@ -1388,6 +1393,28 @@ body.bbg-demo-on .app{padding-bottom:104px}
   animation:ddLinePulse 1.1s ease-in-out infinite alternate;
 }
 .dd-seat--turn .dd-seat-no{background:var(--accent);color:#0b0f1a}
+/* ワニ中の1行は2段組み（1段目=順位+名前 / 2段目=ビリの印+秒数）。
+   列のはばは変えずに秒数を出せるので、カードの位置はワニ中も動かない。 */
+.dd-seats--croc .dd-seat{
+  display:grid;grid-template-columns:auto minmax(0,1fr);
+  grid-template-areas:"no name" "tag ms";
+  gap:0 3px;align-items:center;border-radius:10px;
+}
+.dd-seats--croc .dd-seat-no{grid-area:no}
+.dd-seats--croc .dd-seat-name{grid-area:name}
+.dd-seats--croc .dd-seat-tag{grid-area:tag}
+.dd-seats--croc .dd-seat-ms{grid-area:ms;justify-self:end}
+.dd-seat-ms{font-size:10px;font-weight:800;color:var(--muted);font-variant-numeric:tabular-nums}
+.dd-seat-tag{font-size:10px;font-weight:900;color:#fff;background:var(--danger,#ff5a6a);border-radius:999px;padding:0 5px;white-space:nowrap;justify-self:start}
+.dd-seat--wait{opacity:.5}
+/* ビリ（場のカードをひきとる人）。ならびの いちばん下 ＋ 赤 ＋「🐊ビリ」で はっきり出す */
+.dd-seat--loser{
+  border-color:var(--danger,#ff5a6a);color:var(--danger,#ff5a6a);
+  background:rgba(255,90,106,.16);
+  animation:ddLineBlink .45s ease-in-out infinite alternate;
+}
+.dd-seat--loser .dd-seat-no{background:var(--danger,#ff5a6a);color:#fff}
+.dd-seat--loser .dd-seat-ms{color:var(--danger,#ff5a6a)}
 
 /* 3つの場
    山の大きさを決めるのは つねに いちばん上の1まいだけ。
@@ -1626,6 +1653,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .app:has(.dd-simple:not(.bz-table)){height:100dvh}
     /* デモ中はコンパクトなデモバーのぶんだけ下をあける（上のpaddingショートハンドより後勝ち） */
     body.bbg-demo-on .app:has(.dd-simple:not(.bz-table)){padding-bottom:42px}
+    /* スマホ横置きだけ タイトルバーを出す（のこり枚数・⇄・効果音の置き場） */
+    .header--dd{display:block}
     .app:has(.dd-simple:not(.bz-table)) .header{padding:0 4px 4px}
     .app:has(.dd-simple:not(.bz-table)) .footer{display:none}
     .app:has(.dd-simple:not(.bz-table)) #view{flex:1 1 auto;min-height:0;padding:4px 6px;overflow:hidden}
@@ -1714,8 +1743,14 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .dd-simple:not(.bz-table) .dd-card-name{font-size:16px}
     .dd-simple:not(.bz-table) .dd-card-color{font-size:12px}
 
-    /* ワニのタップ順: 場の下はしに重ねる（カードの位置は動かさない） */
+    /* ワニのタップ順は 左の順番リスト（.dd-seats--croc）で出すので、重ねるチップは出さない。
+       行そのものは「うちきる」ボタン（端末が動かない人がいるとき用）の置き場として残す。 */
     .dd-simple:not(.bz-table) > .dd-order{grid-column:2;grid-row:1;align-self:end;justify-self:center;z-index:2;width:auto;max-width:100%;padding-bottom:2px}
+    .dd-simple:not(.bz-table) > .dd-order > .dd-ord{display:none}
+    /* ワニ中は 秒数ぶん名前がせまくなるので、リストの幅を少しひろげる */
+    .dd-simple:not(.bz-table) .dd-seats--croc{font-size:10px}
+    .dd-simple:not(.bz-table) .dd-seat-ms{font-size:9px}
+    .dd-simple:not(.bz-table) .dd-seat-tag{font-size:8px;padding:1px 3px}
   }
 }
 
@@ -1906,9 +1941,11 @@ body.bbg-demo-on .app{padding-bottom:104px}
 /* ふつうの表示（スマホ縦・タブレット）では、ペインはただの縦積み（.stack相当）。 */
 .bbg-panes{display:flex;flex-direction:column;gap:12px;min-width:0}
 .bbg-pane{display:flex;flex-direction:column;gap:12px;min-width:0}
-.bbg-pane-tabs{display:none}
+.bbg-pane-dots{display:none}
 /* .bbg-lonly = スマホ横のペイン表示のときだけ見せる要素（ペインをまたぐステータスの写しなど） */
 .bbg-lonly{display:none}
+/* .bbg-ponly = スマホ横のペイン表示のときだけ隠す要素（縦・タブレットでは今までどおり見せる） */
+.bbg-ponly{display:flex;flex-direction:column;gap:12px;min-width:0}
 
 /* 左右分割: スマホ横だけ「カード=左いっぱい / 文字の説明=右」に分ける。
    ふつうの表示では ただの縦積み（DOM順のまま）。 */
@@ -1966,36 +2003,41 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .app:has(.bbg-panes) .bbg-pane{
       position:absolute;inset:0;overflow:hidden;
       display:flex;flex-direction:column;gap:8px;
-      padding:2px 46px 2px 2px;
+      padding:2px 20px 2px 2px;
       transition:transform .28s ease;
-      transform:translateY(calc((var(--bbg-pane-n,0) - var(--bbg-pane-i,0)) * 100%));
+      transform:translateY(calc((var(--bbg-pane-n,0) - var(--bbg-pane-i,0)) * 100% + var(--bbg-pane-drag, 0px)));
     }
+    /* 指でつまんで動かしている間は、追従をなめらかにするため transition を切る */
+    .app:has(.bbg-panes) .bbg-panes--drag .bbg-pane{transition:none}
     .app:has(.bbg-panes) .bbg-pane .bbg-scroll{flex:1 1 auto;min-height:0;overflow-y:auto}
     /* あまったスペースは主要ブロックへ: .bbg-grow を付けた要素がペインの残り高さを使う */
     .app:has(.bbg-panes) .bbg-pane .bbg-grow{flex:1 1 auto;min-height:0}
 
-    /* ペイン切り替え = 右端のたてタブ。画面の高さいっぱいを3等分した大きなあたり判定で、
-       どのペインへも1タップで飛べる（スワイプはおまけ）。 */
-    .app:has(.bbg-panes) .bbg-pane-tabs{
+    /* ペイン切り替えは上下のスライド。右端は「いま何番目か」の めじるし だけ置く。
+       丸はボタンのままなので、スワイプが使えないときはタップでも移れる。 */
+    .app:has(.bbg-panes) .bbg-pane-dots{
       display:flex;position:absolute;right:0;top:0;bottom:0;
-      flex-direction:column;gap:6px;z-index:5;width:40px;
+      flex-direction:column;align-items:center;justify-content:center;gap:8px;
+      z-index:5;width:18px;pointer-events:none;
     }
-    .app:has(.bbg-panes) .bbg-pane-tab{
-      flex:1 1 0;min-height:0;width:40px;padding:8px 2px;
-      display:flex;align-items:center;justify-content:center;
-      border:1px solid var(--line2);border-radius:12px;background:var(--card2);
-      color:var(--muted);font-weight:900;
+    .app:has(.bbg-panes) .bbg-pane-dot{
+      pointer-events:auto;
+      flex:0 0 auto;width:8px;height:8px;padding:0;
+      border:0;border-radius:999px;background:var(--line2);opacity:.7;
     }
-    .app:has(.bbg-panes) .bbg-pane-tab > span{
+    .app:has(.bbg-panes) .bbg-pane-dot.on{
+      background:var(--accent);opacity:1;height:20px;border-radius:999px;
+    }
+    /* いま見ているペインの名まえ。たて書きの小さな文字で、場所をほとんど取らない。 */
+    .app:has(.bbg-panes) .bbg-pane-hint{
+      position:absolute;right:0;top:6px;
       writing-mode:vertical-rl;text-orientation:upright;
-      font-size:13px;line-height:1.15;letter-spacing:1px;
-      max-height:100%;overflow:hidden;
-    }
-    .app:has(.bbg-panes) .bbg-pane-tab.on{
-      background:var(--accent);border-color:transparent;color:#04121f;
+      font-size:10px;line-height:1;letter-spacing:1px;
+      color:var(--muted);opacity:.6;max-height:44%;overflow:hidden;
     }
 
     .app:has(.bbg-panes) .bbg-lonly{display:flex;flex-direction:column;gap:8px}
+    .app:has(.bbg-panes) .bbg-ponly{display:none}
 
     /* 左右分割: カードは左でめいっぱい・文字の説明は右のあいたところ */
     .app:has(.bbg-panes) .bbg-split{
@@ -2084,4 +2126,160 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .ll-player .bbg-split-side .hn-card-info{text-align:left}
   /* 犯人は踊る: 扇はJSがpx指定するので、つぶされないようにする */
   .ll-player .hn-hand--fan{flex:0 0 auto}
+}
+
+/* ==================== 円卓ビュー: スマホ横の小さい版 ==================== */
+/* スマホ横では、円卓の中身（山・墓地・席・バナー）がそのままの大きさだと
+   高さ300pxほどの枠に収まらず重なってしまう。ここで dvh を土台に一段小さくする。
+   判定はメディアクエリだけで行う（JSのクラスに頼らないので、画面を回した直後もズレない）。
+   席の位置(はんけい)だけは inline style なので JS 側でも小さくしている。 */
+@media (orientation: landscape) and (max-height: 520px){
+  .ll-table{border-radius:10px}
+  .ll-table .ll-table-inner{padding:4px}
+
+  /* 山札・墓地の重ね（3:4のまま小さく） */
+  .ll-table .ll-table-pile-stack,
+  .ll-table .ll-table-grave-stack,
+  .ll-table .ll-table-pile-card,
+  .ll-table .ll-table-grave-stack-card{
+    width:clamp(30px,11dvh,48px);height:clamp(40px,14.6dvh,64px);border-radius:6px;
+  }
+  .ll-table .ll-table-center--ll{gap:4px}
+  .ll-table .ll-table-center--ll .ll-table-center-top{gap:12px;margin-top:0}
+  .ll-table .ll-table-center--hn{margin-top:0}
+  .ll-table .ll-table-pile{gap:2px}
+  .ll-table .ll-table-pile .muted{font-size:9px;line-height:1.1}
+  .ll-table .ll-table-pile-count{font-size:11px;line-height:1.1}
+
+  /* 直近の捨て札（犯人は踊る） */
+  .ll-table .hn-grave-recent{gap:3px;margin-top:3px;min-height:0}
+  .ll-table .hn-grave-mini{width:clamp(16px,5.6dvh,26px);border-radius:4px}
+
+  /* 伏せ札（ラブレター） */
+  .ll-table .ll-table-facedown{left:4px;top:4px;gap:2px;font-size:9px}
+  .ll-table .ll-table-facedown .muted{font-size:9px;line-height:1.1}
+  .ll-table .ll-table-facedown-card{width:clamp(20px,7dvh,32px);border-radius:5px}
+
+  /* 直近のプレイのバナー（1行に収める） */
+  .ll-table .ll-table-lastplay-banner{
+    min-height:0;padding:3px 8px;border-radius:8px;gap:5px;
+    font-size:clamp(9px,2.9dvh,13px);line-height:1.25;max-width:min(94%,420px);
+  }
+  .ll-table .ll-table-lastplay{max-width:none}
+  .ll-table .ll-table-lastplay-icon{width:clamp(12px,4dvh,18px);height:clamp(12px,4dvh,18px);border-radius:4px}
+
+  /* 席（名前のふだ）。上下にはみ出さないよう、行の高さも文字も小さく。 */
+  .ll-table .ll-seat{max-width:116px}
+  .ll-table .ll-seat-card{padding:2px 8px;gap:0;max-width:116px;font-size:11px;line-height:1.25}
+  .ll-table .ll-seat-name{max-width:100px;font-size:11px}
+  .ll-table .ll-seat-sub{font-size:9px}
+  .ll-table .hn-sim-seat-card{padding:2px 6px;border-radius:9px}
+  .ll-table .hn-sim-handcount{font-size:9px;line-height:1.15}
+  .ll-table .hn-sim-handbacks{gap:2px;margin-top:2px;max-width:100px}
+  .ll-table .hn-sim-handback{width:clamp(9px,3.4dvh,15px);height:clamp(12px,4.5dvh,20px);border-radius:3px}
+  .ll-table .badge,
+  .ll-table .hn-badge-win{font-size:9px;padding:0 4px}
+
+  /* 効果の矢印につく絵 */
+  .ll-table .ll-table-arrow-icon{width:clamp(22px,8dvh,38px);height:clamp(22px,8dvh,38px)}
+}
+
+/* 自分の席は ふちどりで すぐ見つかるようにする（手前=下 に置いてある） */
+.ll-seat--self .ll-seat-card{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ==================== スマホ横: モーダルはスクロールさせない ==================== */
+/* 効果（対象えらび・推測・公開）のモーダルは、そのままだと縦に長くて画面に入らない。
+   横に広く使って（対象ボタンは横長の2列）、絵は高さ基準で小さくし、1画面に収める。 */
+@media (orientation: landscape) and (max-height: 520px){
+  .ll-overlay{padding:8px;padding-top:calc(8px + env(safe-area-inset-top, 0px));padding-bottom:calc(8px + env(safe-area-inset-bottom, 0px))}
+  .ll-overlay-panel{
+    max-width:min(760px,96vw);padding:8px 12px;border-radius:10px;
+    max-height:100%;
+    overflow:auto;
+    display:flex;flex-direction:column;gap:4px;
+  }
+  .ll-overlay-panel .stack{gap:6px}
+  .ll-overlay-panel .big{font-size:clamp(14px,4.6dvh,20px);line-height:1.2}
+  .ll-overlay-panel .muted{font-size:clamp(10px,3dvh,13px);line-height:1.25}
+  .ll-modal-lead{margin:0}
+  .ll-modal-name{font-size:clamp(11px,3.4dvh,15px);margin:0}
+
+  /* 絵は「高さ」から決める（幅から決めると縦にあふれる） */
+  .ll-action-card{height:clamp(40px,15dvh,86px);width:auto;aspect-ratio:3/4;margin:0 auto}
+  .ll-reveal-card{height:clamp(52px,22dvh,120px);width:auto;aspect-ratio:3/4;margin:0 auto}
+  .ll-compare-card{height:clamp(52px,20dvh,110px);width:auto;max-width:none;aspect-ratio:3/4;margin:2px auto 0}
+  .ll-compare-row{gap:14px;margin-top:2px;justify-content:center}
+  .ll-showdown-card{height:clamp(46px,17dvh,96px);width:auto;aspect-ratio:3/4}
+  .ll-showdown-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+  .ll-showdown-item{gap:2px}
+
+  /* 対象えらびは「横長のボタンを2列」。1列ぶんが広いので名前が読みやすい。 */
+  .ll-target-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  .ll-target-list button{width:100%;padding:7px 10px;font-size:clamp(11px,3.4dvh,15px);min-height:0}
+  /* 推測（2〜8）は4列に */
+  .ll-guess-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+  .ll-guess-grid button{padding:7px 6px;font-size:clamp(11px,3.4dvh,15px);min-height:0}
+
+  .ll-modal-actions{margin-top:4px;gap:10px}
+  .ll-modal-actions button{min-width:96px;padding:7px 12px;font-size:clamp(11px,3.4dvh,15px)}
+  .ll-stamp-row{margin:2px 0}
+  .ll-overlay-panel .form-error:empty{display:none}
+}
+
+/* ==================== スマホ横: 手札ペインの「まえの人のカード」 ==================== */
+@media (orientation: landscape) and (max-height: 520px){
+  .ll-player .bbg-split-side{justify-content:center;gap:4px}
+  .ll-player .bbg-split-side .ll-lastcard{padding-top:5px;margin-top:0;gap:2px}
+  .ll-player .bbg-split-side .ll-lastcard-img{width:clamp(26px,11dvh,52px)}
+  .ll-player .bbg-split-side .ll-lastcard-head{font-size:clamp(9px,2.6dvh,12px)}
+  .ll-player .bbg-split-side .ll-lastcard-name{font-size:clamp(11px,3.2dvh,15px)}
+  .ll-player .bbg-split-side .ll-lastcard-by{font-size:clamp(9px,2.6dvh,12px)}
+  /* テーブルペインの見出し（ステータス）は うすく低く。円卓に高さをゆずる。 */
+  .ll-player .bbg-pane--field .ll-status-card{padding:4px 10px;max-width:none}
+  .ll-player .bbg-pane--field .ll-topline .ll-status{font-size:clamp(10px,3dvh,13px)}
+}
+
+/* ==================== 画面の向きの案内（ゲームごとの おすすめの向き） ==================== */
+/* screen.orientation.lock() はホーム画面から起動したPWA/全画面でしか効かない端末が多い。
+   効かないときのために、ちがう向きのあいだだけ この案内を出す。
+   「このまま つづける」でその日のあいだは出なくなる（行き止まりにしない）。 */
+.bbg-orient-gate{
+  display:none;position:fixed;inset:0;z-index:12000;
+  align-items:center;justify-content:center;background:var(--bg);
+  padding:24px;
+  padding-top:calc(24px + env(safe-area-inset-top, 0px));
+  padding-bottom:calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.bbg-orient-box{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;max-width:320px}
+.bbg-orient-icon{font-size:44px;line-height:1;animation:bbgOrientTurn 2.4s ease-in-out infinite}
+.bbg-orient-msg{font-size:20px;font-weight:900;line-height:1.3}
+.bbg-orient-note{font-size:12px;line-height:1.5}
+.bbg-orient-msg--land,.bbg-orient-msg--port{display:none}
+body.bbg-orient-land .bbg-orient-msg--land{display:block}
+body.bbg-orient-port .bbg-orient-msg--port{display:block}
+@keyframes bbgOrientTurn{0%,45%{transform:rotate(0deg)}55%,100%{transform:rotate(90deg)}}
+@media (prefers-reduced-motion:reduce){.bbg-orient-icon{animation:none}}
+/* たて向きのスマホなのに「よこ向き」のゲーム */
+@media (orientation:portrait) and (max-width:560px){
+  body.bbg-orient-land:not(.bbg-orient-off) .bbg-orient-gate{display:flex}
+}
+/* よこ向きのスマホなのに「たて向き」のゲーム */
+@media (orientation:landscape) and (max-height:520px){
+  body.bbg-orient-port:not(.bbg-orient-off) .bbg-orient-gate{display:flex}
+}
+
+/* ==================== スマホ横: 犯人は踊る の「同時えらび」 ==================== */
+/* うわさ・情報操作・取引のカードえらびは、たてに長くてペインからはみ出していた。
+   カードは高さ基準（dvh）で小さくし、1画面に収める。幅を先に決めるのは
+   height:100% + aspect-ratio が Safari/Firefox でくずれるため。 */
+@media (orientation: landscape) and (max-height: 520px){
+  .ll-player .bbg-pane--hand > .stack{min-height:0;gap:6px !important;justify-content:center}
+  .ll-player .hn-rumor-row{gap:6px;flex-wrap:nowrap;overflow-x:auto;justify-content:center}
+  .ll-player .hn-rumor-card{width:clamp(52px,26dvh,140px);flex:0 0 auto}
+  .ll-player .hn-progress{gap:2px}
+  .ll-player .hn-progress-count{font-size:clamp(11px,3.2dvh,15px)}
+  .ll-player .hn-progress-wait{font-size:clamp(10px,2.8dvh,13px);line-height:1.25}
+  .ll-player .bbg-pane--hand .muted.center{font-size:clamp(10px,3dvh,14px);line-height:1.3}
+  /* 開始前の案内バナーは1〜2行に。ここが厚いと手札のカードがはみ出す。 */
+  .ll-player .hn-banner{flex:0 0 auto;padding:5px 10px;font-size:clamp(10px,3dvh,13px);line-height:1.3}
 }

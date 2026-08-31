@@ -358,10 +358,41 @@
       return ctx;
     }
 
+    // iPhone の「消音スイッチ（サイレントモード）」対策。
+    // WebAudio だけで鳴らす音は、既定（ambient 相当）だと消音スイッチONで**完全に無音**になる。
+    // Safari 16.4+ の navigator.audioSession を 'playback' にすると、動画や音楽と同じ扱いになり
+    // 消音スイッチを無視して鳴る。未対応ブラウザでは単に無視される。
+    function setPlaybackSession() {
+      try {
+        if (navigator && navigator.audioSession && navigator.audioSession.type !== 'playback') {
+          navigator.audioSession.type = 'playback';
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
     function resume() {
       try {
+        setPlaybackSession();
         var c = getCtx();
         if (c && c.state === 'suspended' && c.resume) c.resume();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // iOS では「ユーザー操作の中で 1回でも音を出す」までロックが解けない実装がある。
+    // 無音（1サンプル）のバッファを鳴らして確実に解除する。
+    function primeSilent() {
+      try {
+        var c = getCtx();
+        if (!c || !c.createBuffer) return;
+        var buf = c.createBuffer(1, 1, c.sampleRate || 22050);
+        var src = c.createBufferSource();
+        src.buffer = buf;
+        src.connect(c.destination);
+        if (src.start) src.start(0);
       } catch (e) {
         // ignore
       }
@@ -371,6 +402,7 @@
       if (unlocked) return;
       unlocked = true;
       resume();
+      primeSilent();
     }
 
     try {
@@ -384,6 +416,16 @@
       } catch (e2) {
         // ignore
       }
+    }
+
+    // スリープ復帰・タブ切りかえのあとは AudioContext が suspended のままになることがある。
+    // 画面がもどったら鳴らせる状態に戻しておく（ゲーム中に無音になるのを防ぐ）。
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible' && unlocked) resume();
+      });
+    } catch (eV) {
+      // ignore
     }
 
     // 単音。delayMs で並べるとメロディになる。
@@ -437,9 +479,9 @@
         tone(880, 90, 'sine', 0.12, 90);
         vibe([80, 40, 80]);
       },
-      // カード選択などの軽いタップ音
+      // カード選択などの軽いタップ音（スマホのスピーカーでも聞こえる程度には出す）
       tap: function () {
-        tone(440, 40, 'sine', 0.06, 0);
+        tone(523, 55, 'sine', 0.1, 0);
       },
       // カード使用の確定
       play: function () {
@@ -6605,6 +6647,53 @@
       pilesHtml = '';
     }
 
+    // 「前の人が つかったカード」。すてふだ・その他ペインを無くしたので、手札ペインに出す。
+    var lastPlayMiniHtml = '';
+    try {
+      var mlp = st && st.lastPlay ? st.lastPlay : null;
+      var mlpPid = mlp && mlp.playerId ? String(mlp.playerId || '') : '';
+      var mlpCard = mlp && mlp.cardId ? String(mlp.cardId || '') : '';
+      if (mlpPid && mlpCard) {
+        var mlpDef = hnCardDef(mlpCard) || {};
+        var mlpTo = mlp && mlp.to ? String(mlp.to || '') : '';
+        var mlpSelf = String(mlpPid) === String(playerId || '');
+        lastPlayMiniHtml =
+          '<div class="ll-lastcard">' +
+          '<div class="ll-lastcard-head muted">' +
+          escapeHtml(mlpSelf ? 'さいごに 出したカード' : 'まえの人が 出したカード') +
+          '</div>' +
+          '<div class="ll-lastcard-row">' +
+          '<div class="ll-lastcard-img">' +
+          hnCardImgHtml(mlpCard) +
+          '</div>' +
+          '<div class="ll-lastcard-txt">' +
+          '<div class="ll-lastcard-name">' +
+          escapeHtml(String(mlpDef.name || '-')) +
+          '</div>' +
+          '<div class="ll-lastcard-by muted">' +
+          escapeHtml(hnPlayerName(room, mlpPid) + (mlpTo ? ' → ' + hnPlayerName(room, mlpTo) : '')) +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+      } else if (st && st.started) {
+        // まだ出されていないときも同じ大きさの空枠を出す（最初の1枚で手札の位置が動かない）。
+        lastPlayMiniHtml =
+          '<div class="ll-lastcard ll-lastcard--empty" aria-hidden="true">' +
+          '<div class="ll-lastcard-head muted">まえの人が 出したカード</div>' +
+          '<div class="ll-lastcard-row">' +
+          '<div class="ll-lastcard-img"></div>' +
+          '<div class="ll-lastcard-txt">' +
+          '<div class="ll-lastcard-name muted">まだ ありません</div>' +
+          '<div class="ll-lastcard-by">&nbsp;</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
+      }
+    } catch (eMLP) {
+      lastPlayMiniHtml = '';
+    }
+
     var gmTopHtml = '';
 
     // Action modal (target/index selection like LoveLetter)
@@ -7112,8 +7201,8 @@
           // 高さから幅を決める（幅を先に決めないと Safari/Firefox で重なるため、ここでpx確定させる）。
           cardH = Math.max(120, Math.floor(vh0 - 78));
           cardW = Math.round((cardH * 3) / 4);
-          // 右の説明欄(.bbg-split-side 30%)とたてタブ(40px)を除いた、左のカード欄のはば。
-          var availW0 = Math.max(160, Math.floor((vw0 - 64) * 0.63));
+          // 右の説明欄(.bbg-split-side 30%)とめじるしの丸(18px)を除いた、左のカード欄のはば。
+          var availW0 = Math.max(160, Math.floor((vw0 - 42) * 0.63));
           var needW0 = cardW * (1 + overlap0 * (nCards - 1));
           if (needW0 > availW0) {
             cardW = Math.max(64, Math.floor(availW0 / (1 + overlap0 * (nCards - 1))));
@@ -7229,6 +7318,7 @@
           '<div class="bbg-split-side">' +
           infoHtml0 +
           useHtml0 +
+          lastPlayMiniHtml +
           '</div>' +
           '</div>';
       }
@@ -7366,21 +7456,49 @@
       '</div>' +
       '</div>';
 
+    // 自分の番（または同時えらびで自分が選ぶ番）は「てふだ」、
+    // それ以外は「テーブル」へ自動でスライドする。動くのは合図が変わった瞬間だけなので、
+    // そのあとプレイヤーが手で変えた選択はそのまま残る。
+    try {
+      var wantHand0 = !!isMyTurn;
+      if (pending && pending.type === 'deal') {
+        wantHand0 = !!(
+          playerId &&
+          (String(pending.actorId || '') === String(playerId) || String(pending.targetPid || '') === String(playerId))
+        );
+      } else if (pending && pending.type) {
+        wantHand0 = !!(myHand && myHand.length); // うわさ・情報操作は手札のある人みんなが選ぶ
+      }
+      var hnPaneTok =
+        String(phase) +
+        '|' +
+        String((st && st.turn && st.turn.index) || 0) +
+        '|' +
+        String(turnPid || '') +
+        '|' +
+        String((pending && pending.type) || '') +
+        ':' +
+        String((pending && pending.createdAt) || '');
+      bbgPaneAutoWant('hn_player', wantHand0 ? 1 : 0, hnPaneTok);
+    } catch (ePane1) {
+      // ignore
+    }
+
     render(
       viewEl,
-      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場（山・すてふだ・けっか）へ。
+      // スマホ横(基本形): 上下のスライドで「テーブル」と「てふだ」を行き来する。
       // 確認・秘密ひらき・次へ などの操作ブロックは手札ペインに置き、操作を見のがさないようにする。
       '<div class="stack ll-player">' +
         bbgPanesHtml('hn_player', 1, [
           {
-            // 上ペイン: テーブル端末と同じ円卓ビュー（下スワイプで見る）。
+            // 上ペイン: テーブル端末と同じ円卓ビュー（自分の席が手前に来る）。
             cls: 'bbg-pane--field',
             label: 'テーブル',
             html:
               hnToplineHtml +
               // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
               '<div class="bbg-lonly bbg-lonly--table">' +
-              (hnTableVizHtml(room, ui.tviz || (ui.tviz = {})) || '') +
+              (hnTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId }) || '') +
               '</div>' +
               (resultHtml || '')
           },
@@ -7392,19 +7510,18 @@
               hnToplineHtml +
               '</div>' +
               (nextHtml || '') +
-              (privateHtml || '') +
-              (confirmHtml || '') +
               (contentHtml || '') +
               // 開始バナーは手札より下。ゲームが始まってバナーが消えても手札の位置が動かない。
-              (startBannerHtml || '')
-          },
-          {
-            // 下ペイン: そのほかの情報（すてふだ一覧など）。
-            cls: 'bbg-pane--more',
-            label: 'すてふだ・その他',
-            html: (pilesHtml || '')
+              (startBannerHtml || '') +
+              // すてふだ一覧は縦画面・タブレットだけ（スマホ横はテーブルペインで見る）。
+              '<div class="bbg-ponly">' +
+              (pilesHtml || '') +
+              '</div>'
           }
         ]) +
+        // モーダルはペインの外（ペインの transform に巻きこまれると画面いっぱいに出せない）。
+        (privateHtml || '') +
+        (confirmHtml || '') +
         (modalHtml || '') +
       '</div>'
     );
@@ -13210,21 +13327,77 @@
   function ddSeatsHtml(room, meMid) {
     var order = Array.isArray(room && room.order) ? room.order : [];
     if (!order.length) return '';
+    var phase = String((room && room.phase) || '');
     var actorMid = ddActorMid(room);
     var me = String(meMid || '');
+    var isCroc = phase === 'croc' || phase === 'crocResult';
+
+    // ふだんは 席の順のまま。ワニ中だけ「はやい順」に並べかえて、いちばん下＝ビリにする
+    //（ならびが順位そのものになるので、だれがビリかが ひと目でわかる）。
+    var rows = [];
+    var loserMid = '';
+    if (phase === 'croc') {
+      var taps = ddNormTaps(room && room.croc && room.croc.taps);
+      for (var c = 0; c < order.length; c++) {
+        var cm = String(order[c] || '');
+        if (!cm) continue;
+        var has = taps[cm] !== undefined;
+        rows.push({ mid: cm, ms: has ? taps[cm] : -1, tapped: has });
+      }
+      rows.sort(function (a, b) {
+        if (a.tapped !== b.tapped) return a.tapped ? -1 : 1;
+        return (a.ms || 0) - (b.ms || 0);
+      });
+    } else if (phase === 'crocResult') {
+      var cr = (room && room.crocResult) || {};
+      var rk = Array.isArray(cr.ranking) ? cr.ranking : [];
+      for (var r = 0; r < rk.length; r++) {
+        var rr = rk[r] || {};
+        rows.push({ mid: String(rr.mid || ''), ms: parseIntSafe(rr.ms, -1), tapped: !!rr.tapped });
+      }
+      loserMid = String(cr.loserMid || '');
+      if (!rows.length) {
+        for (var f = 0; f < order.length; f++) rows.push({ mid: String(order[f] || ''), ms: -1, tapped: false });
+      }
+    } else {
+      for (var i0 = 0; i0 < order.length; i0++) rows.push({ mid: String(order[i0] || ''), ms: -1, tapped: false });
+    }
+
     var out = '';
-    for (var i = 0; i < order.length; i++) {
-      var mid = String(order[i] || '');
+    var rank = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i] || {};
+      var mid = String(row.mid || '');
       if (!mid) continue;
-      var isActor = !!(actorMid && mid === actorMid);
+      var isActor = !isCroc && !!(actorMid && mid === actorMid);
       var isMe = !!(me && mid === me);
+      var isLoser = !!(loserMid && mid === loserMid);
+      // ワニ中: たたいた人だけ順位番号。まだの人は「…」。ふだんは席の番号。
+      var noText = String(i + 1);
+      if (isCroc) {
+        if (row.tapped) {
+          rank++;
+          noText = String(rank);
+        } else {
+          noText = '…';
+        }
+      }
       out +=
-        '<div class="dd-seat' + (isActor ? ' dd-seat--turn' : '') + (isMe ? ' dd-seat--me' : '') + '">' +
-        '<span class="dd-seat-no">' + escapeHtml(String(i + 1)) + '</span>' +
+        '<div class="dd-seat' +
+        (isActor ? ' dd-seat--turn' : '') +
+        (isMe ? ' dd-seat--me' : '') +
+        (isLoser ? ' dd-seat--loser' : '') +
+        (isCroc && !row.tapped ? ' dd-seat--wait' : '') +
+        '">' +
+        '<span class="dd-seat-no">' + escapeHtml(noText) + '</span>' +
         '<span class="dd-seat-name">' + escapeHtml(ddName(room, mid)) + '</span>' +
+        (isCroc
+          ? '<span class="dd-seat-ms">' + (row.tapped ? escapeHtml((Math.max(0, row.ms || 0) / 1000).toFixed(2)) : '') + '</span>'
+          : '') +
+        (isLoser ? '<span class="dd-seat-tag">🐊ビリ</span>' : '') +
         '</div>';
     }
-    return '<div class="dd-seats">' + out + '</div>';
+    return '<div class="dd-seats' + (isCroc ? ' dd-seats--croc' : '') + '">' + out + '</div>';
   }
 
   // ワニのタップ順（croc 中は途中経過をはやい順に、crocResult は確定順。最遅に🐊印）。
@@ -13654,7 +13827,9 @@
     var DD_BEAT_MS = 380;
     // holdArmed: このタップで ながおし（おてつき）が使えるかどうか。
     // 使えない人（＝「めくる！」の番手など）は、長めに押しても ふつうのタップとして受ける。
-    var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false, holdArmed: false };
+    // phase / consumed: 指をおろした時のフェーズを覚えておき、はなす時に変わっていたら操作にしない
+    //（ワニをたたいた指を そのままはなして「さいかい」してしまう、などの誤爆よけ）。
+    var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false, holdArmed: false, phase: '', consumed: false };
 
     // ながおし中はタップエリア自体が左から赤く満ちていく（はなすと消える）。
     // スマホ横置きではカードエリアも赤く満ちる（タップエリア=画面ぜんたいのため）。
@@ -13755,10 +13930,13 @@
     }
 
     // タップの振り分け（フェーズと自分の役割で決まる。関係ない人のタップは何もしない）。
-    function ddHandleTap() {
+    // fromPhase = 指をおろした時のフェーズ。はなす時に変わっていたら、その指はもう
+    // 「そのフェーズの操作」ではないので何もしない（ワニ→ワニのけっか、コール→おてつき等）。
+    function ddHandleTap(fromPhase) {
       if (ui.cancelled || ui.inFlight || !playerId || !lastRoom) return;
       var room = lastRoom;
       var phase = String((room && room.phase) || '');
+      if (fromPhase !== undefined && String(fromPhase || '') !== phase) return;
       var order = Array.isArray(room && room.order) ? room.order : [];
 
       if (phase === 'flip') {
@@ -13828,9 +14006,14 @@
       ptr.t = nowMs();
       ptr.holdFired = false;
       ptr.holdArmed = false;
+      ptr.consumed = false;
 
       var phase = String((lastRoom && lastRoom.phase) || '');
+      ptr.phase = phase;
       if (phase === 'croc') {
+        // たたく指は そこで使いきり。はなす動作をタップとして拾わない
+        //（ワニのけっかに変わった直後の「さいかい」誤爆をふせぐ）。
+        ptr.consumed = true;
         ddSlapNow();
         return;
       }
@@ -13867,16 +14050,19 @@
       if (!ptr.active || ev.pointerId !== ptr.id) return;
       ptr.active = false;
       var wasHold = ptr.holdFired;
+      var wasConsumed = ptr.consumed;
       ptr.holdFired = false;
+      ptr.consumed = false;
       ddCancelHold();
       if (wasHold) return; // ながおし発動ずみ。はなした操作をタップにしない
+      if (wasConsumed) return; // ワニをたたいた指。はなした操作はタップにしない
       var dx = ev.clientX - ptr.x;
       var dy = ev.clientY - ptr.y;
       if (dx * dx + dy * dy > 144) return;
       // タップとながおしの間の長さは無視（誤爆よけ）。ながおしが無い人には効かせない。
       if (ptr.holdArmed && nowMs() - ptr.t > 600) return;
       if (!ddTapAllowed(ev)) return;
-      ddHandleTap();
+      ddHandleTap(ptr.phase);
     }
 
     function onDdPointerCancel(ev) {
@@ -13884,6 +14070,7 @@
       ptr.active = false;
       ptr.holdFired = false;
       ptr.holdArmed = false;
+      ptr.consumed = false;
       ddCancelHold();
     }
 
@@ -14610,6 +14797,13 @@
     }
     if (!headerEl || !titleEl) return;
 
+    // ドデリド用のヘッダー表示クラスは毎回いったん外す（ほかの画面に持ちこさないため）。
+    try {
+      headerEl.classList.remove('header--dd');
+    } catch (eDD0) {
+      // ignore
+    }
+
     var isLobbyAny = scr === 'lobby_host' || scr === 'lobby_assign' || scr === 'lobby_login' || scr === 'lobby_create' || scr === 'lobby_player' || scr === 'lobby_join';
     // Treat any screen with `room` as an in-game screen (player/join/table/host sub-screens).
     var isGameScreen = !!(!isLobbyAny && hasRoom);
@@ -14740,6 +14934,26 @@
         titleEl.textContent = 'B_BoardGames';
         titleEl.classList.remove('gm-lobby-return');
       } catch (eT1b) {
+        // ignore
+      }
+      return;
+    }
+
+    // ドデリドのプレイ画面だけは ヘッダーを「タイトルバー」として使う
+    //（のこり枚数・ひだりみぎのいれかえ ⇄・効果音の入切を置いている）。
+    // たて画面では場所を取らないよう CSS(.header--dd) で隠し、スマホ横置きだけ出す。
+    if (scr === 'dodelido_player') {
+      try {
+        headerEl.style.display = '';
+        headerEl.classList.add('header--dd');
+        headerEl.classList.add('header--slim');
+      } catch (eDD1) {
+        // ignore
+      }
+      try {
+        titleEl.textContent = 'B_BoardGames';
+        titleEl.classList.remove('gm-lobby-return');
+      } catch (eDD2) {
         // ignore
       }
       return;
@@ -21951,45 +22165,62 @@
       }
     }
 
-    // 直近のプレイ（待機中でも手元で状況が分かるようにする）
-    var lastPlayHtml = '';
+    // 「前の人が つかったカード」。すてふだ／その他ペインを無くしたので、手札ペインに出す。
+    // （もとは文字だけの帯を「その他」ペインに出していたが、カードの絵で見せるほうが早い）
+    var lastPlayMiniHtml = '';
     try {
-      var lp0 = r && r.lastPlay ? r.lastPlay : null;
-      var lpBy0 = lp0 && lp0.by ? String(lp0.by) : '';
-      var lpCard0 = lp0 && lp0.card ? String(lp0.card) : '';
-      if (phase === 'playing' && lpBy0 && lpCard0) {
-        var lpText0 = lp0 && lp0.text ? String(lp0.text) : '';
-        if (!lpText0) {
-          var lpDef0 = llCardDef(lpCard0);
-          var lpTo0 = lp0 && lp0.to ? String(lp0.to) : '';
-          var lpLabel0 = String((lpDef0 && lpDef0.name) || '-') + '(' + String((lpDef0 && lpDef0.rank) || llCardRankStr(lpCard0) || '-') + ')';
-          var lpByName0 = ps[lpBy0] ? formatPlayerDisplayName(ps[lpBy0]) : lpBy0;
-          var lpToName0 = lpTo0 ? (ps[lpTo0] ? formatPlayerDisplayName(ps[lpTo0]) : lpTo0) : '';
-          lpText0 = lpToName0 ? lpByName0 + ' が ' + lpToName0 + ' へ ' + lpLabel0 + ' を使用。' : lpByName0 + ' が ' + lpLabel0 + ' を使用。';
-        }
-        // ワンショット：内容が変わった再描画のときだけ出現アニメを付ける。
-        var lpKey0 = lpBy0 + '|' + lpCard0 + '|' + String((lp0 && lp0.at) || '') + '|' + String(graveCount);
-        var lpAnim0 = !!(ui.lastPlayKey && ui.lastPlayKey !== lpKey0);
-        ui.lastPlayKey = lpKey0;
-        var lpIcon0 = (llCardDef(lpCard0) || {}).icon || '';
-        lastPlayHtml =
-          '<div class="ll-lastplay' + (lpAnim0 ? ' bbg-banner-in' : '') + '" aria-live="polite">' +
-          (lpIcon0 ? '<img class="ll-lastplay-icon" alt="" src="' + escapeHtml(lpIcon0) + '" />' : '') +
-          '<div class="ll-lastplay-text">' + escapeHtml(lpText0) + '</div>' +
+      var mp0 = r && r.lastPlay ? r.lastPlay : null;
+      var mpBy0 = mp0 && mp0.by ? String(mp0.by) : '';
+      var mpCard0 = mp0 && mp0.card ? String(mp0.card) : '';
+      if (phase === 'playing' && mpBy0 && mpCard0) {
+        var mpDef0 = llCardDef(mpCard0) || {};
+        var mpByName0 = ps[mpBy0] ? formatPlayerDisplayName(ps[mpBy0]) : mpBy0;
+        var mpTo0 = mp0 && mp0.to ? String(mp0.to) : '';
+        var mpToName0 = mpTo0 ? (ps[mpTo0] ? formatPlayerDisplayName(ps[mpTo0]) : mpTo0) : '';
+        var mpSelf0 = String(mpBy0) === String(playerId || '');
+        // ワンショット：中身が変わった再描画のときだけ出現アニメを付ける。
+        var mpKey0 = mpBy0 + '|' + mpCard0 + '|' + String((mp0 && mp0.at) || '');
+        var mpAnim0 = !!(ui.lastPlayKey && ui.lastPlayKey !== mpKey0);
+        ui.lastPlayKey = mpKey0;
+        lastPlayMiniHtml =
+          '<div class="ll-lastcard' + (mpAnim0 ? ' bbg-banner-in' : '') + '">' +
+          '<div class="ll-lastcard-head muted">' +
+          escapeHtml(mpSelf0 ? 'さいごに つかったカード' : 'まえの人が つかったカード') +
+          '</div>' +
+          '<div class="ll-lastcard-row">' +
+          '<div class="ll-lastcard-img">' +
+          llCardImgHtml(mpCard0) +
+          '</div>' +
+          '<div class="ll-lastcard-txt">' +
+          '<div class="ll-lastcard-name">' +
+          escapeHtml(String(mpDef0.name || '-') + '(' + String(mpDef0.rank || llCardRankStr(mpCard0) || '-') + ')') +
+          '</div>' +
+          '<div class="ll-lastcard-by muted">' +
+          escapeHtml(mpByName0 + (mpToName0 ? ' → ' + mpToName0 : '')) +
+          '</div>' +
+          '</div>' +
+          '</div>' +
           '</div>';
       } else {
         // 'none' を入れておくと、次に最初のプレイが来たときにアニメが出る（初期値''のときは出ない）。
         ui.lastPlayKey = 'none';
-        // プレイ中は空でも同じ高さの枠を出しておく（最初のプレイで手札の位置が下がらないように）。
+        // まだプレイが無いときも同じ大きさの空枠を出す（最初のプレイで手札の位置が動かない）。
         if (phase === 'playing') {
-          lastPlayHtml =
-            '<div class="ll-lastplay ll-lastplay--empty" aria-hidden="true">' +
-            '<div class="ll-lastplay-text muted">まだ プレイは ありません</div>' +
+          lastPlayMiniHtml =
+            '<div class="ll-lastcard ll-lastcard--empty" aria-hidden="true">' +
+            '<div class="ll-lastcard-head muted">まえの人が つかったカード</div>' +
+            '<div class="ll-lastcard-row">' +
+            '<div class="ll-lastcard-img"></div>' +
+            '<div class="ll-lastcard-txt">' +
+            '<div class="ll-lastcard-name muted">まだ ありません</div>' +
+            '<div class="ll-lastcard-by">&nbsp;</div>' +
+            '</div>' +
+            '</div>' +
             '</div>';
         }
       }
-    } catch (eLP0) {
-      lastPlayHtml = '';
+    } catch (eLC0) {
+      lastPlayMiniHtml = '';
     }
 
     // Hand (always show your card while waiting)
@@ -22101,6 +22332,7 @@
         '<div class="bbg-split-side">' +
         infoHtml +
         useHtml +
+        lastPlayMiniHtml +
         '</div>' +
         '</div>';
     }
@@ -22182,8 +22414,8 @@
           : '<div class="ll-action-card">' +
             llCardImgHtml(pendingCard) +
             '</div>') +
-        (needsTarget ? '<div class="muted">対象</div><div class="stack">' + targetBtns + '</div>' : '') +
-        (needsGuess ? '<div class="muted">推測</div><div class="ll-guess-grid">' + guessBtns + '</div>' : '') +
+        (needsTarget ? '<div class="muted ll-modal-lead">対象</div><div class="stack ll-target-list">' + targetBtns + '</div>' : '') +
+        (needsGuess ? '<div class="muted ll-modal-lead">推測</div><div class="ll-guess-grid">' + guessBtns + '</div>' : '') +
         '<div id="llPlayError" class="form-error" role="alert"></div>' +
         '<div class="row ll-modal-actions" style="justify-content:space-between">' +
         '<button id="llCancelPlay" class="ghost">キャンセル</button>' +
@@ -22464,21 +22696,41 @@
       escapeHtml(statusText || '') +
       '</div></div></div>';
 
+    // ペインは2枚だけ（0=テーブル / 1=てふだ）。すてふだ・その他ペインは置かない。
+    // 縦画面・タブレットではペインが縦に並ぶだけなので、そこでは従来どおりの情報も残す。
+    var ponlyHtml =
+      '<div class="bbg-ponly">' +
+      '<div class="big ll-player-name">' +
+      escapeHtml(selfName) +
+      '</div>' +
+      pilesHtml +
+      '</div>';
+
+    // 自分の番は「てふだ」、ほかの人の番は「テーブル」へ自動でスライドする。
+    // 動くのは番が変わった瞬間だけなので、そのあと手で変えた選択はそのまま残る。
+    try {
+      var llPaneTok =
+        String(phase) + '|' + String((r && r.no) || '') + '|' + String((r && r.currentPlayerId) || '');
+      bbgPaneAutoWant('ll_player', phase === 'playing' && isMyTurn ? 1 : 0, llPaneTok);
+    } catch (ePane0) {
+      // ignore
+    }
+
     render(
       viewEl,
-      // スマホ横(基本形): 手札ペインをまんなかに、下スワイプで場（山札・じょうきょう）へ。
+      // スマホ横(基本形): 上下のスライドで「テーブル」と「てふだ」を行き来する。
       // 手札ペインにもステータスを出す（.bbg-lonlyはスマホ横のペイン表示のときだけ見える）。
       '\n    <div class="stack ll-player">\n      ' +
         bbgPanesHtml('ll_player', 1, [
           {
-            // 上ペイン: テーブル端末と同じ円卓ビュー（下スワイプで見る）。
+            // 上ペイン: テーブル端末と同じ円卓ビュー（自分の席が手前に来る）。
             cls: 'bbg-pane--field',
             label: 'テーブル',
             html:
               statusCardHtml +
               // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
               '<div class="bbg-lonly bbg-lonly--table">' +
-              llTableVizHtml(room, ui.tviz || (ui.tviz = {})) +
+              llTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId }) +
               '</div>' +
               (resultHtml || '') +
               (spectateHtml || '')
@@ -22486,18 +22738,14 @@
           {
             cls: 'bbg-pane--hand',
             label: 'てふだ',
-            html: '<div class="bbg-lonly">' + statusCardHtml + '</div>' + (handHtml || '')
-          },
-          {
-            // 下ペイン: そのほかの情報（名前・山札の箱・直近のプレイ）。
-            cls: 'bbg-pane--more',
-            label: 'その他',
             html:
-              '<div class="big ll-player-name">' +
-              escapeHtml(selfName) +
+              '<div class="bbg-lonly">' +
+              statusCardHtml +
               '</div>' +
-              pilesHtml +
-              (lastPlayHtml || '')
+              (handHtml || '') +
+              // 手札が無いとき（脱落・待機中）も、まえの人のカードだけは出しておく
+              (handHtml ? '' : lastPlayMiniHtml) +
+              ponlyHtml
           }
         ]) +
         '\n\n      ' +
@@ -24170,8 +24418,18 @@
 
   // 円卓ビュー（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用）。
   // tUi は lastPlay バナー/脱落シェイクのワンショット用の状態置き場（{} でよい）。
-  function llTableVizHtml(room, tUi) {
+  // opts.viewerId を渡すと、その人の席が手前（下）に来るように円卓をまわして描く。
+  function llTableVizHtml(room, tUi, opts) {
     var ui = tUi || {};
+    var o = opts || {};
+    var viewerId = o.viewerId ? String(o.viewerId) : '';
+    // スマホ横では席のはんけいも小さくする（中身の大きさはCSSのメディアクエリが決める）。
+    var compact = false;
+    try {
+      compact = bbgPanesActive();
+    } catch (eCp) {
+      compact = false;
+    }
 
     var phase = (room && room.phase) || 'lobby';
     var ps = (room && room.players) || {};
@@ -24369,22 +24627,33 @@
 
     var seatsHtml = '';
     var n = order.length || 0;
-    var radius = 42;
+    // 席のはんけい。スマホ横は席の箱が上下にはみ出さないよう小さめにする。
+    var radius = compact ? 34 : 42;
+    // 自分がいるときは自分を「手前(下)」に置く。回る向き（時計まわり）は変えない。
+    var viewerIdx = -1;
+    for (var vi0 = 0; vi0 < n; vi0++) {
+      if (viewerId && String(order[vi0] || '') === viewerId) {
+        viewerIdx = vi0;
+        break;
+      }
+    }
     for (var si = 0; si < n; si++) {
       var pid = order[si];
       if (!pid) continue;
       var p = ps[pid] || {};
       var nm = formatPlayerDisplayName(p) || String(pid);
-      var angle = -90 + (360 * si) / n;
+      var angle = viewerIdx >= 0 ? 90 + (360 * ((si - viewerIdx + n) % n)) / n : -90 + (360 * si) / n;
       var rad = (Math.PI / 180) * angle;
       var x = 50 + radius * Math.cos(rad);
       var y = 50 + radius * Math.sin(rad);
+      var isSelfSeat = !!(viewerId && String(pid) === viewerId);
       var isTurnSeat = !!(turnPid && String(pid) === String(turnPid));
       var isElimSeat = !!(r && r.eliminated && r.eliminated[String(pid)]);
       var isSoloEffectSeat = !!(effectSoloId && String(pid) === String(effectSoloId));
       var isProtectedSeat = !!(phase === 'playing' && r && r.protected && r.protected[String(pid)]);
       seatsHtml +=
         '<div class="ll-seat' +
+        (isSelfSeat ? ' ll-seat--self' : '') +
         (isTurnSeat ? ' ll-seat--turn' : '') +
         (isElimSeat ? ' ll-seat--eliminated' : '') +
         (isSoloEffectSeat ? ' ll-seat--effect' : '') +
@@ -24995,8 +25264,18 @@
 
   // 円卓ビュー（テーブル端末と、プレイヤー画面の「テーブル」ペインで共用）。
   // tUi は lastPlay バナーのワンショットアニメ用の状態置き場（{} でよい）。
-  function hnTableVizHtml(room, tUi) {
+  // opts.viewerId を渡すと、その人の席が手前（下）に来るように円卓をまわして描く。
+  function hnTableVizHtml(room, tUi, opts) {
       if (!tUi) tUi = {};
+      var o = opts || {};
+      var viewerId = o.viewerId ? String(o.viewerId) : '';
+      // スマホ横では席のはんけいも小さくする（中身の大きさはCSSのメディアクエリが決める）。
+      var compact = false;
+      try {
+        compact = bbgPanesActive();
+      } catch (eCp) {
+        compact = false;
+      }
       var players = (room && room.players) || {};
       var st = (room && room.state) || {};
       var order = Array.isArray(st.order) ? st.order : [];
@@ -25095,7 +25374,7 @@
       }
 
       var centerHtml =
-        '<div class="ll-table-center ll-table-center--ll" style="margin-top:-18px">' +
+        '<div class="ll-table-center ll-table-center--ll ll-table-center--hn">' +
         '<div class="ll-table-center-top">' +
         '<div class="ll-table-pile">' +
         '<div class="muted">墓地/<b>' +
@@ -25122,7 +25401,14 @@
       }
 
       var seatsHtml = '';
-      var radius = 42;
+      var radius = compact ? 34 : 42;
+      var viewerIdx = -1;
+      for (var vi0 = 0; vi0 < nSeats; vi0++) {
+        if (viewerId && String(order0[vi0] || '') === viewerId) {
+          viewerIdx = vi0;
+          break;
+        }
+      }
       var turnPid = '';
       try {
         turnPid = turn && turn.playerId ? String(turn.playerId || '') : '';
@@ -25141,10 +25427,12 @@
       for (var si = 0; si < nSeats; si++) {
         var pid = String(order0[si] || '');
         if (!pid) continue;
-        var angle = -90 + (360 * si) / nSeats;
+        // 自分がいるときは自分を「手前(下)」に置く。回る向き（時計まわり）は変えない。
+        var angle = viewerIdx >= 0 ? 90 + (360 * ((si - viewerIdx + nSeats) % nSeats)) / nSeats : -90 + (360 * si) / nSeats;
         var rad = (Math.PI / 180) * angle;
         var x = 50 + radius * Math.cos(rad);
         var y = 50 + radius * Math.sin(rad);
+        var isSelfSeat = !!(viewerId && String(pid) === viewerId);
         var isTurnSeat = !!(turnPid && String(pid) === String(turnPid));
         var cnt = handCount(pid);
         var plotOn = false;
@@ -25170,6 +25458,7 @@
         }
         seatsHtml +=
           '<div class="ll-seat' +
+          (isSelfSeat ? ' ll-seat--self' : '') +
           (isTurnSeat ? ' ll-seat--turn' : '') +
           '" data-hn-pid="' +
           escapeHtml(String(pid)) +
@@ -28241,6 +28530,11 @@
   // いま見ているペイン番号はメモリ(bbgPaneIdx)に持ち、レンダー時にHTMLへ焼き込む。
   // ジェスチャは document への委譲で起動時に1回だけ張る（再バインド不要）。
   var bbgPaneIdx = {};
+  // 自動スライド用。key -> 最後に見た「ターンの合図」。合図が変わった瞬間だけ自動で寄せ、
+  // そのあとプレイヤーがスワイプで変えたら、次の合図までその選択を尊重する。
+  var bbgPaneAutoTok = {};
+  // key -> 描画のあとにスライドさせたい目標ペイン（アニメを見せるため1フレーム遅らせる）。
+  var bbgPanePending = {};
 
   function bbgPanesActive() {
     try {
@@ -28254,6 +28548,62 @@
     var v = bbgPaneIdx[key];
     if (typeof v !== 'number' || v < 0 || v >= count) v = defIdx || 0;
     return v;
+  }
+
+  // 自動スライド: turnToken（だれの番か）が変わった瞬間だけ、見せたいペインへ寄せる。
+  // 同じ合図のあいだはプレイヤーのスワイプが優先される（いつでも手で変えられる）。
+  // 画面を開いたいちばん最初だけはアニメなしで、その場から目的のペインを出す。
+  function bbgPaneAutoWant(key, wantIdx, turnToken) {
+    try {
+      if (!key) return;
+      var tok = String(turnToken == null ? '' : turnToken);
+      var seen = bbgPaneAutoTok[key];
+      var first = seen === undefined;
+      if (!first && String(seen) === tok) return;
+      bbgPaneAutoTok[key] = tok;
+      if (!bbgPanesActive()) return; // 縦・タブレットはペインを重ねないので何もしない
+      var w = parseIntSafe(wantIdx, -1);
+      if (w < 0) return;
+      if (first) {
+        bbgPaneIdx[key] = w;
+        return;
+      }
+      bbgPanePending[key] = w;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 描画のあと（DOMが入れかわったあと）にペインを動かす。
+  // 先に古い位置で描いてから動かすので、CSSのtransitionでスーッとスライドする。
+  function bbgPaneSchedulePending(key) {
+    try {
+      if (!Object.prototype.hasOwnProperty.call(bbgPanePending, key)) return;
+      var want = bbgPanePending[key];
+      delete bbgPanePending[key];
+      var done = false;
+      var run = function () {
+        if (done) return;
+        done = true;
+        var host = null;
+        try {
+          host = document.querySelector('.bbg-panes[data-pane-key="' + String(key).replace(/"/g, '') + '"]');
+        } catch (eQ) {
+          host = null;
+        }
+        if (host) bbgPaneSet(host, want);
+      };
+      // 2フレームまってから動かすと、いまの位置から目的のペインへスーッと動く。
+      // 画面が見えていないとき（バックグラウンド等）は rAF が止まるので、タイマーでも保険をかける。
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function () {
+          window.requestAnimationFrame(run);
+        });
+      }
+      setTimeout(run, 80);
+    } catch (e) {
+      // ignore
+    }
   }
 
   // panes: [{cls, label, html}] / defIdx: 最初に見せるペイン（ふつうは手札）
@@ -28271,18 +28621,20 @@
         '">' +
         String(panes[i].html || '') +
         '</div>';
-      // 切り替えは「右端のたてタブ」を1回タップ。どのペインへも1手で飛べる。
+      // 切り替えは上下のスライド。右端は「いま何番目か」の めじるし（小さな丸）。
+      // 丸もボタンのままにして、スワイプが使えないときの逃げ道を残す。
       tabs +=
-        '<button type="button" class="bbg-pane-tab' +
+        '<button type="button" class="bbg-pane-dot' +
         (i === idx ? ' on' : '') +
         '" data-pane-i="' +
         String(i) +
+        '" title="' +
+        escapeHtml(String(panes[i].label || '')) +
         '" aria-label="' +
         escapeHtml(String(panes[i].label || '')) +
-        '"><span>' +
-        escapeHtml(String(panes[i].label || '')) +
-        '</span></button>';
+        '"></button>';
     }
+    bbgPaneSchedulePending(key);
     return (
       '<div class="bbg-panes" data-pane-key="' +
       escapeHtml(String(key)) +
@@ -28290,8 +28642,11 @@
       String(idx) +
       '">' +
       inner +
-      '<div class="bbg-pane-tabs">' +
+      '<div class="bbg-pane-dots">' +
       tabs +
+      '<span class="bbg-pane-hint">' +
+      escapeHtml(String((panes[idx] && panes[idx].label) || '')) +
+      '</span>' +
       '</div>' +
       '</div>'
     );
@@ -28311,10 +28666,12 @@
     if (key) bbgPaneIdx[key] = i;
     try {
       host.style.setProperty('--bbg-pane-i', String(i));
-      var tabs = host.querySelectorAll('.bbg-pane-tab');
-      for (var d = 0; d < tabs.length; d++) {
-        if (tabs[d].classList) tabs[d].classList[d === i ? 'add' : 'remove']('on');
+      var dots = host.querySelectorAll('.bbg-pane-dot');
+      for (var d = 0; d < dots.length; d++) {
+        if (dots[d].classList) dots[d].classList[d === i ? 'add' : 'remove']('on');
       }
+      var hint = host.querySelector('.bbg-pane-hint');
+      if (hint) hint.textContent = dots[i] ? String(dots[i].getAttribute('aria-label') || '') : '';
     } catch (e2) {
       // ignore
     }
@@ -28327,20 +28684,203 @@
     bbgPaneSet(host, cur + delta);
   }
 
+  // -------------------- 画面の向き（スマホ）--------------------
+  // ゲームごとに おすすめの向きを決めておく。
+  //  ・よこ: ドデリド / ラブレター / 犯人は踊る（カードを大きく見せたい）
+  //  ・たて: コードネーム / ワードウルフ（ことばを読む・みんなで囲む）
+  // ホーム画面から起動したPWAや全画面では screen.orientation.lock() がそのまま効く（Android）。
+  // 効かない端末（iOS Safari など）では、ちがう向きのときだけ案内を出す。
+  // 案内は「このまま つづける」で閉じられるので、行き止まりにはならない。
+  var BBG_ORIENT_LAND = ['loveletter', 'hannin', 'dodelido'];
+  var BBG_ORIENT_PORT = ['codenames', 'ww_', 'setup', 'create', 'join', 'history'];
+  var bbgOrientCur = null;
+
+  function bbgOrientForScreen(screen, roomId) {
+    var s = String(screen || '');
+    // 画面名なしの旧URL（?room=...）はワードウルフ
+    if (!s && roomId) s = 'ww_player';
+    // デモは中身のゲームと同じあつかい
+    var t = s.indexOf('demo_') === 0 ? s.slice(5) : s;
+    // テーブル端末（みんなで見る画面）は大きい画面のことが多いので向きを決めない
+    if (/_table$/.test(t)) return '';
+    var i;
+    for (i = 0; i < BBG_ORIENT_LAND.length; i++) {
+      if (t.indexOf(BBG_ORIENT_LAND[i]) === 0) return 'landscape';
+    }
+    for (i = 0; i < BBG_ORIENT_PORT.length; i++) {
+      if (t.indexOf(BBG_ORIENT_PORT[i]) === 0) return 'portrait';
+    }
+    return '';
+  }
+
+  function bbgEnsureOrientGate() {
+    try {
+      if (document.getElementById('bbgOrientGate')) return;
+      var el = document.createElement('div');
+      el.className = 'bbg-orient-gate';
+      el.id = 'bbgOrientGate';
+      el.innerHTML =
+        '<div class="bbg-orient-box">' +
+        '<div class="bbg-orient-icon">📱</div>' +
+        '<div class="bbg-orient-msg bbg-orient-msg--land">よこ向きに してください</div>' +
+        '<div class="bbg-orient-msg bbg-orient-msg--port">たて向きに してください</div>' +
+        '<div class="bbg-orient-note muted">まわらないときは、スマホの「画面の向きのロック」を切ってください。</div>' +
+        '<button type="button" class="ghost" id="bbgOrientSkip">このまま つづける</button>' +
+        '</div>';
+      document.body.appendChild(el);
+      var skip = document.getElementById('bbgOrientSkip');
+      if (skip) {
+        skip.addEventListener('click', function () {
+          try {
+            document.body.classList.add('bbg-orient-off');
+            sessionStorage.setItem('bbg_orient_off_v1', '1');
+          } catch (e) {
+            // ignore
+          }
+        });
+      }
+      try {
+        if (sessionStorage.getItem('bbg_orient_off_v1') === '1') document.body.classList.add('bbg-orient-off');
+      } catch (e2) {
+        // ignore
+      }
+    } catch (e3) {
+      // ignore
+    }
+  }
+
+  function bbgApplyOrientation(orient) {
+    var o = String(orient || '');
+    try {
+      var b = document.body;
+      if (b && b.classList) {
+        b.classList.toggle('bbg-orient-land', o === 'landscape');
+        b.classList.toggle('bbg-orient-port', o === 'portrait');
+      }
+    } catch (e) {
+      // ignore
+    }
+    if (o === bbgOrientCur) return;
+    bbgOrientCur = o;
+    try {
+      var so = window.screen && window.screen.orientation ? window.screen.orientation : null;
+      if (!so) return;
+      if (!o) {
+        if (so.unlock) so.unlock();
+        return;
+      }
+      if (so.lock) {
+        var p = so.lock(o);
+        if (p && p['catch']) {
+          p['catch'](function () {
+            // 全画面/PWAでないと固定できない端末が多い。案内だけにフォールバックする。
+          });
+        }
+      }
+    } catch (e2) {
+      // ignore
+    }
+  }
+
+  // ペインの切り替えは「上下のスライド」が主役。指の動きにペインが追従し、
+  // 半分まで行かずに はなすと元へもどる（つまんで動かしている感じにする）。
   function bbgBindPaneGestures() {
-    var start = null; // {y, x, el, host}
+    var start = null; // {y, x, el, host, axis, h}
+    var suppressClickAt = 0;
+
+    function clearDrag(host) {
+      if (!host) return;
+      try {
+        host.style.removeProperty('--bbg-pane-drag');
+        if (host.classList) host.classList.remove('bbg-panes--drag');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // 途中に縦スクロールできる要素があれば、そちらのスクロールを優先する。
+    function scrollsInside(el, host, dy) {
+      var cur = el;
+      while (cur && cur !== host) {
+        if (cur.scrollHeight > cur.clientHeight + 1) {
+          var ovf = '';
+          try {
+            ovf = String(getComputedStyle(cur).overflowY || '');
+          } catch (eO) {
+            ovf = '';
+          }
+          if (ovf === 'auto' || ovf === 'scroll') {
+            if (dy < 0 && cur.scrollTop + cur.clientHeight < cur.scrollHeight - 1) return true;
+            if (dy > 0 && cur.scrollTop > 0) return true;
+          }
+        }
+        cur = cur.parentElement;
+      }
+      return false;
+    }
 
     document.addEventListener(
       'pointerdown',
       function (ev) {
+        if (start) clearDrag(start.host);
         start = null;
         if (!bbgPanesActive()) return;
+        if (ev && ev.isPrimary === false) return;
         var t = ev.target;
         if (!t || !t.closest) return;
-        if (t.closest('.bbg-pane-tab')) return; // たてタブはクリックで切り替える
+        if (t.closest('.bbg-pane-dot')) return; // めじるしの丸はタップで切り替える
+        if (t.closest('.ll-overlay')) return; // モーダルの上ではペインを動かさない
         var host = t.closest('.bbg-panes');
         if (!host) return;
-        start = { y: ev.clientY, x: ev.clientX, el: t, host: host };
+        start = { y: ev.clientY, x: ev.clientX, el: t, host: host, axis: '', h: host.clientHeight || 1 };
+      },
+      true
+    );
+
+    document.addEventListener(
+      'pointermove',
+      function (ev) {
+        var s0 = start;
+        if (!s0) return;
+        var dy = ev.clientY - s0.y;
+        var dx = ev.clientX - s0.x;
+        if (!s0.axis) {
+          // 横に動いたらペイン切替ではない（カードの扇をなぞる等）
+          if (Math.abs(dx) > 10 && Math.abs(dx) >= Math.abs(dy)) {
+            start = null;
+            return;
+          }
+          if (Math.abs(dy) <= 10) return;
+          if (scrollsInside(s0.el, s0.host, dy)) {
+            start = null;
+            return;
+          }
+          s0.axis = 'y';
+          try {
+            if (s0.host.classList) s0.host.classList.add('bbg-panes--drag');
+          } catch (eC) {
+            // ignore
+          }
+        }
+        var n = 0;
+        var i = 0;
+        try {
+          n = s0.host.querySelectorAll('.bbg-pane').length;
+          i = parseIntSafe(bbgPaneIdx[String(s0.host.getAttribute('data-pane-key') || '')], 0);
+        } catch (eN) {
+          n = 0;
+        }
+        var off = dy;
+        // はしっこ（1枚目より上／最後より下）は 1/4 しか動かさず「これ以上ない」と伝える
+        if ((dy > 0 && i <= 0) || (dy < 0 && n && i >= n - 1)) off = dy * 0.25;
+        var lim = s0.h || 1;
+        if (off > lim) off = lim;
+        if (off < -lim) off = -lim;
+        try {
+          s0.host.style.setProperty('--bbg-pane-drag', String(Math.round(off)) + 'px');
+        } catch (eS) {
+          // ignore
+        }
       },
       true
     );
@@ -28348,6 +28888,7 @@
     document.addEventListener(
       'pointercancel',
       function () {
+        if (start) clearDrag(start.host);
         start = null;
       },
       true
@@ -28358,29 +28899,15 @@
       function (ev) {
         var s0 = start;
         start = null;
-        if (!s0 || !bbgPanesActive()) return;
+        if (!s0) return;
+        clearDrag(s0.host);
+        if (s0.axis !== 'y' || !bbgPanesActive()) return;
         var dy = ev.clientY - s0.y;
-        var dx = ev.clientX - s0.x;
-        // 縦方向にはっきり動いたときだけペインを切り替える（誤タップ・横パンは無視）。
-        // 切り替えの主役は右端のたてタブなので、ここは誤爆しにくい値でよい。
-        if (Math.abs(dy) < 40 || Math.abs(dy) < Math.abs(dx)) return;
-        // 途中に縦スクロールできる要素があれば、そちらのスクロールを優先する
-        var el = s0.el;
-        while (el && el !== s0.host) {
-          if (el.scrollHeight > el.clientHeight + 1) {
-            var ovf = '';
-            try {
-              ovf = String(getComputedStyle(el).overflowY || '');
-            } catch (eO) {
-              ovf = '';
-            }
-            if (ovf === 'auto' || ovf === 'scroll') {
-              if (dy < 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return;
-              if (dy > 0 && el.scrollTop > 0) return;
-            }
-          }
-          el = el.parentElement;
-        }
+        // はっきり動かしたあとの合成clickは握りつぶす（スワイプでカードを選ばないように）
+        if (Math.abs(dy) >= 12) suppressClickAt = nowMs();
+        // ペインの高さの1/6（最低34px）動かしたら となりのペインへ
+        var need = Math.max(34, Math.round((s0.h || 300) / 6));
+        if (Math.abs(dy) < need) return;
         // 上へスワイプ(dy<0)で次のペイン、下へスワイプで前のペイン（場が上から降りてくる）
         bbgPaneStep(s0.host, dy < 0 ? 1 : -1);
       },
@@ -28390,11 +28917,28 @@
     document.addEventListener(
       'click',
       function (ev) {
+        if (!suppressClickAt) return;
+        var dt = nowMs() - suppressClickAt;
+        suppressClickAt = 0;
+        if (dt > 400) return;
+        try {
+          ev.preventDefault();
+          ev.stopPropagation();
+        } catch (e) {
+          // ignore
+        }
+      },
+      true
+    );
+
+    document.addEventListener(
+      'click',
+      function (ev) {
         var t = ev.target;
         if (!t || !t.closest) return;
-        var tab = t.closest('.bbg-pane-tab');
-        if (!tab) return;
-        bbgPaneSet(t.closest('.bbg-panes'), tab.getAttribute('data-pane-i'));
+        var dot = t.closest('.bbg-pane-dot');
+        if (!dot) return;
+        bbgPaneSet(t.closest('.bbg-panes'), dot.getAttribute('data-pane-i'));
       },
       true
     );
@@ -31517,6 +32061,13 @@
     var isPlayer = q.player === '1';
     var lobbyId = q.lobby ? String(q.lobby) : '';
 
+    // ゲームごとの おすすめの向き（よこ／たて）に合わせる。
+    try {
+      bbgApplyOrientation(bbgOrientForScreen(screen, roomId));
+    } catch (eOr) {
+      // ignore
+    }
+
     if (lobbyId) setHeaderLobbyId(lobbyId);
     else setHeaderLobbyId('');
 
@@ -32848,6 +33399,8 @@
     bindBbgFxToggle();
     // スマホ横のペイン切り替え（上下スワイプ）。documentへの委譲なので1回だけでよい。
     bbgBindPaneGestures();
+    // 画面の向きの案内（ゲームごとの おすすめの向き）。中身は route() が切り替える。
+    bbgEnsureOrientGate();
     // --- Version string (use bundled asset cache-buster) ---
     var bundledV = '';
     try {

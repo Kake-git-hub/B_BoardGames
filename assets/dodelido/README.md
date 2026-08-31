@@ -19,7 +19,18 @@
 
 ## 注意点
 
-- 形式は **PNG**、**縦長のカード画像**を想定しています。
+- 形式は **PNG**、**縦長のカード画像**を想定しています。表示は 230x390 くらいなので、それ以上に大きくしても意味がありません。
+- **かならず減色して軽くしてから置いてください**（1まい 30〜45KB めやす）。スキャンそのままの PNG は 1まい 200KB ちかくあり、105まいぶんだと初回表示で待たされます。
+  変換のしかた（Python + Pillow・見た目はほぼ変わりません）:
+
+  ```bash
+  python -c "
+  from PIL import Image; import glob
+  for f in glob.glob('assets/dodelido/*.png'):
+      im = Image.open(f).convert('RGB')
+      im.quantize(colors=256, method=Image.FASTOCTREE, dither=Image.FLOYDSTEINBERG).save(f, 'PNG', optimize=True)
+  "
+  ```
 - 上記の名前でファイルを置いてリロードするだけで、そのカードから自動的に画像表示へ切り替わります（一部のカードだけ画像を用意する、という置き方も可能です）。
 - 画像が無いカードは、色わく＋動物絵文字＋名前＋色名のプレースホルダーで代わりに表示されるので、画像が揃うまでの間もゲームは問題なく遊べます。
 - **ファイル名を変更する場合は `bbg.js` 側の `DD_ANIMAL_DEFS` / `DD_COLOR_DEFS` / `ddCardImgSrc` の修正が必要です**。ファイル名は上記の一覧のとおりにしてください。
