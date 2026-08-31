@@ -13183,6 +13183,27 @@
     return '<div class="dd-line' + cls + '">' + text + '</div>';
   }
 
+  // スマホ横置きで「順番リスト」と「めくる！のタップ枠」を 左右いれかえるかどうか（端末ごとに保存）。
+  // ききうでに合わせて タップ枠を持ちやすい側へ寄せるための設定。タイトルバーの ⇄ ボタンで切りかえる。
+  var DD_SWAP_KEY = 'bbg_dd_swap_v1';
+
+  function ddLoadSwap() {
+    try {
+      return String(localStorage.getItem(DD_SWAP_KEY) || '') === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function ddSaveSwap(on) {
+    try {
+      if (on) localStorage.setItem(DD_SWAP_KEY, '1');
+      else localStorage.removeItem(DD_SWAP_KEY);
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // 全プレイヤーを 順番どおりに たてに並べる（スマホ横置きで カードの左のあきスペースに出す）。
   // いまの番手＝ddActorMid をハイライトするので、つぎがだれかが ひと目でわかる。
   // たて画面では CSS で display:none（番手は上の1行で出す）。
@@ -13392,9 +13413,11 @@
 
     // のこり枚数は タイトルバーの右へ（スマホ横置きで カードの高さを かせぐため）。
     // たて画面では CSS で出さず、画面内の .dd-count のほうを見せる。
+    // ⇄ は 順番リストと タップ枠の 左右いれかえ（スマホ横置きだけ効く。CSSでこのスロットごと出し分け）。
     bbgSetHeaderExtra(
       inGame && !isTableGmDevice
-        ? '<span class="bbg-head-remain">のこり<b>' + escapeHtml(String(me.deck.length)) + '</b>まい</span>'
+        ? '<span class="bbg-head-remain">のこり<b>' + escapeHtml(String(me.deck.length)) + '</b>まい</span>' +
+          '<button type="button" id="ddSwapBtn" class="bbg-head-btn" aria-label="ひだり・みぎを いれかえ" title="ひだり・みぎを いれかえ">⇄</button>'
         : ''
     );
 
@@ -13402,7 +13425,7 @@
     //       → のこり枚数 → ワニのタップ順
     render(
       viewEl,
-      '<div class="stack bz-screen dd-screen dd-simple">' +
+      '<div class="stack bz-screen dd-screen dd-simple' + (ddLoadSwap() ? ' dd-swap' : '') + '">' +
       '<div class="dd-head">' + ddLineHtml(room, playerId) + '</div>' +
       ddSeatsHtml(room, playerId) +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
@@ -13626,8 +13649,12 @@
     // タップしてから カードが配られるまでの「一拍」。
     // 即座に配ると リズムが取れないので、わざと ひと呼吸おいてから めくる
     //（この間はタップエリアが光る＝タップは受けつけた、という合図）。
-    var DD_BEAT_MS = 550;
-    var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false };
+    // 長すぎると「止まった」と感じるので、間そのものは短めにして、
+    // カードが落ちてくるアニメ（.dd-card--drop）のほうを ゆっくりにして拍を取る。
+    var DD_BEAT_MS = 380;
+    // holdArmed: このタップで ながおし（おてつき）が使えるかどうか。
+    // 使えない人（＝「めくる！」の番手など）は、長めに押しても ふつうのタップとして受ける。
+    var ptr = { active: false, id: -1, x: 0, y: 0, t: 0, holdTimer: null, holdFired: false, holdArmed: false };
 
     // ながおし中はタップエリア自体が左から赤く満ちていく（はなすと消える）。
     // スマホ横置きではカードエリアも赤く満ちる（タップエリア=画面ぜんたいのため）。
@@ -13800,6 +13827,7 @@
       ptr.y = ev.clientY;
       ptr.t = nowMs();
       ptr.holdFired = false;
+      ptr.holdArmed = false;
 
       var phase = String((lastRoom && lastRoom.phase) || '');
       if (phase === 'croc') {
@@ -13808,8 +13836,12 @@
       }
       // ながおし（おてつき）はコール中なら だれでも（まえのまちがいに気づいた人の遡りひきとり）。
       // ひきとるのは ながおしした本人（ddJudgeMiss が playerId に回収させる）。
+      // ただし「めくる！」の人＝いまタップしてめくる番手には ながおしをつけない
+      //（勢いよく押しっぱなしにしても おてつき扱いにならないように）。
       var orderH = Array.isArray(lastRoom && lastRoom.order) ? lastRoom.order : [];
-      if (phase === 'call' && playerId && orderH.indexOf(playerId) >= 0) {
+      var isActorH = !!(playerId && String(ddActorMid(lastRoom)) === playerId);
+      if (phase === 'call' && playerId && !isActorH && orderH.indexOf(playerId) >= 0) {
+        ptr.holdArmed = true;
         ddHoldShow();
         ptr.holdTimer = setTimeout(function () {
           ptr.holdTimer = null;
@@ -13841,7 +13873,8 @@
       var dx = ev.clientX - ptr.x;
       var dy = ev.clientY - ptr.y;
       if (dx * dx + dy * dy > 144) return;
-      if (nowMs() - ptr.t > 600) return; // タップとながおしの間の長さは無視（誤爆よけ）
+      // タップとながおしの間の長さは無視（誤爆よけ）。ながおしが無い人には効かせない。
+      if (ptr.holdArmed && nowMs() - ptr.t > 600) return;
       if (!ddTapAllowed(ev)) return;
       ddHandleTap();
     }
@@ -13850,6 +13883,7 @@
       if (ev.pointerId !== ptr.id) return;
       ptr.active = false;
       ptr.holdFired = false;
+      ptr.holdArmed = false;
       ddCancelHold();
     }
 
@@ -13891,8 +13925,40 @@
       };
     }
 
+    // タイトルバーの ⇄。順番リストとタップ枠の左右をいれかえる（端末に保存・横置きだけ効く）。
+    // ヘッダーは再描画のたびに作りなおされることがあるので、毎回 __dd_bound を見て張りなおす。
+    function bindSwapBtn() {
+      var b = null;
+      try {
+        b = document.getElementById('ddSwapBtn');
+      } catch (e0) {
+        b = null;
+      }
+      if (!b) return;
+      b.setAttribute('aria-pressed', ddLoadSwap() ? 'true' : 'false');
+      if (b.__dd_bound) return;
+      b.__dd_bound = true;
+      b.addEventListener('click', function () {
+        var next = !ddLoadSwap();
+        ddSaveSwap(next);
+        try {
+          var root = viewEl && viewEl.querySelector ? viewEl.querySelector('.dd-simple') : null;
+          if (root && root.classList) root.classList.toggle('dd-swap', next);
+        } catch (e1) {
+          // ignore
+        }
+        b.setAttribute('aria-pressed', next ? 'true' : 'false');
+        try {
+          bbgFx.tap();
+        } catch (e2) {
+          // ignore
+        }
+      });
+    }
+
     function bindPlayerActions() {
       ensureTapHandlers();
+      bindSwapBtn();
       // 一拍まちの最中に再描画が来たら、光り（受付ずみの合図）を付けなおす。
       if (ui.beatTimer) ddBeatShow();
 

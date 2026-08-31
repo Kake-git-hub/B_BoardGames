@@ -51,7 +51,14 @@ body{
 /* タイトルバー右がわ。画面ごとの小さな表示スロット（JS: bbgSetHeaderExtra）＋ロビーへ戻る */
 .header-actions{display:flex;align-items:center;gap:8px;min-width:0}
 /* 既定では出さない。出したい画面の CSS で display を上書きする（いまはドデリドの横置きだけ）。 */
-.bbg-head-extra{display:none;align-items:baseline;gap:4px;min-width:0}
+.bbg-head-extra{display:none;align-items:center;gap:8px;min-width:0}
+/* スロットの中の小さなボタン（ドデリドの ⇄ など） */
+.bbg-head-btn{
+  width:28px;height:28px;padding:0;font-size:15px;line-height:1;
+  border:1px solid var(--line);border-radius:9px;background:var(--card2);color:var(--muted);
+  display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+}
+.bbg-head-btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 /* ロビー・GM画面のヘッダーは細く（縦の場所を取らない） */
 .header--slim{padding:2px 4px 6px}
 .header--slim h1{font-size:15px}
@@ -1446,7 +1453,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-card--top{z-index:1}
 
 /* めくったカードが上から場に重なる（JS側 ddPlayCardDrop がワンショットで付ける） */
-.dd-card--drop{animation:ddCardDrop .42s cubic-bezier(.2,1.05,.35,1) both;z-index:2}
+/* 落ちる時間は「一拍」の代わり。速すぎると配られた感じが出ないので ゆっくりめ（JS側 DD_BEAT_MS と対）。 */
+.dd-card--drop{animation:ddCardDrop .62s cubic-bezier(.2,1.05,.35,1) both;z-index:2}
 @keyframes ddCardDrop{
   0%{opacity:0;transform:translateY(-52%) scale(1.16) rotate(-8deg)}
   55%{opacity:1;transform:translateY(0) scale(1.03) rotate(1.5deg)}
@@ -1454,8 +1462,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
 }
 /* ワニは box-shadow の脈動と同時に走らせる（脈動はカードが落ちきってから） */
 .dd-card--croc.dd-card--drop{
-  animation:ddCardDrop .42s cubic-bezier(.2,1.05,.35,1) both,
-            ddCrocPulse .5s ease-in-out .42s infinite alternate;
+  animation:ddCardDrop .62s cubic-bezier(.2,1.05,.35,1) both,
+            ddCrocPulse .5s ease-in-out .62s infinite alternate;
 }
 
 /* 自分ののこり枚数（大きく） */
@@ -1515,7 +1523,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
 /* タップは受けつけた、の合図（この一拍のあとに カードが配られる） */
 .dd-tapzone--beat{
   border-style:solid;border-color:var(--accent);color:var(--accent);
-  background:rgba(91,157,255,.22);animation:ddBeatFlash .55s ease-out forwards;
+  background:rgba(91,157,255,.22);animation:ddBeatFlash .38s ease-out forwards;
 }
 @keyframes ddBeatFlash{
   0%{transform:scale(1.04);box-shadow:0 0 0 0 rgba(91,157,255,.55)}
@@ -1630,11 +1638,18 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .dd-simple:not(.bz-table){
       height:100%;
       display:grid;
-      grid-template-columns:clamp(58px,8.8vw,92px) minmax(0,1fr) clamp(42px,5.5vw,62px);
+      --dd-seatw:clamp(58px,8.8vw,92px);
+      --dd-tapw:clamp(58px,8.5vw,92px);
+      grid-template-columns:var(--dd-seatw) minmax(0,1fr) var(--dd-tapw);
       grid-template-rows:minmax(0,1fr);
       gap:0 6px;
       align-items:stretch;
     }
+    /* タイトルバーの ⇄ で ひだり・みぎを いれかえる（ききうで合わせ）。
+       列はばも いっしょに入れかえるので、カードの大きさは どちらでも同じ。 */
+    .dd-simple.dd-swap:not(.bz-table){grid-template-columns:var(--dd-tapw) minmax(0,1fr) var(--dd-seatw)}
+    .dd-simple.dd-swap:not(.bz-table) > .dd-seats{grid-column:3}
+    .dd-simple.dd-swap:not(.bz-table) > .dd-tapzone{grid-column:1}
     /* 番手の1行（＋そのポップアップ）と のこり枚数は 横置きでは出さない */
     .dd-simple:not(.bz-table) > .dd-head{display:none}
     .dd-simple:not(.bz-table) > .dd-count{display:none}
@@ -1660,7 +1675,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
       writing-mode:vertical-rl;text-orientation:upright;
       font-size:13px;line-height:1.05;letter-spacing:.04em;
     }
-    .dd-simple:not(.bz-table) > .dd-tapzone--go{font-size:clamp(22px,8vh,34px)}
+    .dd-simple:not(.bz-table) > .dd-tapzone--go{font-size:clamp(24px,9.5vh,42px)}
     .dd-simple:not(.bz-table) > .dd-tapzone--hint{font-size:11px}
     .dd-simple:not(.bz-table) > .dd-tapzone--croc{font-size:clamp(18px,6vh,28px)}
     /* 自分の番でないときも枠は残す（消すと 中の列の幅が動いてカードがズレる） */
@@ -1674,7 +1689,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
        --dd-hchrome / --dd-vchrome はカード以外に使う余白の合計（左右の列こみの実測値）。
        ↓の @supports (container-type) が効く端末では、この実測値ではなく
          場の枠じたいの大きさ(cqw/cqh)から出すので、はしたなく余ることがない。 */
-    .dd-simple:not(.bz-table){--dd-hchrome:190px;--dd-vchrome:74px}
+    .dd-simple:not(.bz-table){--dd-hchrome:220px;--dd-vchrome:74px}
     body.bbg-demo-on .dd-simple:not(.bz-table){--dd-vchrome:110px}
     .dd-simple:not(.bz-table) > .dd-pilesbox{grid-column:2;grid-row:1;height:100%;min-height:0;min-width:0;padding:4px;display:flex;align-items:center;justify-content:center}
     .dd-simple:not(.bz-table) .dd-piles{width:100%;gap:6px}
