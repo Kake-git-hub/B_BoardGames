@@ -7196,9 +7196,12 @@
           cardW = Math.round((cardH * 3) / 4);
           // 右の説明欄(.bbg-split-side 30%)とめじるしの丸(18px)を除いた、左のカード欄のはば。
           var availW0 = Math.max(160, Math.floor((vw0 - 42) * 0.63));
-          var needW0 = cardW * (1 + overlap0 * (nCards - 1));
+          // カードの大きさは枚数で変えない。手札は4まいから へる一方なので、つねに「4まいが収まる」大きさで固定
+          //（2026-09-02: 枚数がへるとカードが大きくなって位置や見た目が変わるのをやめた）。
+          var nFit0 = Math.max(4, nCards);
+          var needW0 = cardW * (1 + overlap0 * (nFit0 - 1));
           if (needW0 > availW0) {
-            cardW = Math.max(64, Math.floor(availW0 / (1 + overlap0 * (nCards - 1))));
+            cardW = Math.max(64, Math.floor(availW0 / (1 + overlap0 * (nFit0 - 1))));
             cardH = Math.round((cardW * 4) / 3);
           }
         } else {
@@ -7472,7 +7475,13 @@
         String((pending && pending.type) || '') +
         ':' +
         String((pending && pending.createdAt) || '');
-      bbgPaneAutoWant('hn_player', wantHand0 ? 1 : 0, hnPaneTok);
+      // 効果のモーダル（出すカードの確認・対象えらび・自分だけに見える結果）が出たら テーブルペインへ寄せる
+      //（モーダルはテーブルの上に透過で出るので、場の状況を見ながら進められる。2026-09-02 試行）。
+      // うわさ・情報操作・取引の「このカードを渡す」確認と注意(notice)は手札の操作なので寄せない。
+      var hnFxModal = modalHtml || privateHtml || '';
+      if (!hnFxModal && confirmHtml && ui && ui.hnConfirm && String(ui.hnConfirm.type || '') === 'play') hnFxModal = confirmHtml;
+      var hnPm = bbgPaneModalWant(ui, hnFxModal, wantHand0 ? 1 : 0);
+      bbgPaneAutoWant('hn_player', hnPm.want, hnPaneTok + hnPm.tok);
     } catch (ePane1) {
       // ignore
     }
@@ -13843,12 +13852,7 @@
     // （redirectToLobby と popstate で解除）。ながおし中に指が画面外へ出ても取りこぼさないよう、
     // move/up/cancel は window に張る。
     var DD_HOLD_MS = 650;
-    // タップしてから カードが配られるまでの「一拍」。
-    // 即座に配ると リズムが取れないので、わざと ひと呼吸おいてから めくる
-    //（この間はタップエリアが光る＝タップは受けつけた、という合図）。
-    // 長すぎると「止まった」と感じるので、間そのものは短めにして、
-    // カードが落ちてくるアニメ（.dd-card--drop）のほうを ゆっくりにして拍を取る。
-    var DD_BEAT_MS = 380;
+    // ※ タップしてから配るまでの「一拍」（DD_BEAT_MS=380）は 2026-09-02 に廃止。タップしたら すぐめくる。
     // holdArmed: このタップで ながおし（おてつき）が使えるかどうか。
     // 使えない人（＝「めくる！」の番手など）は、長めに押しても ふつうのタップとして受ける。
     // phase / consumed: 指をおろした時のフェーズを覚えておき、はなす時に変わっていたら操作にしない
@@ -13913,26 +13917,18 @@
       }
     }
 
-    // 「一拍」おいてから めくる。タップした瞬間に音とタップエリアの光で受付を伝え、
-    // 実際の書きこみ（＝カードが配られる）は DD_BEAT_MS だけ待つ。
-    // ui.inFlight はタップの瞬間から立てるので、待っている間の連打は無視される。
+    // タップしたら すぐ書きこむ（＝すぐ配られる）。以前の「一拍」待ちは廃止（2026-09-02）。
+    // タップエリアの光は「受けつけた」の合図として一瞬だけ出す。
+    // ui.inFlight はタップの瞬間から立てるので、書きこみ中の連打は無視される。
     function ddBeatThen(run) {
+      if (ui.cancelled) return;
       ui.inFlight = true;
       ddBeatShow();
-      try {
-        if (ui.beatTimer) clearTimeout(ui.beatTimer);
-      } catch (e0) {
-        // ignore
-      }
-      ui.beatTimer = setTimeout(function () {
-        ui.beatTimer = null;
+      var fin = function () {
         ddBeatHide();
-        if (ui.cancelled) {
-          ui.inFlight = false;
-          return;
-        }
-        run().catch(fail).then(done, done);
-      }, DD_BEAT_MS);
+        done();
+      };
+      run().catch(fail).then(fin, fin);
     }
 
     function ddBeatShow() {
@@ -14170,8 +14166,6 @@
     function bindPlayerActions() {
       ensureTapHandlers();
       bindSwapBtn();
-      // 一拍まちの最中に再描画が来たら、光り（受付ずみの合図）を付けなおす。
-      if (ui.beatTimer) ddBeatShow();
 
       var crocCloseBtn = document.getElementById('ddCrocCloseBtn');
       if (crocCloseBtn && !crocCloseBtn.__dd_bound) {
@@ -22724,10 +22718,13 @@
 
     // 自分の番は「てふだ」、ほかの人の番は「テーブル」へ自動でスライドする。
     // 動くのは番が変わった瞬間だけなので、そのあと手で変えた選択はそのまま残る。
+    // 効果のモーダル（対象えらび・確認・公開・待ち）が出たら テーブルペインへ寄せる
+    //（モーダルはテーブルの上に透過で出るので、場の状況を見ながら進められる。2026-09-02 試行）。
     try {
       var llPaneTok =
         String(phase) + '|' + String((r && r.no) || '') + '|' + String((r && r.currentPlayerId) || '');
-      bbgPaneAutoWant('ll_player', phase === 'playing' && isMyTurn ? 1 : 0, llPaneTok);
+      var llPm = bbgPaneModalWant(ui, modalHtml, phase === 'playing' && isMyTurn ? 1 : 0);
+      bbgPaneAutoWant('ll_player', llPm.want, llPaneTok + llPm.tok);
     } catch (ePane0) {
       // ignore
     }
@@ -28563,6 +28560,28 @@
     }
   }
 
+  // 効果モーダル(.ll-overlay)が出たらテーブルペインへ寄せるための「合図」を作る（2026-09-02 試行）。
+  // モーダルが「出た瞬間」だけ寄せ、閉じたときは動かさない:
+  //   閉じた直後に手番が変わって もう一度スライドする二重の動きを避ける（キャンセルしたときは手で戻る）。
+  // uiState にモーダルの通し番号を持ち、bbgPaneAutoWant の turnToken に足して使う。
+  // 返り値: { want: 目的ペイン（モーダル中は 0=テーブル）, tok: turnToken に足す文字列 }
+  function bbgPaneModalWant(uiState, modalHtml, wantIdxNoModal) {
+    var key = '';
+    var html = String(modalHtml || '');
+    if (html) {
+      try {
+        var m = /data-modal-key="([^"]*)"/.exec(html);
+        key = m && m[1] ? String(m[1]) : 'modal';
+      } catch (e) {
+        key = 'modal';
+      }
+    }
+    var u = uiState || {};
+    if (key && key !== String(u.paneModalKey || '')) u.paneModalSeq = (parseIntSafe(u.paneModalSeq, 0) || 0) + 1;
+    u.paneModalKey = key;
+    return { want: key ? 0 : wantIdxNoModal, tok: '|m' + String(parseIntSafe(u.paneModalSeq, 0) || 0) };
+  }
+
   // 描画のあと（DOMが入れかわったあと）にペインを動かす。
   // 先に古い位置で描いてから動かすので、CSSのtransitionでスーッとスライドする。
   function bbgPaneSchedulePending(key) {
@@ -28818,8 +28837,17 @@
         var t = ev.target;
         if (!t || !t.closest) return;
         if (t.closest('.bbg-pane-dot')) return; // めじるしの丸はタップで切り替える
-        if (t.closest('.ll-overlay')) return; // モーダルの上ではペインを動かさない
         var host = t.closest('.bbg-panes');
+        // モーダル(.ll-overlay)はペインの外に描くが、その上からでもペインを動かせるようにする
+        //（ほかの人の効果を待っているあいだも テーブル⇄てふだ を見にいける。モーダルは透過。2026-09-02）。
+        // 中のボタンは 12px 以上動くと ながおし中止＋合成clickの握りつぶしが効くので、スワイプで誤操作しない。
+        if (!host && t.closest('.ll-overlay')) {
+          try {
+            host = document.querySelector('.bbg-panes');
+          } catch (eH) {
+            host = null;
+          }
+        }
         if (!host) return;
         start = { y: ev.clientY, x: ev.clientX, el: t, host: host, axis: '', h: host.clientHeight || 1 };
       },

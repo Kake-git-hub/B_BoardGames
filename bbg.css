@@ -1475,17 +1475,17 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-card--top{z-index:1}
 
 /* めくったカードが上から場に重なる（JS側 ddPlayCardDrop がワンショットで付ける） */
-/* 落ちる時間は「一拍」の代わり。速すぎると配られた感じが出ないので ゆっくりめ（JS側 DD_BEAT_MS と対）。 */
-.dd-card--drop{animation:ddCardDrop .62s cubic-bezier(.2,1.05,.35,1) both;z-index:2}
+/* 落ちるのは短く。タップしたらすぐ読めるよう、最初から見えている状態で始める（2026-09-02: 一拍待ちを廃止）。 */
+.dd-card--drop{animation:ddCardDrop .3s cubic-bezier(.2,1.05,.35,1) both;z-index:2}
 @keyframes ddCardDrop{
-  0%{opacity:0;transform:translateY(-52%) scale(1.16) rotate(-8deg)}
-  55%{opacity:1;transform:translateY(0) scale(1.03) rotate(1.5deg)}
+  0%{opacity:.6;transform:translateY(-30%) scale(1.1) rotate(-5deg)}
+  60%{opacity:1;transform:translateY(0) scale(1.02) rotate(1deg)}
   100%{opacity:1;transform:none}
 }
 /* ワニは box-shadow の脈動と同時に走らせる（脈動はカードが落ちきってから） */
 .dd-card--croc.dd-card--drop{
-  animation:ddCardDrop .62s cubic-bezier(.2,1.05,.35,1) both,
-            ddCrocPulse .5s ease-in-out .62s infinite alternate;
+  animation:ddCardDrop .3s cubic-bezier(.2,1.05,.35,1) both,
+            ddCrocPulse .5s ease-in-out .3s infinite alternate;
 }
 
 /* 自分ののこり枚数（大きく） */
@@ -2224,6 +2224,18 @@ body.bbg-demo-on .app{padding-bottom:104px}
     max-height:100%;
     overflow:auto;
     display:flex;flex-direction:column;gap:4px;
+  }
+  /* ラブレター/犯人は踊るのプレイヤー画面: 効果モーダルはテーブルペインの上に透過で出す（2026-09-02 試行）。
+     JS側で モーダルが出た瞬間にテーブルペインへ寄せる（bbgPaneModalWant）ので、
+     うすい暗幕＋半透明のパネルごしに 席・すてふだ・直近のプレイが見える。左右をあけて席が見えるように少しせまく。
+     ペインの外に描くモーダルなので touch-action もペインと同じ pan-x にして、
+     モーダルの上からでも上下スワイプでペインを動かせるようにする（JS: bbgBindPaneGestures）。 */
+  body.ll-player-screen .ll-overlay{touch-action:pan-x}
+  body.ll-player-screen .ll-overlay-backdrop{background:rgba(0,0,0,.22)}
+  body.ll-player-screen .ll-overlay-panel{
+    background:rgba(20,29,49,.84);border-color:rgba(91,157,255,.45);
+    max-width:min(600px,76vw);overscroll-behavior:contain;
+    box-shadow:0 10px 32px rgba(0,0,0,.5);
   }
   .ll-overlay-panel .stack{gap:6px}
   .ll-overlay-panel .big{font-size:clamp(14px,4.6dvh,20px);line-height:1.2}
