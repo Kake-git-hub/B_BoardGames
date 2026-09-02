@@ -7223,6 +7223,9 @@
           pendUiHtml +
           '</div>' +
           '</div>';
+        // 取引の相手への注意（「○○が取引を使用しました…」）は、えらぶモーダルそのものに同じ文があるので重ねない。
+        // （音とバイブは出したまま。ui.hnConfirm 自体は えらんだ時点で dropStaleModals が片づける）
+        if (confirmHtml && ui && ui.hnConfirm && String(ui.hnConfirm.type || '') === 'notice') confirmHtml = '';
       } else {
         try {
           var pnM = /<div class="muted center">([\s\S]*?)<\/div>/.exec(pendUiHtml);
@@ -13448,6 +13451,11 @@
     return '<div class="dd-line' + cls + '">' + text + '</div>';
   }
 
+  // 前の人がめくってから、つぎの人が「めくる！」を押せるようになるまでの間（ワンテンポ）。
+  // めくった直後の連打よけ（700ms）だったものを、コールを聞いてから押す間として長めにした（2026-09-02）。
+  // この間は タップ枠をうすくしておき（.dd-tapzone--wait）、時間が来たら光らせる。
+  var DD_NEXT_TAP_LOCK_MS = 1300;
+
   // スマホ横置きで「順番リスト」と「めくる！のタップ枠」を 左右いれかえるかどうか（端末ごとに保存）。
   // ききうでに合わせて タップ枠を持ちやすい側へ寄せるための設定。タイトルバーの ⇄ ボタンで切りかえる。
   var DD_SWAP_KEY = 'bbg_dd_swap_v1';
@@ -13704,6 +13712,7 @@
     var isNextMe = !!(playerId && nextMid === playerId);
     var zoneLabel = '';
     var zoneCls = '';
+    var waitLeftMs = 0;
     if (canOperate && inGame) {
       if (phase === 'flip' && isMyTurn) {
         zoneLabel = 'めくる！';
@@ -13714,6 +13723,15 @@
       } else if (phase === 'call' && isNextMe) {
         zoneLabel = 'めくる！';
         zoneCls = ' dd-tapzone--on dd-tapzone--go';
+        // 前の人がめくった直後は まだ押せない（ワンテンポ）。のこり時間を data-dd-wait に入れて、時間が来たら光らせる。
+        try {
+          var faZ = parseIntSafe(room && room.flippedAt, 0) || 0;
+          if (faZ) waitLeftMs = DD_NEXT_TAP_LOCK_MS - (serverNowMs() - faZ);
+        } catch (eWz) {
+          waitLeftMs = 0;
+        }
+        if (waitLeftMs > 0) zoneCls += ' dd-tapzone--wait';
+        else waitLeftMs = 0;
       } else if (phase === 'call') {
         // コール中は だれでも「ながおし」で 自分のまちがいに遡って気づいて ひきとれる
         zoneLabel = 'まちがいに きづいたら ながおし';
@@ -13750,7 +13768,9 @@
       '<div class="dd-head">' + ddLineHtml(room, playerId) + '</div>' +
       ddSeatsHtml(room, playerId) +
       '<div class="card dd-pilesbox">' + ddPilesHtml(room) + '</div>' +
-      '<div class="dd-tapzone' + zoneCls + (zoneLabel ? '' : ' dd-tapzone--idle') + '" id="ddTapZone"><span>' + zoneLabel + '</span></div>' +
+      '<div class="dd-tapzone' + zoneCls + (zoneLabel ? '' : ' dd-tapzone--idle') + '" id="ddTapZone"' +
+      (waitLeftMs > 0 ? ' data-dd-wait="' + escapeHtml(String(Math.round(waitLeftMs))) + '"' : '') +
+      '><span>' + zoneLabel + '</span></div>' +
       // ワニ中は のこり枚数を出さない（全員のタップ順が画面に収まるように）。
       (phase === 'croc' || phase === 'crocResult'
         ? ''
@@ -13809,6 +13829,7 @@
       tapBound: false,
       detachTap: null,
       beatTimer: null,
+      waitTimer: null,
       lobbyReturnWatching: false,
       lobbyUnsub: null
     };
@@ -13962,6 +13983,27 @@
 
       if (isTableGmDevice) return;
 
+      // つぎの人の「めくる！」は 前の人がめくってから DD_NEXT_TAP_LOCK_MS のあいだ押せない（ワンテンポ）。
+      // その間は枠をうすくしておき（.dd-tapzone--wait）、時間が来たら再描画なしでクラスだけ外して光らせる。
+      try {
+        if (ui.waitTimer) clearTimeout(ui.waitTimer);
+        ui.waitTimer = null;
+        var zW = document.getElementById('ddTapZone');
+        var wMs = zW ? parseIntSafe(zW.getAttribute('data-dd-wait'), 0) : 0;
+        if (zW && wMs > 0) {
+          ui.waitTimer = setTimeout(function () {
+            ui.waitTimer = null;
+            try {
+              if (zW.classList) zW.classList.remove('dd-tapzone--wait');
+            } catch (eW1) {
+              // ignore
+            }
+          }, wMs + 20);
+        }
+      } catch (eW0) {
+        // ignore
+      }
+
       bindPlayerActions();
     }
 
@@ -14093,8 +14135,9 @@
         if (idx < 0 || idx >= order.length) idx = 0;
         var next = String(order[(idx + 1) % order.length] || '');
         if (playerId !== next) return;
+        // 前の人がめくってから ワンテンポ（DD_NEXT_TAP_LOCK_MS）は押せない
         var fa = parseIntSafe(room && room.flippedAt, 0) || 0;
-        if (fa && serverNowMs() - fa < 700) return;
+        if (fa && serverNowMs() - fa < DD_NEXT_TAP_LOCK_MS) return;
         bbgFx.tap();
         ddBeatThen(function () {
           return ddTapNext(roomId, playerId);
@@ -14800,6 +14843,16 @@
     var downX = 0;
     var downY = 0;
 
+    // 円卓の席（.ll-seat の中の札）を ながおししているときは、席のほうにも印を付ける。
+    // 指で札がかくれるので、席のまわりに大きな輪を出して「押している／あとどれくらい」を見せる（CSS: .bbg-holding-seat）。
+    function seatOf() {
+      try {
+        return el.closest ? el.closest('.ll-seat') : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
     function stopHold() {
       if (timer) {
         clearTimeout(timer);
@@ -14807,6 +14860,8 @@
       }
       try {
         if (el.classList) el.classList.remove('bbg-holding');
+        var s0 = seatOf();
+        if (s0 && s0.classList) s0.classList.remove('bbg-holding-seat');
       } catch (e) {
         // ignore
       }
@@ -14820,6 +14875,8 @@
       downY = ev.clientY;
       try {
         if (el.classList) el.classList.add('bbg-holding');
+        var s1 = seatOf();
+        if (s1 && s1.classList) s1.classList.add('bbg-holding-seat');
       } catch (e) {
         // ignore
       }

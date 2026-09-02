@@ -469,6 +469,20 @@ body.ll-table-screen .app{max-width:980px}
 .ll-seat--pick .ll-seat-card{border:2px dashed var(--accent);color:var(--accent);background:var(--card);cursor:pointer;animation:bbgSeatPulse 1.2s ease-in-out infinite}
 .ll-seat--pick.ll-seat--turn .ll-seat-card{background:var(--card);color:var(--accent)}
 .ll-seat--picked .ll-seat-card{border-style:solid;box-shadow:0 0 0 4px rgba(91,157,255,.35)}
+/* 席のながおし: 指で札がかくれるので、席のまわりに大きな輪を出し、時間（BBG_HOLD_MS=.65s）とともに満ちていく。
+   bbgHoldBind が押している間だけ .ll-seat に .bbg-holding-seat を付ける。輪は席の札の下・テーブルの上に描く。
+   @property が無い端末では輪の満ち方が途中で切りかわるが、輪がひろがる動き（bbgRingGrow）は どこでも出る。 */
+@property --bbg-ring{syntax:'<percentage>';inherits:false;initial-value:0%}
+.ll-seat.bbg-holding-seat::before{
+  content:"";position:absolute;left:50%;top:50%;width:136px;height:136px;
+  transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;
+  background:conic-gradient(var(--accent) var(--bbg-ring,100%),rgba(91,157,255,.16) 0);
+  -webkit-mask:radial-gradient(circle,transparent 60%,#000 61%);mask:radial-gradient(circle,transparent 60%,#000 61%);
+  animation:bbgRingFill .65s linear both,bbgRingGrow .65s ease-out both;
+}
+.ll-seat.bbg-holding-seat .ll-seat-card{box-shadow:0 0 0 3px var(--accent),0 0 18px rgba(91,157,255,.7)}
+@keyframes bbgRingFill{from{--bbg-ring:0%}to{--bbg-ring:100%}}
+@keyframes bbgRingGrow{from{transform:translate(-50%,-50%) scale(.7);opacity:.6}to{transform:translate(-50%,-50%) scale(1);opacity:1}}
 /* 上の1行の小さなボタン（席えらびの「やめる」）と、犯人は踊るの状況の文 */
 .ll-status-btn{flex:0 0 auto;padding:3px 10px;font-size:12px;border-radius:999px;min-height:0}
 .hn-topnote{display:block;color:var(--accent);font-weight:900;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1590,6 +1604,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
   0%{transform:scale(1.04);box-shadow:0 0 0 0 rgba(91,157,255,.55)}
   100%{transform:scale(1);box-shadow:0 0 0 14px rgba(91,157,255,0)}
 }
+/* 前の人がめくった直後の ワンテンポ: まだ押せないので うすく（時間が来ると JS がクラスを外して光る） */
+.dd-tapzone.dd-tapzone--wait{opacity:.35;border-style:dashed;animation:none;background:rgba(255,255,255,.02)}
 .dd-tapzone--croc{
   border-style:solid;border-color:#ff5a6a;color:#fff;font-size:26px;
   background:linear-gradient(180deg,#ff5a6a,#c2273a);animation:ddCrocPulse .5s ease-in-out infinite alternate;
@@ -2239,40 +2255,66 @@ body.bbg-demo-on .app{padding-bottom:104px}
      うすい暗幕＋半透明のパネルごしに 席・すてふだ・直近のプレイが見える。左右をあけて席が見えるように少しせまく。
      ペインの外に描くモーダルなので touch-action もペインと同じ pan-x にして、
      モーダルの上からでも上下スワイプでペインを動かせるようにする（JS: bbgBindPaneGestures）。 */
-  body.ll-player-screen .ll-overlay{touch-action:pan-x}
+  /* モーダルは画面の中央ではなく「テーブルの中央」（上のタイトルバー＋1行ぶん下＝およそ 65dvh）に寄せる。
+     上下の余白を 30dvh:0 にすると flex の中央が 65dvh になる（パネルの高さによらない）。 */
+  body.ll-player-screen .ll-overlay{touch-action:pan-x;padding-top:30dvh;padding-bottom:6px}
   body.ll-player-screen .ll-overlay-backdrop{background:rgba(0,0,0,.22)}
   body.ll-player-screen .ll-overlay-panel{
     background:rgba(20,29,49,.84);border-color:rgba(91,157,255,.45);
     max-width:min(600px,76vw);overscroll-behavior:contain;
     box-shadow:0 10px 32px rgba(0,0,0,.5);
   }
-  /* 同時えらび・ふせカードえらび・目撃者のカード列: カードは高さから決めて1行に収める */
-  body.ll-player-screen .ll-overlay-panel .hn-rumor-card{width:auto;height:clamp(44px,17dvh,90px);aspect-ratio:3/4;flex:0 0 auto}
-  body.ll-player-screen .ll-overlay-panel .hn-rumor-row{gap:6px;flex-wrap:nowrap;overflow-x:auto}
-  /* 結果の小さな箱（.ll-overlay--mini・2026-09-02）: 暗幕なし・テーブルの真ん中に小さく出す（席は全部見える）。
-     ラブレターの推測結果・道化・騎士・将軍・魔術師・大臣、犯人は踊るの少年・目撃者・注意 に使う。 */
+  /* 同時えらび・ふせカードえらび・目撃者のカード列: カードは高さから決めて1行に収める（見て選ぶものなので大きめ） */
+  body.ll-player-screen .ll-overlay-panel .hn-rumor-card{width:auto;height:clamp(56px,28dvh,120px);aspect-ratio:3/4;flex:0 0 auto}
+  body.ll-player-screen .ll-overlay-panel .hn-rumor-row{gap:8px;flex-wrap:nowrap;overflow-x:auto}
+  /* 結果の小さな箱（.ll-overlay--mini・2026-09-02）: 暗幕なし・テーブルの中央に出す（上下の席が見える高さに収める）。
+     ラブレターの推測結果・道化・騎士・将軍・魔術師・大臣、犯人は踊るの少年・目撃者・注意 に使う。
+     文（題・名前・結果のはんこ・ボタン）を左の列、絵（カード）を右の列にならべる 2列グリッド。
+     こうすると 高さを増やさずに カードを大きく（27dvh）できる。 */
   body.ll-player-screen .ll-overlay--mini .ll-overlay-backdrop{background:transparent}
   body.ll-player-screen .ll-overlay--mini .ll-overlay-panel{
-    max-width:min(380px,50vw);max-height:44dvh;padding:4px 10px;gap:2px;border-radius:10px;
-    background:rgba(20,29,49,.9);
+    max-width:min(520px,66vw);max-height:46dvh;padding:6px 14px;border-radius:12px;
+    background:rgba(20,29,49,.86);
+    display:grid;grid-template-columns:minmax(0,1fr) auto;grid-auto-rows:auto;
+    column-gap:14px;row-gap:3px;align-items:center;justify-items:start;
   }
-  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel .stack{gap:2px}
-  body.ll-player-screen .ll-overlay--mini .big{font-size:clamp(11px,3.4dvh,14px);line-height:1.15}
-  body.ll-player-screen .ll-overlay--mini .muted{font-size:clamp(9px,2.6dvh,11px);line-height:1.2}
-  body.ll-player-screen .ll-overlay--mini .ll-modal-name{font-size:clamp(9px,2.6dvh,11px);margin:0}
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;grid-auto-rows:auto;
+    column-gap:14px;row-gap:3px;align-items:center;justify-items:start;grid-column:1 / -1;width:100%;
+  }
+  /* 左の列: 文 */
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > :not(.ll-reveal-card):not(.ll-compare-row):not(.hn-rumor-row):not(.ll-action-card):not(.stack),
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack > :not(.ll-reveal-card):not(.ll-compare-row):not(.hn-rumor-row):not(.ll-action-card){
+    grid-column:1;min-width:0;width:100%;text-align:left;
+  }
+  /* 右の列: 絵（左の列の全行にまたがる） */
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .ll-reveal-card,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .ll-compare-row,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .hn-rumor-row,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .ll-action-card,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack > .ll-reveal-card,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack > .ll-compare-row,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack > .hn-rumor-row,
+  body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack > .ll-action-card{
+    grid-column:2;grid-row:1 / span 5;align-self:center;justify-self:center;margin:0;
+  }
+  body.ll-player-screen .ll-overlay--mini .big{font-size:clamp(12px,3.8dvh,16px);line-height:1.15}
+  body.ll-player-screen .ll-overlay--mini .muted{font-size:clamp(10px,2.9dvh,12px);line-height:1.25}
+  body.ll-player-screen .ll-overlay--mini .ll-modal-name{font-size:clamp(9px,2.7dvh,11px);margin:0;text-align:center}
   body.ll-player-screen .ll-overlay--mini .ll-reveal-card,
   body.ll-player-screen .ll-overlay--mini .ll-compare-card,
-  body.ll-player-screen .ll-overlay--mini .ll-action-card{height:clamp(34px,13dvh,66px);width:auto;max-width:none;aspect-ratio:3/4;margin:0 auto}
-  body.ll-player-screen .ll-overlay--mini .ll-compare-row{gap:10px;margin-top:0;justify-content:center}
-  body.ll-player-screen .ll-overlay--mini .hn-rumor-row{gap:4px}
-  body.ll-player-screen .ll-overlay--mini .hn-rumor-card{height:clamp(34px,13dvh,66px)}
-  body.ll-player-screen .ll-overlay--mini .hn-boy-name{font-size:clamp(14px,5dvh,22px)}
-  body.ll-player-screen .ll-overlay--mini .hn-card-info-name{font-size:clamp(11px,3.4dvh,14px)}
-  body.ll-player-screen .ll-overlay--mini .ll-stamp-row{margin:0}
-  body.ll-player-screen .ll-overlay--mini .bbg-stamp{font-size:clamp(10px,3dvh,13px);padding:2px 8px}
+  body.ll-player-screen .ll-overlay--mini .ll-action-card{height:clamp(60px,27dvh,110px);width:auto;max-width:none;aspect-ratio:3/4;margin:0 auto}
+  body.ll-player-screen .ll-overlay--mini .ll-compare-row{gap:10px;margin-top:0;justify-content:center;flex-wrap:nowrap}
+  body.ll-player-screen .ll-overlay--mini .ll-compare-col{flex:0 0 auto}
+  body.ll-player-screen .ll-overlay--mini .hn-rumor-row{gap:6px;overflow:visible}
+  body.ll-player-screen .ll-overlay--mini .hn-rumor-card{height:clamp(56px,25dvh,100px)}
+  body.ll-player-screen .ll-overlay--mini .hn-boy-name{font-size:clamp(16px,6dvh,26px);text-align:left}
+  body.ll-player-screen .ll-overlay--mini .hn-card-info-name{font-size:clamp(12px,3.8dvh,16px);text-align:left}
+  body.ll-player-screen .ll-overlay--mini .ll-stamp-row{margin:0;justify-content:flex-start}
+  body.ll-player-screen .ll-overlay--mini .bbg-stamp{font-size:clamp(11px,3.4dvh,14px);padding:2px 10px}
   body.ll-player-screen .ll-overlay--mini .ll-modal-actions,
-  body.ll-player-screen .ll-overlay--mini .row{margin-top:2px;gap:6px}
-  body.ll-player-screen .ll-overlay--mini button{min-width:0;min-height:0;padding:4px 12px;font-size:clamp(10px,3dvh,13px)}
+  body.ll-player-screen .ll-overlay--mini .row{margin-top:2px;gap:6px;justify-content:flex-start!important}
+  body.ll-player-screen .ll-overlay--mini button{min-width:0;min-height:0;padding:5px 14px;font-size:clamp(11px,3.4dvh,14px)}
   .ll-overlay-panel .stack{gap:6px}
   .ll-overlay-panel .big{font-size:clamp(14px,4.6dvh,20px);line-height:1.2}
   .ll-overlay-panel .muted{font-size:clamp(10px,3dvh,13px);line-height:1.25}
