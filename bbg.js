@@ -6625,22 +6625,15 @@
 
     var contentHtml = '';
 
-    // 「墓地」— 直近3枚を横並びで表示する（右端が最新・古いものは半透明）。
+    // 「すてふだ」— さいごに捨てられた1枚だけを出す（枚数や直近3枚の並びは出さない）。
     var pilesHtml = '';
     try {
       var grave = st && Array.isArray(st.graveyard) ? st.graveyard : [];
-      var recent = grave.length > 3 ? grave.slice(grave.length - 3) : grave.slice();
-      var icons = '';
-      for (var gi0 = 0; gi0 < recent.length; gi0++) {
-        var isNewest0 = gi0 === recent.length - 1;
-        icons +=
-          '<span class="hn-grave-item' + (isNewest0 ? '' : ' hn-grave-item--old') + '">' +
-          hnGraveIconHtml(String(recent[gi0] || '')) +
-          '</span>';
-      }
+      var lastGrave = grave.length ? String(grave[grave.length - 1] || '') : '';
+      var icons = lastGrave ? '<span class="hn-grave-item">' + hnGraveIconHtml(lastGrave) + '</span>' : '';
       pilesHtml =
         '<div class="ll-piles-box">' +
-        '<div class="ll-piles-text">墓地 ' + escapeHtml(String(grave.length || 0)) + '</div>' +
+        '<div class="ll-piles-text">さいごの すてふだ</div>' +
         '<div class="hn-grave-icons">' + icons + '</div>' +
         '</div>';
     } catch (ePile) {
@@ -13276,6 +13269,34 @@
     }
   }
 
+  // ほかの人が「めくる！」をタップした合図（画面ぜんたいの一瞬の光 + ふちの光 + 上に「○○が めくった！」）。
+  // カードの落ちるアニメ(ddPlayCardDrop)だけだと、よそ見していると気づきにくい。
+  // とくにスマホ横置きは番手の1行(.dd-line)を出していないので、これが「いま めくれた」の主役になる。
+  // 要素は body 直下に足す: 直後の再描画（innerHTML差し替え）でも消えず、約1秒で自分で消える。
+  // 呼び出し側が flippedAt の変化を見て、めくれた直後の1回だけ呼ぶ（自分でめくったときは呼ばない）。
+  function ddPlayFlipFlash(byName) {
+    try {
+      var olds = document.querySelectorAll('.dd-flipflash');
+      for (var i = 0; i < olds.length; i++) {
+        if (olds[i] && olds[i].parentNode) olds[i].parentNode.removeChild(olds[i]);
+      }
+      var el = document.createElement('div');
+      el.className = 'dd-flipflash';
+      el.setAttribute('aria-hidden', 'true');
+      el.innerHTML = '<b>' + escapeHtml(String(byName == null ? '' : byName)) + 'が めくった！</b>';
+      document.body.appendChild(el);
+      setTimeout(function () {
+        try {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        } catch (e1) {
+          // ignore
+        }
+      }, 1150);
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // 一行の合図（プレイヤー画面・テーブルで共用）。meMid が空ならテーブル向けの言い回し。
   function ddLineHtml(room, meMid) {
     var phase = String((room && room.phase) || '');
@@ -13764,6 +13785,9 @@
         var dropKey = String(parseIntSafe(room && room.flippedAt, 0) || 0);
         if (ui.fxReady && dropKey !== ui.lastDropKey && (phase === 'call' || phase === 'croc')) {
           ddPlayCardDrop(viewEl);
+          // めくったのは ddTurnMid（turnIdx は「さいごにめくった人」）。自分のときは合図を出さない。
+          var flipperMid = ddTurnMid(room);
+          if (flipperMid && String(flipperMid) !== String(playerId || '')) ddPlayFlipFlash(ddName(room, flipperMid));
         }
         ui.lastDropKey = dropKey;
       } catch (eDrop) {
@@ -14404,6 +14428,9 @@
         var dropKey = String(parseIntSafe(room && room.flippedAt, 0) || 0);
         if (tUi.fxReady && dropKey !== tUi.lastDropKey && (phase === 'call' || phase === 'croc')) {
           ddPlayCardDrop(viewEl);
+          // テーブル端末はだれの手番でもないので、めくれたら毎回「○○が めくった！」を出す
+          var flipperMidT = ddTurnMid(room);
+          if (flipperMidT) ddPlayFlipFlash(ddName(room, flipperMidT));
         }
         tUi.lastDropKey = dropKey;
       } catch (eDrop) {
@@ -18658,30 +18685,19 @@
         return out;
       }
 
+      // すてふだ: さいごに捨てられた1枚だけ（枚数・重ねの層は出さない）
       var graveHtml = '';
       if (!grave.length) {
         graveHtml = '<div class="muted">（なし）</div>';
       } else {
-        var graveCount = grave.length;
-        var top = String(grave[graveCount - 1] || '');
-        var layerCount = Math.min(4, graveCount);
-        for (var gi = layerCount - 1; gi >= 1; gi--) {
-          graveHtml +=
-            '<div class="ll-table-grave-stack-card ll-table-grave-stack-card--under" style="left:' +
-            String(gi * 7) +
-            'px;top:' +
-            String(gi * -3) +
-            'px"></div>';
-        }
-        graveHtml += '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + hnCardImgHtml(top) + '</div>';
+        var top = String(grave[grave.length - 1] || '');
+        graveHtml = '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + hnCardImgHtml(top) + '</div>';
       }
 
       var centerHtml =
         '<div class="ll-table-center">' +
         '<div class="ll-table-pile">' +
-        '<div class="muted">墓地/<b>' +
-        escapeHtml(String(grave.length || 0)) +
-        '枚</b></div>' +
+        '<div class="muted">すてふだ</div>' +
         '<div class="ll-table-grave-stack">' +
         graveHtml +
         '</div>' +
@@ -25308,39 +25324,15 @@
         return out;
       }
 
+      // すてふだ: さいごに捨てられた1枚だけを表向きで置く（枚数・重ねの層・直近3枚の並びは出さない）。
+      // 枠(.ll-table-grave-stack)は固定サイズなので、空でも最初の捨て札で中央の位置は動かない。
       var graveHtml2 = '';
       if (!grave.length) {
         graveHtml2 = '<div class="muted">（なし）</div>';
       } else {
-        var graveCount = grave.length;
-        var top = String(grave[graveCount - 1] || '');
-        var layerCount = Math.min(4, graveCount);
-        for (var gi = layerCount - 1; gi >= 1; gi--) {
-          graveHtml2 +=
-            '<div class="ll-table-grave-stack-card ll-table-grave-stack-card--under" style="left:' +
-            String(gi * 7) +
-            'px;top:' +
-            String(gi * -3) +
-            'px"></div>';
-        }
-        graveHtml2 += '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + hnCardImgHtml(top) + '</div>';
+        var top = String(grave[grave.length - 1] || '');
+        graveHtml2 = '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + hnCardImgHtml(top) + '</div>';
       }
-
-      // 直近3枚を小さく表向きで並べる行（右端が最新）。
-      // 行そのものは空でも出しておく（最初の捨て札で中央の山の位置が動かないように・CSSで高さ確保）。
-      var graveRecentHtml = '';
-      try {
-        var recentG = grave.length > 3 ? grave.slice(grave.length - 3) : grave.slice();
-        for (var rgi = 0; rgi < recentG.length; rgi++) {
-          graveRecentHtml +=
-            '<div class="hn-grave-mini' + (rgi === recentG.length - 1 ? '' : ' hn-grave-mini--old') + '">' +
-            hnCardImgHtml(String(recentG[rgi] || '')) +
-            '</div>';
-        }
-      } catch (eGR) {
-        graveRecentHtml = '';
-      }
-      graveRecentHtml = '<div class="hn-grave-recent">' + graveRecentHtml + '</div>';
 
       var lastPlay = hnLastPlayText(room);
 
@@ -25377,13 +25369,10 @@
         '<div class="ll-table-center ll-table-center--ll ll-table-center--hn">' +
         '<div class="ll-table-center-top">' +
         '<div class="ll-table-pile">' +
-        '<div class="muted">墓地/<b>' +
-        escapeHtml(String(grave.length || 0)) +
-        '枚</b></div>' +
+        '<div class="muted">すてふだ</div>' +
         '<div class="ll-table-grave-stack">' +
         graveHtml2 +
         '</div>' +
-        (graveRecentHtml || '') +
         '</div>' +
         '</div>' +
         // バナー枠は常設（最初のプレイで墓地の位置が上へ寄らないように）。

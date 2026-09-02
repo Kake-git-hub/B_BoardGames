@@ -1051,13 +1051,8 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .hn-progress-count{font-weight:900;font-size:15px}
 .hn-progress-wait{font-size:13px;line-height:1.4}
 
-/* 墓地：直近3枚（右端が最新・古いものは半透明） */
+/* すてふだ：さいごに捨てられた1枚だけ（枚数・直近3枚の並びは出さない） */
 .hn-grave-item{display:inline-flex}
-.hn-grave-item--old{opacity:.55}
-/* 空でも高さを保つ（最初の捨て札で中央の山の位置が動かないように。56px幅の3:4＝約75px） */
-.hn-grave-recent{display:flex;gap:6px;justify-content:center;margin-top:6px;min-height:75px}
-.hn-grave-mini{width:56px;aspect-ratio:3/4;border-radius:8px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
-.hn-grave-mini--old{opacity:.55}
 
 /* 少年：犯人保持者の名前を少し遅らせてポップさせる */
 .hn-boy-name{font-size:clamp(22px,7vw,34px);font-weight:900;text-align:center}
@@ -1521,6 +1516,36 @@ body.bbg-demo-on .app{padding-bottom:104px}
   14%{opacity:1;transform:translateY(-50%) scale(1)}
   78%{opacity:1;transform:translateY(-50%) scale(1)}
   100%{opacity:0;transform:translateY(-50%) scale(1)}
+}
+/* ほかの人が「めくる！」をタップした合図（JS: ddPlayFlipFlash）。
+   画面ぜんたいが一瞬白くひかり、ふちが青く光って、上に「○○が めくった！」が出る。
+   コールするために新しいカードを すぐ見たいので、カードの上には何も重ねない。
+   body 直下に足すので 直後の再描画（innerHTML差し替え）でも消えず、約1秒で自分で消える。
+   スマホ横置きは番手の1行(.dd-head)が出ないため、めくった瞬間の合図は これが主役。 */
+.dd-flipflash{position:fixed;inset:0;z-index:7000;pointer-events:none;overflow:hidden}
+.dd-flipflash::before{
+  content:"";position:absolute;inset:0;background:#fff;opacity:0;
+  animation:ddFlipFlashWhite .5s ease-out forwards;
+}
+.dd-flipflash::after{
+  content:"";position:absolute;inset:0;
+  box-shadow:inset 0 0 0 5px rgba(91,157,255,.95),inset 0 0 36px 12px rgba(91,157,255,.55);
+  animation:ddFlipFlashRing 1s ease-out forwards;
+}
+.dd-flipflash b{
+  position:absolute;left:50%;top:calc(6px + env(safe-area-inset-top,0px));transform:translateX(-50%);
+  padding:4px 14px;border-radius:999px;white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis;
+  font-size:clamp(16px,4.2vw,22px);font-weight:900;line-height:1.3;color:#0b0f1a;
+  background:var(--accent);box-shadow:0 4px 18px rgba(91,157,255,.55);
+  animation:ddFlipFlashLabel 1.1s ease forwards;
+}
+@keyframes ddFlipFlashWhite{0%{opacity:.62}100%{opacity:0}}
+@keyframes ddFlipFlashRing{0%{opacity:1}60%{opacity:.85}100%{opacity:0}}
+@keyframes ddFlipFlashLabel{
+  0%{opacity:0;transform:translate(-50%,-8px) scale(.9)}
+  12%{opacity:1;transform:translate(-50%,0) scale(1)}
+  80%{opacity:1;transform:translate(-50%,0) scale(1)}
+  100%{opacity:0;transform:translate(-50%,0) scale(1)}
 }
 .dd-line--me{color:var(--accent);animation:ddLinePulse 1.1s ease-in-out infinite alternate}
 .dd-line--croc{color:#ff5a6a;font-size:22px;animation:ddLineBlink .45s ease-in-out infinite alternate}
@@ -1997,7 +2022,13 @@ body.bbg-demo-on .app{padding-bottom:104px}
     .app:has(.bbg-panes) .footer{display:none}
     .app:has(.bbg-panes) #view{flex:1 1 auto;min-height:0;padding:6px 10px;overflow:hidden}
     .app:has(.bbg-panes) #view > .stack{height:100%;min-height:0;display:flex;flex-direction:column}
-    .app:has(.bbg-panes) .bbg-panes{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;display:block;touch-action:pan-y}
+    /* touch-action は pan-x。上下のスワイプはJS(bbgBindPaneGestures)がペイン切替に使うので、
+       ブラウザに上下パンを渡さない（pan-y にすると ブラウザが先にスクロール/バウンスを始めて
+       pointercancel になり、ペインが動かず画面が少し動くだけになる）。
+       横スクロールする手札(.bz-hand 等)は自分の touch-action で動くので影響なし。 */
+    .app:has(.bbg-panes) .bbg-panes{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;display:block;touch-action:pan-x}
+    /* ペイン表示中は ページ自体のバウンス／引っぱって更新 を止める（端まで来た内部スクロールが外へ伝わらないように） */
+    html:has(.bbg-panes),body:has(.bbg-panes){overscroll-behavior:none}
     /* ペイン自体は上下スクロールしない（FIX）。上下スワイプは常にペイン切替。
        高さが伸びる一覧（ログ・みんな等）はペイン内の .bbg-scroll に入れて内部スクロールさせる。 */
     .app:has(.bbg-panes) .bbg-pane{
@@ -2009,7 +2040,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
     }
     /* 指でつまんで動かしている間は、追従をなめらかにするため transition を切る */
     .app:has(.bbg-panes) .bbg-panes--drag .bbg-pane{transition:none}
-    .app:has(.bbg-panes) .bbg-pane .bbg-scroll{flex:1 1 auto;min-height:0;overflow-y:auto}
+    .app:has(.bbg-panes) .bbg-pane .bbg-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
     /* あまったスペースは主要ブロックへ: .bbg-grow を付けた要素がペインの残り高さを使う */
     .app:has(.bbg-panes) .bbg-pane .bbg-grow{flex:1 1 auto;min-height:0}
 
@@ -2049,7 +2080,7 @@ body.bbg-demo-on .app{padding-bottom:104px}
     }
     .app:has(.bbg-panes) .bbg-split-side{
       order:1;flex:0 0 30%;max-width:30%;min-width:0;min-height:0;
-      display:flex;flex-direction:column;gap:6px;justify-content:center;overflow-y:auto;
+      display:flex;flex-direction:column;gap:6px;justify-content:center;overflow-y:auto;overscroll-behavior:contain;
     }
   }
 }
@@ -2150,10 +2181,6 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .ll-table .ll-table-pile{gap:2px}
   .ll-table .ll-table-pile .muted{font-size:9px;line-height:1.1}
   .ll-table .ll-table-pile-count{font-size:11px;line-height:1.1}
-
-  /* 直近の捨て札（犯人は踊る） */
-  .ll-table .hn-grave-recent{gap:3px;margin-top:3px;min-height:0}
-  .ll-table .hn-grave-mini{width:clamp(16px,5.6dvh,26px);border-radius:4px}
 
   /* 伏せ札（ラブレター） */
   .ll-table .ll-table-facedown{left:4px;top:4px;gap:2px;font-size:9px}
