@@ -6584,6 +6584,21 @@
     // Table device should not operate player screens.
     var canOperate = !isTableGmDevice;
 
+    // スマホ横（ペイン表示）かどうか（2026-09-02）。手札ペインを使うのは「自分の番に出すカードをえらぶとき」だけにする:
+    //  ・対象えらび: モーダルの対象ボタンではなく、テーブルペインの席を ながおし（hnSeatPick）
+    //  ・同時えらび（うわさ・情報操作・取引）: 手札ペインを置きかえず、テーブルの上の透過モーダル（pendModalHtml）
+    //  ・自分だけに見える結果: 席が見える小さな箱（.ll-overlay--mini）
+    var paneMode = false;
+    try {
+      paneMode = bbgPanesActive();
+    } catch (ePm) {
+      paneMode = false;
+    }
+    var hnSeatPick = null; // 対象にできる席の一覧（席えらび中だけ）
+    var hnSeatPickCard = '';
+    var pendModalHtml = '';
+    var pendNote = '';
+
     var alreadyChosenInfo = false;
     try {
       alreadyChosenInfo = !!(pending && pending.type === 'info' && pending.choices && pending.choices[String(playerId)] !== undefined);
@@ -6868,6 +6883,8 @@
     } catch (ePriv) {
       privateHtml = '';
     }
+    // スマホ横: 自分だけに見える結果（少年・目撃者・注意）は 席が見える小さな箱にする（2026-09-02）
+    if (paneMode && privateHtml) privateHtml = privateHtml.replace('class="ll-overlay ll-sheet"', 'class="ll-overlay ll-sheet ll-overlay--mini"');
     try {
       if (canOperate && ui && ui.hnAction && ui.hnAction.type === 'play') {
         var act = ui.hnAction;
@@ -6951,6 +6968,14 @@
         var canConfirm = false;
         var title = String(def.name || '') + ' を使用';
 
+        // スマホ横: 対象はテーブルの席の ながおしで えらぶ（モーダルは出さない）。
+        // 犬は 相手を決めたあと、ふせカードえらびのモーダルだけ テーブルの上に透過で出す。
+        var seatPickNowH = !!(paneMode && String(act.step || 'target') !== 'pick' && eligible.length);
+        if (seatPickNowH) {
+          hnSeatPick = eligible.slice();
+          hnSeatPickCard = cardId;
+        }
+
         if (cardId === 'detective' || cardId === 'witness') {
           if (step !== 'target') step = 'target';
           body = '<div class="muted">対象</div><div class="stack">' + targetButtons(act.targetPid) + '</div>';
@@ -6974,33 +6999,41 @@
           canConfirm = !!(act.targetPid);
         }
 
-        modalHtml =
-          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('act:' + String(cardId || '')) + '">' +
-          '<div class="ll-overlay-backdrop" id="hnModalBg"></div>' +
-          '<div class="ll-overlay-panel">' +
-          '<div class="stack">' +
-          '<div class="big ll-modal-title">' +
-          escapeHtml(title) +
-          '</div>' +
-          '<div class="muted center">' +
-          escapeHtml('使用したカード：' + String(def.name || cardId || '')) +
-          '</div>' +
-          (body || '') +
-          '<div id="hnPlayError" class="form-error" role="alert"></div>' +
-          '<div class="row ll-modal-actions" style="justify-content:space-between">' +
-          '<button class="ghost" id="hnModalCancel">キャンセル</button>' +
-          // 使用ボタンは廃止：対象/カードそのものを ながおしで確定する
-          '<span></span>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>';
+        if (!seatPickNowH) {
+          modalHtml =
+            '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('act:' + String(cardId || '')) + '">' +
+            '<div class="ll-overlay-backdrop" id="hnModalBg"></div>' +
+            '<div class="ll-overlay-panel">' +
+            '<div class="stack">' +
+            '<div class="big ll-modal-title">' +
+            escapeHtml(title) +
+            '</div>' +
+            '<div class="muted center">' +
+            escapeHtml('使用したカード：' + String(def.name || cardId || '')) +
+            (paneMode && act.targetPid ? escapeHtml('　対象：' + hnPlayerName(room, String(act.targetPid || ''))) : '') +
+            '</div>' +
+            (body || '') +
+            '<div id="hnPlayError" class="form-error" role="alert"></div>' +
+            '<div class="row ll-modal-actions" style="justify-content:space-between">' +
+            '<button class="ghost" id="hnModalCancel">キャンセル</button>' +
+            // 使用ボタンは廃止：対象/カードそのものを ながおしで確定する
+            '<span></span>' +
+            '</div>' +
+            '</div>' +
+            '</div>' +
+            '</div>';
+        }
       }
     } catch (eMod) {
       modalHtml = '';
     }
 
     // Pending group actions: override main hand UI.
+    // 同時えらび（うわさ・情報操作・取引）のUIは pendUiHtml に組み立てる。
+    // 縦・タブレットでは これまでどおり手札ペインの中身と入れかわり、
+    // スマホ横（paneMode）では テーブルの上の透過モーダル（pendModalHtml）に出す（下の振り分けを参照）。
+    var pendUiHtml = '';
+    var pendNeedsChoice = false; // 自分がいま えらぶ立場か（えらび終わり／手札なし／当事者でない なら false）
     if (pending && pending.type === 'info') {
       var already = false;
       try {
@@ -7010,18 +7043,19 @@
       }
 
       if (already) {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">情報操作：決定済み（他の人を待っています）</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       } else if (!myHand.length) {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">情報操作：手札がありません</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       } else {
+        pendNeedsChoice = true;
         var selInfo = parseIntSafe(ui.hnInfoSelectedIndex, -1);
         var outInfo = '';
         for (var iiInfo = 0; iiInfo < myHand.length; iiInfo++) {
@@ -7035,7 +7069,7 @@
             '</div>';
         }
 
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">情報操作：左どなりに渡すカードを選ぶ</div>' +
           '<div class="hn-rumor-row">' +
@@ -7047,24 +7081,25 @@
     } else if (pending && pending.type === 'rumor') {
       var selRumor = parseIntSafe(ui.hnRumorSelectedIndex, -1);
       if (alreadyChosenRumor) {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">うわさ：引くカードを選択済みです（他の人を待っています）</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       } else if (!myHand.length) {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">うわさ：手札がありません</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       } else if (!rightCount) {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">うわさ：右どなりの手札がありません</div>' +
           hnPendingProgressHtml(room) +
           '</div>';
       } else {
+        pendNeedsChoice = true;
         var confirmedRumorIdx = -1;
         try {
           if (pending && pending.choices && pending.choices[String(playerId)] !== undefined) {
@@ -7085,7 +7120,7 @@
             hnCardBackImgHtml() +
             '</div>';
         }
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">うわさ：右どなりの手札 ' +
           escapeHtml(String(rightCount)) +
@@ -7118,18 +7153,19 @@
 
       if (isDealActor || isDealTarget) {
         if (alreadyChosenDeal) {
-          contentHtml =
+          pendUiHtml =
             '<div class="stack" style="gap:12px">' +
             '<div class="muted center">取引：決定済み（相手を待っています）</div>' +
             hnPendingProgressHtml(room) +
             '</div>';
         } else if (!myHand.length) {
-          contentHtml =
+          pendUiHtml =
             '<div class="stack" style="gap:12px">' +
             '<div class="muted center">取引：手札がありません</div>' +
             hnPendingProgressHtml(room) +
             '</div>';
         } else {
+          pendNeedsChoice = true;
           var outDeal2 = '';
           var selDeal2 = parseIntSafe(ui.hnDealSelectedIndex, -1);
           for (var di2 = 0; di2 < myHand.length; di2++) {
@@ -7142,7 +7178,7 @@
               hnCardImgHtml(String(myHand[di2] || '')) +
               '</div>';
           }
-          contentHtml =
+          pendUiHtml =
             '<div class="stack" style="gap:12px">' +
             '<div class="muted center">取引：' +
             escapeHtml(hnPlayerName(room, dealActor)) +
@@ -7159,7 +7195,7 @@
             '</div>';
         }
       } else {
-        contentHtml =
+        pendUiHtml =
           '<div class="stack" style="gap:12px">' +
           '<div class="muted center">取引：' +
           escapeHtml(hnPlayerName(room, dealActor)) +
@@ -7169,7 +7205,47 @@
           hnPendingProgressHtml(room) +
           '</div>';
       }
-    } else {
+    }
+    // 同時えらびの振り分け（2026-09-02）:
+    //  ・縦・タブレット: これまでどおり手札ペインの中身と入れかえる
+    //  ・スマホ横: 手札ペインは手札のまま。えらぶ立場なら テーブルの上の透過モーダル、
+    //             そうでなければ モーダルは出さず 上の1行に状況（pendNote）だけ出す
+    if (pendUiHtml && !paneMode) {
+      contentHtml = pendUiHtml;
+    } else if (pendUiHtml && paneMode) {
+      if (pendNeedsChoice) {
+        pendModalHtml =
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' +
+          escapeHtml('pend:' + String((pending && pending.type) || '')) +
+          '">' +
+          '<div class="ll-overlay-backdrop"></div>' +
+          '<div class="ll-overlay-panel">' +
+          pendUiHtml +
+          '</div>' +
+          '</div>';
+      } else {
+        try {
+          var pnM = /<div class="muted center">([\s\S]*?)<\/div>/.exec(pendUiHtml);
+          var pnT = pnM && pnM[1] ? String(pnM[1]).replace(/<[^>]+>/g, '') : '';
+          var pgT = String(hnPendingProgressHtml(room) || '')
+            .replace(/<span class="bbg-wait-dots">[\s\S]*?<\/span>/g, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          // 組み立てずみのHTMLから拾った文なので、実体参照を元にもどす（上の1行で もう一度 escapeHtml される）
+          pendNote = (pnT + (pgT ? '　' + pgT : ''))
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .trim();
+        } catch (ePn) {
+          pendNote = '';
+        }
+      }
+    }
+    if (!pendUiHtml || paneMode) {
       // 通常時：横ファン(扇)配置。タップで選択 → 下のボタンで使用する。
       if (!myHand.length) {
         contentHtml = '<div class="muted center">（手札なし）</div>';
@@ -7442,6 +7518,15 @@
       nextHtml = '';
     }
 
+    // 上の1行: 席えらび中は「○○：対象の席を ながおし」＋やめる、同時えらびの待ち中は その状況。
+    var hnTopNote = '';
+    var hnTopBtnHtml = '';
+    if (hnSeatPick) {
+      hnTopNote = String((hnCardDef(hnSeatPickCard) || {}).name || '') + '：対象の席を ながおし';
+      hnTopBtnHtml = '<button type="button" class="ghost ll-status-btn hnActCancelBtn">やめる</button>';
+    } else if (pendNote) {
+      hnTopNote = pendNote;
+    }
     var hnToplineHtml =
       '<div class="ll-topline">' +
       '<div class="ll-status">犯人は踊る ' +
@@ -7449,7 +7534,9 @@
       '<span class="muted" style="margin-left:10px">' +
       escapeHtml((turnPid ? hnPlayerName(room, turnPid) : '-') + 'のターン') +
       '</span>' +
+      (hnTopNote ? '<span class="hn-topnote">' + escapeHtml(hnTopNote) + '</span>' : '') +
       '</div>' +
+      hnTopBtnHtml +
       '</div>';
 
     // 自分の番（または同時えらびで自分が選ぶ番）は「てふだ」、
@@ -7465,6 +7552,8 @@
       } else if (pending && pending.type) {
         wantHand0 = !!(myHand && myHand.length); // うわさ・情報操作は手札のある人みんなが選ぶ
       }
+      // スマホ横: 同時えらびは テーブルの上の透過モーダルで行うので、手札ペインへは寄せない
+      if (paneMode && pending && pending.type) wantHand0 = false;
       var hnPaneTok =
         String(phase) +
         '|' +
@@ -7478,8 +7567,10 @@
       // 効果のモーダル（出すカードの確認・対象えらび・自分だけに見える結果）が出たら テーブルペインへ寄せる
       //（モーダルはテーブルの上に透過で出るので、場の状況を見ながら進められる。2026-09-02 試行）。
       // うわさ・情報操作・取引の「このカードを渡す」確認と注意(notice)は手札の操作なので寄せない。
-      var hnFxModal = modalHtml || privateHtml || '';
+      var hnFxModal = modalHtml || privateHtml || pendModalHtml || '';
       if (!hnFxModal && confirmHtml && ui && ui.hnConfirm && String(ui.hnConfirm.type || '') === 'play') hnFxModal = confirmHtml;
+      // 席えらび中もテーブルへ寄せる（モーダルは無いので 'pick:カード' を合図にする）
+      if (!hnFxModal && hnSeatPick) hnFxModal = 'pick:' + String(hnSeatPickCard);
       var hnPm = bbgPaneModalWant(ui, hnFxModal, wantHand0 ? 1 : 0);
       bbgPaneAutoWant('hn_player', hnPm.want, hnPaneTok + hnPm.tok);
     } catch (ePane1) {
@@ -7500,7 +7591,7 @@
               hnToplineHtml +
               // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
               '<div class="bbg-lonly bbg-lonly--table">' +
-              (hnTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId }) || '') +
+              (hnTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId, pickTargets: hnSeatPick || [] }) || '') +
               '</div>' +
               (resultHtml || '')
           },
@@ -7525,6 +7616,7 @@
         (privateHtml || '') +
         (confirmHtml || '') +
         (modalHtml || '') +
+        (pendModalHtml || '') +
       '</div>'
     );
   }
@@ -8117,6 +8209,30 @@
         });
       }
 
+      // テーブルの席の ながおし＝対象を決める（スマホ横。モーダルの対象ボタンと同じ流れ。2026-09-02）
+      bbgHoldBindAll(viewEl, '.ll-seat--pick .ll-seat-card', function (el) {
+        if (!ui.hnAction) return;
+        var seatEl = el && el.closest ? el.closest('.ll-seat') : null;
+        var tidS = seatEl ? String(seatEl.getAttribute('data-pick-target') || '') : '';
+        if (!tidS) return;
+        ui.hnAction.targetPid = tidS;
+        bbgFx.tap();
+        if (ui.hnAction.cardId === 'dog') {
+          ui.hnAction.step = 'pick'; // 犬: つづけて ふせカードえらびのモーダル
+          renderNow(lastRoom);
+          return;
+        }
+        submitHnAction();
+      });
+      // 席えらび中の「やめる」（上の1行。ペインごとに出るので class で全部ひろう）
+      var actCancelBtns = viewEl && viewEl.querySelectorAll ? viewEl.querySelectorAll('.hnActCancelBtn') : [];
+      for (var aci = 0; aci < actCancelBtns.length; aci++) {
+        actCancelBtns[aci].addEventListener('click', function () {
+          clearActionModal();
+          renderNow(lastRoom);
+        });
+      }
+
       // 対象ボタン: タップ=えらぶ（犬は 相手えらび→ふせカードへ）/ ながおし=そのまま使用
       bbgHoldBindAll(
         document,
@@ -8233,6 +8349,8 @@
           playHanninCard(roomId, playerId, idx, action)
             .catch(function (e) {
               setInlineError('hnPlayError', (e && e.message) || '失敗');
+              // 席のながおし（モーダルなし）からのときは エラー欄が無いので トーストで伝える
+              if (!document.getElementById('hnPlayError')) bbgShowToast((e && e.message) || '失敗');
             })
             .finally(function () {
               ui.inFlight = false;
@@ -13282,7 +13400,7 @@
   // カードの落ちるアニメ(ddPlayCardDrop)だけだと、よそ見していると気づきにくい。
   // とくにスマホ横置きは番手の1行(.dd-line)を出していないので、これが「いま めくれた」の主役になる。
   // 要素は body 直下に足す: 直後の再描画（innerHTML差し替え）でも消えず、約1秒で自分で消える。
-  // 呼び出し側が flippedAt の変化を見て、めくれた直後の1回だけ呼ぶ（自分でめくったときは呼ばない）。
+  // 呼び出し側が flippedAt の変化を見て、めくれた直後の1回だけ呼ぶ（自分でめくったときは「あなたが めくった！」）。
   function ddPlayFlipFlash(byName) {
     try {
       var olds = document.querySelectorAll('.dd-flipflash');
@@ -13794,9 +13912,9 @@
         var dropKey = String(parseIntSafe(room && room.flippedAt, 0) || 0);
         if (ui.fxReady && dropKey !== ui.lastDropKey && (phase === 'call' || phase === 'croc')) {
           ddPlayCardDrop(viewEl);
-          // めくったのは ddTurnMid（turnIdx は「さいごにめくった人」）。自分のときは合図を出さない。
+          // めくったのは ddTurnMid（turnIdx は「さいごにめくった人」）。自分がめくったときも同じ合図を出す。
           var flipperMid = ddTurnMid(room);
-          if (flipperMid && String(flipperMid) !== String(playerId || '')) ddPlayFlipFlash(ddName(room, flipperMid));
+          if (flipperMid) ddPlayFlipFlash(String(flipperMid) === String(playerId || '') ? 'あなた' : ddName(room, flipperMid));
         }
         ui.lastDropKey = dropKey;
       } catch (eDrop) {
@@ -22016,6 +22134,20 @@
 
     var statusText = '';
 
+    // スマホ横（ペイン表示）かどうか（2026-09-02）。
+    //  ・対象えらび: モーダルの対象ボタンではなく、テーブルペインの席を ながおし（llSeatPick）
+    //  ・待ちのモーダル（「道化：確認中」など）: 出さずに 上の1行に文だけ（llWaitNote）
+    //  ・結果のモーダル: 席が見える小さな箱（.ll-overlay--mini）
+    var paneMode = false;
+    try {
+      paneMode = bbgPanesActive();
+    } catch (ePm) {
+      paneMode = false;
+    }
+    var llWaitNote = '';
+    var llSeatPick = null; // 対象にできる席の一覧（席えらび中だけ）
+    var llSeatPickCard = '';
+
     var myHand = r && r.hands && Array.isArray(r.hands[playerId]) ? r.hands[playerId] : [];
     var myElim = !!(r && r.eliminated && r.eliminated[playerId]);
     var myProt = !!(r && r.protected && r.protected[playerId]);
@@ -22095,7 +22227,13 @@
     }
 
     // 誰も操作できない時間に「いま何を待っているか」を出す共通の待機モーダル。
+    // スマホ横（ペイン表示）ではモーダルを出さず、上の1行（ステータス）に文だけ出す（2026-09-02）。
+    // だれ→だれ はテーブルの矢印で見えているので、場をかくすものは置かない。
     function llWaitModalHtml(title, text) {
+      if (paneMode) {
+        llWaitNote = String(title || '') + '　' + String(text || '');
+        return '';
+      }
       return (
         '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('wait:' + String(title || '')) + '">' +
         '<div class="ll-overlay-backdrop"></div>' +
@@ -22368,13 +22506,24 @@
       }
 
       // Auto-select when only one eligible target.
-      if (needsTarget && eligible.length === 1 && !pending.target) {
+      //（スマホ横は 席のながおしで えらぶので 自動ではえらばない）
+      if (!paneMode && needsTarget && eligible.length === 1 && !pending.target) {
         pending.target = eligible[0];
       }
 
       var canConfirm = true;
       if (needsGuess && !pending.guess) canConfirm = false;
       if (needsTarget && eligible.length && !pending.target) canConfirm = false;
+
+      // スマホ横: 対象は モーダルのボタンではなく、テーブルの席を ながおしして えらぶ（2026-09-02）。
+      // 対象がまだなら モーダルは出さず 席を光らせる。兵士は 対象のあとに 推測だけのモーダルを出す。
+      var seatPickNow = !!(paneMode && needsTarget && eligible.length && !pending.target);
+      if (seatPickNow) {
+        llSeatPick = eligible.slice();
+        llSeatPickCard = pendingCard;
+      }
+      var targetNameNow = '';
+      if (pending.target) targetNameNow = ps[pending.target] ? formatPlayerDisplayName(ps[pending.target]) : String(pending.target);
 
       var targetBtns = '';
       if (needsTarget) {
@@ -22412,31 +22561,40 @@
         }
       }
 
-      modalHtml =
-        '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('play:' + String(pendingCard || '')) + '">' +
-        '<div class="ll-overlay-backdrop"></div>' +
-        '<div class="ll-overlay-panel">' +
-        '<div class="big ll-modal-title">' +
-        escapeHtml(llCardDef(pendingCard).name + ' を使用') +
-        '</div>' +
-        (compactSelectOnly
-          ? ''
-          : '<div class="ll-action-card">' +
-            llCardImgHtml(pendingCard) +
-            '</div>') +
-        (needsTarget ? '<div class="muted ll-modal-lead">対象</div><div class="stack ll-target-list">' + targetBtns + '</div>' : '') +
-        (needsGuess ? '<div class="muted ll-modal-lead">推測</div><div class="ll-guess-grid">' + guessBtns + '</div>' : '') +
-        '<div id="llPlayError" class="form-error" role="alert"></div>' +
-        '<div class="row ll-modal-actions" style="justify-content:space-between">' +
-        '<button id="llCancelPlay" class="ghost">キャンセル</button>' +
+      if (!seatPickNow) {
+        // スマホ横で対象が決まったあとは、対象のボタン一覧のかわりに「対象：名前」だけ出す。
+        var targetBlock = '';
+        if (needsTarget) {
+          targetBlock =
+            paneMode && pending.target
+              ? '<div class="muted ll-modal-lead">対象：' + escapeHtml(targetNameNow) + '</div>'
+              : '<div class="muted ll-modal-lead">対象</div><div class="stack ll-target-list">' + targetBtns + '</div>';
+        }
         // 使用ボタンは廃止：対象/推測そのものを ながおしで確定する。
-        // 対象にできる相手がいないときだけ、ながおしの確定ボタンを出す。
-        (needsTarget && !eligible.length
-          ? '<button id="llConfirmPlay" class="primary bbg-holdbtn">使用</button>' :
-          '<span></span>') +
-        '</div>' +
-        '</div>' +
-        '</div>';
+        // 対象にできる相手がいないとき（と、スマホ横で対象が決まったのに送れなかったとき）だけ、ながおしの確定ボタンを出す。
+        var showConfirmBtn = !!((needsTarget && !eligible.length) || (paneMode && needsTarget && pending.target && !needsGuess));
+        modalHtml =
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="' + escapeHtml('play:' + String(pendingCard || '')) + '">' +
+          '<div class="ll-overlay-backdrop"></div>' +
+          '<div class="ll-overlay-panel">' +
+          '<div class="big ll-modal-title">' +
+          escapeHtml(llCardDef(pendingCard).name + ' を使用') +
+          '</div>' +
+          (compactSelectOnly
+            ? ''
+            : '<div class="ll-action-card">' +
+              llCardImgHtml(pendingCard) +
+              '</div>') +
+          targetBlock +
+          (needsGuess ? '<div class="muted ll-modal-lead">推測</div><div class="ll-guess-grid">' + guessBtns + '</div>' : '') +
+          '<div id="llPlayError" class="form-error" role="alert"></div>' +
+          '<div class="row ll-modal-actions" style="justify-content:space-between">' +
+          '<button id="llCancelPlay" class="ghost">キャンセル</button>' +
+          (showConfirmBtn ? '<button id="llConfirmPlay" class="primary bbg-holdbtn">使用</button>' : '<span></span>') +
+          '</div>' +
+          '</div>' +
+          '</div>';
+      }
     }
 
     // Peek modal (道化)
@@ -22701,10 +22859,34 @@
       }
     }
 
+    // スマホ横: 結果のモーダル（推測・確認・比較・交換・捨て札・大臣）は、席が見える小さな箱にする（2026-09-02）。
+    // 全員公開（山札切れ）はカードが多いので ふつうの大きさのまま。
+    if (paneMode && modalHtml) {
+      try {
+        var mkM = /data-modal-key="([^"]*)"/.exec(modalHtml);
+        var mkey = mkM && mkM[1] ? String(mkM[1]) : '';
+        if (/^(peek|rev:guard|rev:knight|rev:general_swap|rev:wizard|rev:minister_self|rev:minister_other)$/.test(mkey)) {
+          modalHtml = modalHtml.replace('class="ll-overlay ll-sheet"', 'class="ll-overlay ll-sheet ll-overlay--mini"');
+        }
+      } catch (eMini) {
+        // ignore
+      }
+    }
+
+    // 上の1行: 席えらび中は「○○：対象の席を ながおし」＋やめる、待ち中は待ちの文。
+    var statusBtnHtml = '';
+    if (llSeatPick) {
+      statusText = String((llCardDef(llSeatPickCard) || {}).name || '') + '：対象の席を ながおし';
+      statusBtnHtml = '<button type="button" class="ghost ll-status-btn llCancelPlayBtn">やめる</button>';
+    } else if (llWaitNote) {
+      statusText = llWaitNote;
+    }
     var statusCardHtml =
       '<div class="card ll-status-card" style="padding:10px"><div class="ll-topline"><div class="ll-status">' +
       escapeHtml(statusText || '') +
-      '</div></div></div>';
+      '</div>' +
+      statusBtnHtml +
+      '</div></div>';
 
     // ペインは2枚だけ（0=テーブル / 1=てふだ）。すてふだ・その他ペインは置かない。
     // 縦画面・タブレットではペインが縦に並ぶだけなので、そこでは従来どおりの情報も残す。
@@ -22723,7 +22905,8 @@
     try {
       var llPaneTok =
         String(phase) + '|' + String((r && r.no) || '') + '|' + String((r && r.currentPlayerId) || '');
-      var llPm = bbgPaneModalWant(ui, modalHtml, phase === 'playing' && isMyTurn ? 1 : 0);
+      // 席えらび中もテーブルへ寄せる（モーダルは無いので 'pick:カード' を合図にする）
+      var llPm = bbgPaneModalWant(ui, modalHtml || (llSeatPick ? 'pick:' + String(llSeatPickCard) : ''), phase === 'playing' && isMyTurn ? 1 : 0);
       bbgPaneAutoWant('ll_player', llPm.want, llPaneTok + llPm.tok);
     } catch (ePane0) {
       // ignore
@@ -22743,7 +22926,7 @@
               statusCardHtml +
               // 円卓ビューはスマホ横のペイン表示のときだけ（縦・タブレットは従来どおり省く）
               '<div class="bbg-lonly bbg-lonly--table">' +
-              llTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId }) +
+              llTableVizHtml(room, ui.tviz || (ui.tviz = {}), { viewerId: playerId, pickTargets: llSeatPick || [] }) +
               '</div>' +
               (resultHtml || '') +
               (spectateHtml || '')
@@ -24150,6 +24333,14 @@
           renderNow(lastRoom);
         });
       }
+      // 席えらび中の「やめる」（上の1行。ペインごとに出るので class で全部ひろう）
+      var cancelBtns2 = viewEl && viewEl.querySelectorAll ? viewEl.querySelectorAll('.llCancelPlayBtn') : [];
+      for (var cbi = 0; cbi < cancelBtns2.length; cbi++) {
+        cancelBtns2[cbi].addEventListener('click', function () {
+          ui.pending = null;
+          renderNow(lastRoom);
+        });
+      }
 
       // 手札: タップで選択（もう一度タップで解除）。使用は下の大きなボタンに一本化した。
       var hand2 = document.getElementById('llHand2');
@@ -24287,6 +24478,8 @@
           })
           .catch(function () {
             setInlineError(errId, '実行に失敗しました');
+            // 席のながおし（モーダルなし）からのときは エラー欄が無いので トーストで伝える
+            if (!document.getElementById(errId)) bbgShowToast('実行に失敗しました');
           })
           .finally(function () {
             ui.playInFlight = false;
@@ -24324,6 +24517,22 @@
           renderNow(lastRoom);
         }
       );
+
+      // テーブルの席の ながおし＝対象を決める（スマホ横。モーダルの対象ボタンと同じ流れ。2026-09-02）
+      bbgHoldBindAll(viewEl, '.ll-seat--pick .ll-seat-card', function (el) {
+        if (!ui.pending || !ui.pending.card) return;
+        var seatEl = el && el.closest ? el.closest('.ll-seat') : null;
+        var tidS = seatEl ? String(seatEl.getAttribute('data-pick-target') || '') : '';
+        if (!tidS) return;
+        ui.pending.target = tidS;
+        bbgFx.tap();
+        var pcS = llCardRankStr(String(ui.pending.card || ''));
+        if (pcS === '1' && !ui.pending.guess) {
+          renderNow(lastRoom); // 兵士: つづけて 推測のモーダル
+          return;
+        }
+        llSubmitPlay();
+      });
 
       // 推測（兵士）: タップ=えらぶ / ながおし=そのまま使用（対象がまだなら えらぶだけ）
       bbgHoldBindAll(
@@ -24436,6 +24645,21 @@
     var ui = tUi || {};
     var o = opts || {};
     var viewerId = o.viewerId ? String(o.viewerId) : '';
+    // 対象えらび（スマホ横）: opts.pickTargets に入っている席は ながおしで えらべる（.ll-seat--pick）。
+    // ほかの席はうすくして、いま えらぶ番だと ひと目でわかるようにする（.ll-table--pick）。
+    var pickMap = {};
+    var pickOn = false;
+    try {
+      var pt = Array.isArray(o.pickTargets) ? o.pickTargets : [];
+      for (var pk = 0; pk < pt.length; pk++) {
+        if (pt[pk]) pickMap[String(pt[pk])] = 1;
+      }
+      pickOn = !!pt.length;
+    } catch (ePk) {
+      pickMap = {};
+      pickOn = false;
+    }
+    var pickSelected = o.pickSelected ? String(o.pickSelected) : '';
     // スマホ横では席のはんけいも小さくする（中身の大きさはCSSのメディアクエリが決める）。
     var compact = false;
     try {
@@ -24664,20 +24888,25 @@
       var isElimSeat = !!(r && r.eliminated && r.eliminated[String(pid)]);
       var isSoloEffectSeat = !!(effectSoloId && String(pid) === String(effectSoloId));
       var isProtectedSeat = !!(phase === 'playing' && r && r.protected && r.protected[String(pid)]);
+      var isPickSeat = !!(pickOn && pickMap[String(pid)]);
       seatsHtml +=
         '<div class="ll-seat' +
         (isSelfSeat ? ' ll-seat--self' : '') +
         (isTurnSeat ? ' ll-seat--turn' : '') +
         (isElimSeat ? ' ll-seat--eliminated' : '') +
         (isSoloEffectSeat ? ' ll-seat--effect' : '') +
+        (isPickSeat ? ' ll-seat--pick' : '') +
+        (isPickSeat && pickSelected === String(pid) ? ' ll-seat--picked' : '') +
         '" data-ll-pid="' +
         escapeHtml(String(pid)) +
-        '" style="left:' +
+        '"' +
+        (isPickSeat ? ' data-pick-target="' + escapeHtml(String(pid)) + '"' : '') +
+        ' style="left:' +
         escapeHtml(String(x.toFixed(3))) +
         '%;top:' +
         escapeHtml(String(y.toFixed(3))) +
         '%">' +
-        '<div class="ll-seat-card' + (newlyElim[String(pid)] ? ' bbg-shake' : '') + '">' +
+        '<div class="ll-seat-card' + (newlyElim[String(pid)] ? ' bbg-shake' : '') + (isPickSeat ? ' bbg-holdbtn' : '') + '">' +
         '<div class="ll-seat-name">' + escapeHtml(nm) + '</div>' +
         (isProtectedSeat && !isElimSeat ? '<div class="ll-seat-sub muted">僧侶により保護中</div>' : '') +
         '</div>' +
@@ -24689,7 +24918,7 @@
     var arrowIconHtml = '<div class="ll-table-arrow-icon" data-ll-arrow-icon="1" aria-hidden="true"></div>';
 
     return (
-      '<div class="ll-table">' +
+      '<div class="ll-table' + (pickOn ? ' ll-table--pick' : '') + '">' +
       arrowHtml +
       arrowIconHtml +
       seatsHtml +
@@ -25282,6 +25511,20 @@
       if (!tUi) tUi = {};
       var o = opts || {};
       var viewerId = o.viewerId ? String(o.viewerId) : '';
+      // 対象えらび（スマホ横）: opts.pickTargets の席は ながおしで えらべる（ラブレターの円卓と同じ）。
+      var pickMap = {};
+      var pickOn = false;
+      try {
+        var pt = Array.isArray(o.pickTargets) ? o.pickTargets : [];
+        for (var pk = 0; pk < pt.length; pk++) {
+          if (pt[pk]) pickMap[String(pt[pk])] = 1;
+        }
+        pickOn = !!pt.length;
+      } catch (ePk) {
+        pickMap = {};
+        pickOn = false;
+      }
+      var pickSelected = o.pickSelected ? String(o.pickSelected) : '';
       // スマホ横では席のはんけいも小さくする（中身の大きさはCSSのメディアクエリが決める）。
       var compact = false;
       try {
@@ -25442,20 +25685,25 @@
           if (culpritSeatId && String(pid) === culpritSeatId) resultBadge += ' <span class="badge hn-badge-culprit">犯人</span>';
           if (winnerMap[String(pid)]) resultBadge += ' <span class="hn-badge-win">🎉</span>';
         }
+        var isPickSeat = !!(pickOn && pickMap[String(pid)]);
         seatsHtml +=
           '<div class="ll-seat' +
           (isSelfSeat ? ' ll-seat--self' : '') +
           (isTurnSeat ? ' ll-seat--turn' : '') +
+          (isPickSeat ? ' ll-seat--pick' : '') +
+          (isPickSeat && pickSelected === String(pid) ? ' ll-seat--picked' : '') +
           '" data-hn-pid="' +
           escapeHtml(String(pid)) +
           '" data-ll-pid="' +
           escapeHtml(String(pid)) +
-          '" style="left:' +
+          '"' +
+          (isPickSeat ? ' data-pick-target="' + escapeHtml(String(pid)) + '"' : '') +
+          ' style="left:' +
           escapeHtml(String(x.toFixed(3))) +
           '%;top:' +
           escapeHtml(String(y.toFixed(3))) +
           '%">' +
-          '<div class="ll-seat-card hn-sim-seat-card">' +
+          '<div class="ll-seat-card hn-sim-seat-card' + (isPickSeat ? ' bbg-holdbtn' : '') + '">' +
           '<div class="ll-seat-name">' +
           escapeHtml(pname(pid)) +
           (plotOn ? ' <span class="badge">たくらみ中</span>' : '') +
@@ -25473,7 +25721,7 @@
       }
 
       return (
-        '<div class="ll-table hn-table">' +
+        '<div class="ll-table hn-table' + (pickOn ? ' ll-table--pick' : '') + '">' +
         arrowHtml +
         arrowIconHtml +
         seatsHtml +
@@ -28565,15 +28813,20 @@
   //   閉じた直後に手番が変わって もう一度スライドする二重の動きを避ける（キャンセルしたときは手で戻る）。
   // uiState にモーダルの通し番号を持ち、bbgPaneAutoWant の turnToken に足して使う。
   // 返り値: { want: 目的ペイン（モーダル中は 0=テーブル）, tok: turnToken に足す文字列 }
+  // modalHtml には モーダルのHTML（data-modal-key を拾う）か、'pick:xxx' のような合図の文字列をそのまま渡せる
+  //（席のながおしで対象をえらぶ間など、モーダルは無いがテーブルへ寄せたいとき用）。
   function bbgPaneModalWant(uiState, modalHtml, wantIdxNoModal) {
     var key = '';
     var html = String(modalHtml || '');
     if (html) {
-      try {
-        var m = /data-modal-key="([^"]*)"/.exec(html);
-        key = m && m[1] ? String(m[1]) : 'modal';
-      } catch (e) {
-        key = 'modal';
+      if (html.indexOf('<') < 0) key = html;
+      else {
+        try {
+          var m = /data-modal-key="([^"]*)"/.exec(html);
+          key = m && m[1] ? String(m[1]) : 'modal';
+        } catch (e) {
+          key = 'modal';
+        }
       }
     }
     var u = uiState || {};
