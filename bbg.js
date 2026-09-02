@@ -6830,11 +6830,12 @@
           '<div class="ll-overlay-backdrop"></div>' +
           '<div class="ll-overlay-panel">' +
           '<div class="stack">' +
-          '<div class="big ll-modal-title">目撃者</div>' +
-          '<div class="muted center">' + escapeHtml(wname ? (wname + ' の手札') : '手札') + '</div>' +
+          '<div class="big ll-modal-title">目撃者：' + escapeHtml(wname ? (wname + ' の手札') : '手札') + '</div>' +
           '<div class="hn-rumor-row">' + wrow + '</div>' +
+          // 見せるのは いまだけ。見おわったら本人が とじて、つぎの人の番へ進む。
+          '<div class="muted center ll-peek-hint">見おわったら とじる → つぎの人の番</div>' +
           '<div class="row ll-modal-actions" style="justify-content:center">' +
-          '<button class="primary" id="hnPrivateOk">OK</button>' +
+          '<button class="primary" id="hnPrivateOk">とじる</button>' +
           '</div>' +
           '</div>' +
           '</div>' +
@@ -6883,8 +6884,15 @@
     } catch (ePriv) {
       privateHtml = '';
     }
-    // スマホ横: 自分だけに見える結果（少年・目撃者・注意）は 席が見える小さな箱にする（2026-09-02）
-    if (paneMode && privateHtml) privateHtml = privateHtml.replace('class="ll-overlay ll-sheet"', 'class="ll-overlay ll-sheet ll-overlay--mini"');
+    // スマホ横: 自分だけに見える結果（少年・目撃者・注意）は 席が見える小さな箱にする（2026-09-02）。
+    // 目撃者（相手の手札を見る）だけは暗幕つき＝「見おわったら とじる」一時的な表示。
+    if (paneMode && privateHtml) {
+      var isPeekP = privateHtml.indexOf('data-modal-key="priv:witness"') >= 0;
+      privateHtml = privateHtml.replace(
+        'class="ll-overlay ll-sheet"',
+        'class="ll-overlay ll-sheet ll-overlay--mini' + (isPeekP ? ' ll-overlay--peek' : '') + '"'
+      );
+    }
     try {
       if (canOperate && ui && ui.hnAction && ui.hnAction.type === 'play') {
         var act = ui.hnAction;
@@ -7233,6 +7241,7 @@
           var pgT = String(hnPendingProgressHtml(room) || '')
             .replace(/<span class="bbg-wait-dots">[\s\S]*?<\/span>/g, '')
             .replace(/<[^>]+>/g, ' ')
+            .replace(/●/g, '')
             .replace(/\s+/g, ' ')
             .trim();
           // 組み立てずみのHTMLから拾った文なので、実体参照を元にもどす（上の1行で もう一度 escapeHtml される）
@@ -9649,7 +9658,10 @@
       if (deck.length) hands[pid].push(String(deck.pop()));
     }
 
-    var startIndex = randomInt(ids.length);
+    // さいしょの人は ロビーの並び（ids はロビーの順）の先頭。同じロビーで もう一回やるときは 1つずつ ずらす
+    //（ゲームごとに ばらばらに決めず、席順＝ロビーの参加者の並び で共通にする。2026-09-03）。
+    var roundNo0 = parseIntSafe(room && room.round && room.round.no, 0) || 0;
+    var startIndex = ids.length ? roundNo0 % ids.length : 0;
     var startId = ids[startIndex];
     // Clear protection at start of your turn.
     protectedMap[startId] = false;
@@ -14834,6 +14846,79 @@
   // 押している間は .bbg-holding が付き、CSS(.bbg-holdbtn)で左から満ちる表示になる。
   // 短いタップは opts.tap（省略時なにもしない）。発火後の合成clickは握りつぶす。
   var BBG_HOLD_MS = 650;
+  // ながおしの輪（全ゲーム共通）: 押している要素の少し外側に、BBG_HOLD_MS で満ちていく輪を body 直下に出す。
+  // 指で要素がかくれても輪は指の外に見える。形は要素に合わせる（丸い席は丸、カードは角丸）。CSS: .bbg-holdring
+  var bbgHoldRingEl = null;
+
+  function bbgHoldRingHide() {
+    try {
+      if (bbgHoldRingEl && bbgHoldRingEl.parentNode) bbgHoldRingEl.parentNode.removeChild(bbgHoldRingEl);
+    } catch (e) {
+      // ignore
+    }
+    bbgHoldRingEl = null;
+  }
+
+  function bbgHoldRingShow(el) {
+    bbgHoldRingHide();
+    try {
+      var r = el.getBoundingClientRect();
+      if (!r || !r.width || !r.height) return;
+      var pad = 16;
+      var ring = document.createElement('div');
+      ring.className = 'bbg-holdring';
+      ring.setAttribute('aria-hidden', 'true');
+      ring.style.left = String(Math.round(r.left - pad)) + 'px';
+      ring.style.top = String(Math.round(r.top - pad)) + 'px';
+      ring.style.width = String(Math.round(r.width + pad * 2)) + 'px';
+      ring.style.height = String(Math.round(r.height + pad * 2)) + 'px';
+      var br = 0;
+      try {
+        br = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0;
+      } catch (eB) {
+        br = 0;
+      }
+      // 角丸が半径いっぱい（丸いふだ）なら輪も丸く、そうでなければ角丸に
+      ring.style.borderRadius = br >= Math.min(r.width, r.height) / 2 - 1 ? '999px' : String(Math.round(br + pad)) + 'px';
+      ring.style.setProperty('--bbg-ring-ms', String(BBG_HOLD_MS) + 'ms');
+      document.body.appendChild(ring);
+      bbgHoldRingEl = ring;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 決定の合図（全ゲーム共通）: 押していた要素の写しを その場に重ねて、一瞬ふくらませて消す。
+  // 直後の再描画で元の要素が消えても、写しは body 直下なので最後まで見える。CSS: .bbg-popfx
+  function bbgPopFx(el) {
+    try {
+      var r = el.getBoundingClientRect();
+      if (!r || !r.width || !r.height) return;
+      var c = el.cloneNode(true);
+      c.className = String(el.className || '').replace(/\bbbg-holding\b/g, '') + ' bbg-popfx';
+      c.removeAttribute('id');
+      c.setAttribute('aria-hidden', 'true');
+      c.style.position = 'fixed';
+      c.style.left = String(Math.round(r.left)) + 'px';
+      c.style.top = String(Math.round(r.top)) + 'px';
+      c.style.width = String(Math.round(r.width)) + 'px';
+      c.style.height = String(Math.round(r.height)) + 'px';
+      c.style.margin = '0';
+      c.style.transform = 'none';
+      c.style.animationName = 'bbgPopFx';
+      document.body.appendChild(c);
+      setTimeout(function () {
+        try {
+          if (c.parentNode) c.parentNode.removeChild(c);
+        } catch (e1) {
+          // ignore
+        }
+      }, 560);
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function bbgHoldBind(el, fire, opts) {
     if (!el || el.__bbg_holdBound) return;
     el.__bbg_holdBound = true;
@@ -14859,6 +14944,7 @@
         timer = null;
       }
       try {
+        bbgHoldRingHide();
         if (el.classList) el.classList.remove('bbg-holding');
         var s0 = seatOf();
         if (s0 && s0.classList) s0.classList.remove('bbg-holding-seat');
@@ -14877,6 +14963,7 @@
         if (el.classList) el.classList.add('bbg-holding');
         var s1 = seatOf();
         if (s1 && s1.classList) s1.classList.add('bbg-holding-seat');
+        bbgHoldRingShow(el);
       } catch (e) {
         // ignore
       }
@@ -14885,6 +14972,7 @@
         timer = null;
         fired = true;
         stopHold();
+        bbgPopFx(el); // 決まった合図（一瞬ふくらむ）。fire の中で再描画されても写しは残る
         try {
           fire();
         } catch (e2) {
@@ -18866,9 +18954,8 @@
       var centerHtml =
         '<div class="ll-table-center">' +
         '<div class="ll-table-pile">' +
-        '<div class="muted">すてふだ</div>' +
-        '<div class="ll-table-grave-stack">' +
-        graveHtml +
+        '<div class="ll-table-bigcard">' +
+        (grave.length ? hnCardImgHtml(String(grave[grave.length - 1] || '')) : '<div class="ll-table-bigcard-empty muted">まだ<br>ありません</div>') +
         '</div>' +
         (function () {
           var lp = '';
@@ -22202,6 +22289,8 @@
       paneMode = false;
     }
     var llWaitNote = '';
+    var llRevealNote = ''; // 簡素な結果（将軍・魔術師・大臣）: モーダルのかわりに上の1行へ
+    var llRevealAckLabel = ''; // その1行に出す進行ボタン（当事者だけ。'次へ' / '脱落'）
     var llSeatPick = null; // 対象にできる席の一覧（席えらび中だけ）
     var llSeatPickCard = '';
 
@@ -22603,18 +22692,22 @@
         }
       }
 
+      // 推測（2〜8）は文字のボタンではなく カードの絵をならべる。タップ=えらぶ／ながおし=決める（2026-09-03）
       var guessBtns = '';
       if (needsGuess) {
         for (var gv = 2; gv <= 8; gv++) {
           var gr = String(gv);
           var gsel = pending.guess === gr;
           guessBtns +=
-            '<button class="ghost bbg-holdbtn llPickGuess" data-guess="' +
+            '<div class="ll-guess-card bbg-holdbtn llPickGuess' +
+            (gsel ? ' ll-guess-card--sel' : '') +
+            '" data-guess="' +
             escapeHtml(gr) +
-            '">' +
-            (gsel ? '✓ ' : '') +
+            '" title="' +
             escapeHtml(llFormatCard(gr)) +
-            '</button>';
+            '">' +
+            llCardImgHtml(gr) +
+            '</div>';
         }
       }
 
@@ -22643,7 +22736,7 @@
               llCardImgHtml(pendingCard) +
               '</div>') +
           targetBlock +
-          (needsGuess ? '<div class="muted ll-modal-lead">推測</div><div class="ll-guess-grid">' + guessBtns + '</div>' : '') +
+          (needsGuess ? '<div class="muted ll-modal-lead">推測（ながおしで決める）</div><div class="ll-guess-grid--cards">' + guessBtns + '</div>' : '') +
           '<div id="llPlayError" class="form-error" role="alert"></div>' +
           '<div class="row ll-modal-actions" style="justify-content:space-between">' +
           '<button id="llCancelPlay" class="ghost">キャンセル</button>' +
@@ -22661,11 +22754,12 @@
         '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="peek">' +
         '<div class="ll-overlay-backdrop"></div>' +
         '<div class="ll-overlay-panel">' +
-        '<div class="big">道化：確認</div>' +
-        '<div class="ll-modal-name">' + escapeHtml(String(m.targetName || '')) + '</div>' +
+        '<div class="big">道化：' + escapeHtml(String(m.targetName || '')) + ' の手札</div>' +
         llFlipCardHtml(String(m.rank || ''), 'll-reveal-card', false) +
+        // 見せるのは いまだけ。見おわったら本人が とじて、つぎの人の番へ進む。
+        '<div class="muted ll-peek-hint">見おわったら とじる → つぎの人の番</div>' +
         '<div class="row" style="justify-content:flex-end">' +
-        '<button id="llAck" class="primary">OK</button>' +
+        '<button id="llAck" class="primary">とじる</button>' +
         '</div>' +
         '</div>' +
         '</div>';
@@ -22916,14 +23010,40 @@
       }
     }
 
-    // スマホ横: 結果のモーダル（推測・確認・比較・交換・捨て札・大臣）は、席が見える小さな箱にする（2026-09-02）。
-    // 全員公開（山札切れ）はカードが多いので ふつうの大きさのまま。
+    // スマホ横の結果表示（2026-09-03）:
+    //  ・兵士の推測結果・騎士の比較・道化の確認 = カードが要るので、席が見える小さな箱（.ll-overlay--mini）。
+    //    道化（相手の手札を見る）は暗幕つき（.ll-overlay--peek）＝見おわったら本人が とじる 一時的な表示。
+    //  ・将軍・魔術師・大臣 = モーダルは出さず、上の1行に文と「次へ」（当事者だけ）。捨てられたカードは中央の大きなカードで見える。
+    //  ・全員公開（山札切れ）はカードが多いので ふつうの大きさのまま。
     if (paneMode && modalHtml) {
       try {
         var mkM = /data-modal-key="([^"]*)"/.exec(modalHtml);
         var mkey = mkM && mkM[1] ? String(mkM[1]) : '';
-        if (/^(peek|rev:guard|rev:knight|rev:general_swap|rev:wizard|rev:minister_self|rev:minister_other)$/.test(mkey)) {
-          modalHtml = modalHtml.replace('class="ll-overlay ll-sheet"', 'class="ll-overlay ll-sheet ll-overlay--mini"');
+        var rvS = r && r.reveal ? r.reveal : null;
+        if (/^(rev:general_swap|rev:wizard|rev:minister_self|rev:minister_other)$/.test(mkey) && rvS) {
+          var byS = String(rvS.by || '');
+          var tgS = String(rvS.target || '');
+          var byNS = ps[byS] ? formatPlayerDisplayName(ps[byS]) : byS;
+          var tgNS = ps[tgS] ? formatPlayerDisplayName(ps[tgS]) : tgS;
+          if (mkey === 'rev:general_swap') {
+            llRevealNote = '将軍：' + byNS + ' と ' + tgNS + ' が手札を交換しました';
+            if (String(playerId) === byS) llRevealAckLabel = '次へ';
+          } else if (mkey === 'rev:wizard') {
+            var dcS = String((llCardDef(String(rvS.discarded || '')) || {}).name || '');
+            llRevealNote = '魔術師：' + tgNS + ' が ' + (dcS ? dcS + ' を' : '') + '捨てて 1枚引きました';
+            if (String(playerId) === byS) llRevealAckLabel = '次へ';
+          } else if (mkey === 'rev:minister_self') {
+            llRevealNote = '大臣：手札の合計が12以上 → 脱落';
+            llRevealAckLabel = '脱落';
+          } else {
+            llRevealNote = byNS + ' は大臣の効果で脱落しました（手札の合計が12以上）';
+          }
+          modalHtml = '';
+        } else if (/^(peek|rev:guard|rev:knight)$/.test(mkey)) {
+          modalHtml = modalHtml.replace(
+            'class="ll-overlay ll-sheet"',
+            'class="ll-overlay ll-sheet ll-overlay--mini' + (mkey === 'peek' ? ' ll-overlay--peek' : '') + '"'
+          );
         }
       } catch (eMini) {
         // ignore
@@ -22935,6 +23055,9 @@
     if (llSeatPick) {
       statusText = String((llCardDef(llSeatPickCard) || {}).name || '') + '：対象の席を ながおし';
       statusBtnHtml = '<button type="button" class="ghost ll-status-btn llCancelPlayBtn">やめる</button>';
+    } else if (llRevealNote) {
+      statusText = llRevealNote;
+      if (llRevealAckLabel) statusBtnHtml = '<button type="button" class="primary ll-status-btn llAckBtn">' + escapeHtml(llRevealAckLabel) + '</button>';
     } else if (llWaitNote) {
       statusText = llWaitNote;
     }
@@ -24144,56 +24267,70 @@
         // ignore
       }
 
+      // 進行の確認（「次へ」「とじる」「脱落」）。モーダルの #llAck と、上の1行の .llAckBtn（スマホ横の簡素な結果）の両方から使う。
+      var llAckRun = function (btn, ev) {
+        if (ui.ackInFlight) return;
+        if (ev && ev.preventDefault) ev.preventDefault();
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+
+        // 失敗したときに元へ戻せるよう、確定前の値を控えておく。
+        var prevPeekDismissedKey = String(ui.peekDismissedKey || '');
+        if (ui.modal && ui.modal.type === 'peek' && ui.modal.key) {
+          ui.peekDismissedKey = String(ui.modal.key);
+        }
+
+        ui.pending = null;
+        ui.modal = null;
+        ui.ackInFlight = true;
+
+        // Close modal immediately on UI.
+        renderNow(lastRoom);
+
+        try {
+          if (btn) btn.disabled = true;
+        } catch (e1) {
+          // ignore
+        }
+
+        ackLoveLetter(roomId, playerId)
+          .catch(function (e) {
+            // 通信失敗時はモーダルを戻す。道化は peekDismissedKey を確定させてしまうと
+            // 二度とボタンが出なくなるので巻き戻す。
+            ui.peekDismissedKey = prevPeekDismissedKey;
+            alert((e && e.message) || '失敗');
+          })
+          .finally(function () {
+            ui.ackInFlight = false;
+            // 成否にかかわらず再描画する（失敗時にモーダル無しで固まらないように）。
+            try {
+              renderNow(lastRoom);
+            } catch (e2) {
+              // ignore
+            }
+          });
+      };
+
       var ackBtn = document.getElementById('llAck');
       if (ackBtn && !ackBtn.__ll_bound) {
         ackBtn.__ll_bound = true;
-
         var doAck = function (ev) {
-          if (ui.ackInFlight) return;
-          if (ev && ev.preventDefault) ev.preventDefault();
-          if (ev && ev.stopPropagation) ev.stopPropagation();
-
-          // 失敗したときに元へ戻せるよう、確定前の値を控えておく。
-          var prevPeekDismissedKey = String(ui.peekDismissedKey || '');
-          if (ui.modal && ui.modal.type === 'peek' && ui.modal.key) {
-            ui.peekDismissedKey = String(ui.modal.key);
-          }
-
-          ui.pending = null;
-          ui.modal = null;
-          ui.ackInFlight = true;
-
-          // Close modal immediately on UI.
-          renderNow(lastRoom);
-
-          try {
-            ackBtn.disabled = true;
-          } catch (e1) {
-            // ignore
-          }
-
-          ackLoveLetter(roomId, playerId)
-            .catch(function (e) {
-              // 通信失敗時はモーダルを戻す。道化は peekDismissedKey を確定させてしまうと
-              // 二度とボタンが出なくなるので巻き戻す。
-              ui.peekDismissedKey = prevPeekDismissedKey;
-              alert((e && e.message) || '失敗');
-            })
-            .finally(function () {
-              ui.ackInFlight = false;
-              // 成否にかかわらず再描画する（失敗時にモーダル無しで固まらないように）。
-              try {
-                renderNow(lastRoom);
-              } catch (e2) {
-                // ignore
-              }
-            });
+          llAckRun(ackBtn, ev);
         };
-
         ackBtn.addEventListener('click', doAck);
         if (typeof PointerEvent !== 'undefined') {
           ackBtn.addEventListener('pointerup', doAck);
         }
+      }
+      // 上の1行の進行ボタン（ペインごとに出るので class で全部ひろう）
+      var ackBtns2 = viewEl && viewEl.querySelectorAll ? viewEl.querySelectorAll('.llAckBtn') : [];
+      for (var abi = 0; abi < ackBtns2.length; abi++) {
+        (function (b2) {
+          if (!b2 || b2.__ll_bound) return;
+          b2.__ll_bound = true;
+          b2.addEventListener('click', function (ev) {
+            llAckRun(b2, ev);
+          });
+        })(ackBtns2[abi]);
       }
 
       var replayBtn = document.getElementById('llReplay');
@@ -24810,16 +24947,19 @@
     if (phase === 'lobby') {
       centerHtml = '<div class="stack center"><div class="big">待機中</div><div class="muted">ゲーム開始をお待ちください。</div></div>';
     } else {
-      var backCount = deckLeft > 0 ? Math.min(5, Math.max(2, Math.ceil(deckLeft / 3))) : 0;
-      var deckStack = '';
-      for (var di = 0; di < backCount; di++) {
-        deckStack += '<div class="ll-table-pile-card" style="left:' + String(di * 8) + 'px;top:' + String(di * -3) + 'px">' + llCardBackImgHtml() + '</div>';
-      }
-
-      var graveCards = '';
+      // 左上の小さな箱: 伏せ札（最初の1枚）と 山札（のこり枚数）。山札は重要ではないので すみに寄せる（2026-09-03）。
+      var deckMiniHtml =
+        '<div class="ll-table-deckmini">' +
+        '<div class="muted">山札</div>' +
+        '<div class="ll-table-deckmini-card">' +
+        (deckLeft > 0 ? llCardBackImgHtml() : '') +
+        '<b class="ll-table-deckmini-n' + (deckLeft <= 3 ? ' ll-deck-low' : '') + '">' + escapeHtml(String(deckLeft)) + '</b>' +
+        '</div>' +
+        '</div>';
+      var facedownBlock = '';
       // The first discarded card is kept face-down and should be shown separately.
       if (graveArr && graveArr.length) {
-        facedownHtml =
+        facedownBlock =
           '<div class="ll-table-facedown">' +
           '<div class="muted">伏せ札</div>' +
           '<div class="ll-table-facedown-card">' +
@@ -24827,52 +24967,18 @@
           '</div>' +
           '</div>';
       }
+      facedownHtml = '<div class="ll-table-corner">' + facedownBlock + deckMiniHtml + '</div>';
 
-      // Show the latest 10 discarded cards (excluding the face-down first one).
+      // 中央: すてふだのいちばん上（＝さいごに使われたカード）を大きく。伏せ札の1枚は数えない。
       var visibleGrave = graveArr && graveArr.length > 1 ? graveArr.slice(1) : [];
-      var graveCount = visibleGrave.length;
-      var graveTop = graveCount ? String(visibleGrave[graveCount - 1] || '') : '';
-
-      if (graveTop) {
-        var layerCount = Math.min(4, graveCount);
-        for (var gi = layerCount - 1; gi >= 1; gi--) {
-          graveCards +=
-            '<div class="ll-table-grave-stack-card ll-table-grave-stack-card--under" style="left:' +
-            String(gi * 7) +
-            'px;top:' +
-            String(gi * -3) +
-            'px"></div>';
-        }
-        graveCards += '<div class="ll-table-grave-stack-card" style="left:0px;top:0px">' + llCardImgHtml(graveTop) + '</div>';
-      } else {
-        graveCards = '<div class="muted">（なし）</div>';
-      }
+      var graveTop = visibleGrave.length ? String(visibleGrave[visibleGrave.length - 1] || '') : '';
 
       centerHtml =
         '<div class="ll-table-center ll-table-center--ll">' +
-        '<div class="ll-table-center-top">' +
-        '<div class="ll-table-pile">' +
-        '<div class="muted">山札</div>' +
-        '<div class="ll-table-pile-count"><b' +
-        (deckLeft <= 3 ? ' class="ll-deck-low"' : '') +
-        '>' +
-        escapeHtml(String(deckLeft)) +
-        '</b></div>' +
-        '<div class="ll-table-pile-stack">' +
-        deckStack +
+        '<div class="ll-table-bigcard">' +
+        (graveTop ? llCardImgHtml(graveTop) : '<div class="ll-table-bigcard-empty muted">まだ<br>ありません</div>') +
         '</div>' +
-        '</div>' +
-        '<div class="ll-table-pile">' +
-        '<div class="muted">墓地</div>' +
-        '<div class="ll-table-pile-count"><b>' +
-        escapeHtml(String(graveCount)) +
-        '</b></div>' +
-        '<div class="ll-table-grave-stack">' +
-        graveCards +
-        '</div>' +
-        '</div>' +
-        '</div>' +
-        // バナー枠は常設（最初のプレイで山札・墓地の位置が上へ寄らないように）。
+        // バナー枠は常設（最初のプレイで中央の位置が上へ寄らないように）。
         '<div class="ll-table-center-bottom">' +
         (lastPlayHtml ||
           '<div class="ll-table-lastplay-banner ll-table-lastplay--empty" aria-hidden="true">まだ プレイは ありません</div>') +
@@ -25662,15 +25768,11 @@
         lastPlayHtml = '';
       }
 
+      // 中央: さいごに捨てられたカードを大きく（ラブレターの円卓と同じ .ll-table-bigcard）
       var centerHtml =
         '<div class="ll-table-center ll-table-center--ll ll-table-center--hn">' +
-        '<div class="ll-table-center-top">' +
-        '<div class="ll-table-pile">' +
-        '<div class="muted">すてふだ</div>' +
-        '<div class="ll-table-grave-stack">' +
-        graveHtml2 +
-        '</div>' +
-        '</div>' +
+        '<div class="ll-table-bigcard">' +
+        (grave.length ? hnCardImgHtml(String(grave[grave.length - 1] || '')) : '<div class="ll-table-bigcard-empty muted">まだ<br>ありません</div>') +
         '</div>' +
         // バナー枠は常設（最初のプレイで墓地の位置が上へ寄らないように）。
         '<div class="ll-table-center-bottom">' +

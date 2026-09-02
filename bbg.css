@@ -469,20 +469,28 @@ body.ll-table-screen .app{max-width:980px}
 .ll-seat--pick .ll-seat-card{border:2px dashed var(--accent);color:var(--accent);background:var(--card);cursor:pointer;animation:bbgSeatPulse 1.2s ease-in-out infinite}
 .ll-seat--pick.ll-seat--turn .ll-seat-card{background:var(--card);color:var(--accent)}
 .ll-seat--picked .ll-seat-card{border-style:solid;box-shadow:0 0 0 4px rgba(91,157,255,.35)}
-/* 席のながおし: 指で札がかくれるので、席のまわりに大きな輪を出し、時間（BBG_HOLD_MS=.65s）とともに満ちていく。
-   bbgHoldBind が押している間だけ .ll-seat に .bbg-holding-seat を付ける。輪は席の札の下・テーブルの上に描く。
-   @property が無い端末では輪の満ち方が途中で切りかわるが、輪がひろがる動き（bbgRingGrow）は どこでも出る。 */
+/* ながおしの輪（全ゲーム共通・JS: bbgHoldRingShow）: 押している要素の少し外側に、時間（BBG_HOLD_MS=.65s）とともに
+   満ちていく輪を body 直下に描く。指で要素がかくれても、輪は指の外に見える（席・カード・ボタン すべて同じ）。
+   輪の形は要素に合わせる（丸い席は丸、カードは角丸）。@property が無い端末では満ち方が途中で切りかわるが、
+   ひろがる動き（bbgRingGrow）はどこでも出る。 */
 @property --bbg-ring{syntax:'<percentage>';inherits:false;initial-value:0%}
-.ll-seat.bbg-holding-seat::before{
-  content:"";position:absolute;left:50%;top:50%;width:136px;height:136px;
-  transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;
-  background:conic-gradient(var(--accent) var(--bbg-ring,100%),rgba(91,157,255,.16) 0);
-  -webkit-mask:radial-gradient(circle,transparent 60%,#000 61%);mask:radial-gradient(circle,transparent 60%,#000 61%);
-  animation:bbgRingFill .65s linear both,bbgRingGrow .65s ease-out both;
+.bbg-holdring{
+  position:fixed;z-index:10000;pointer-events:none;padding:7px;box-sizing:border-box;
+  background:conic-gradient(var(--accent) var(--bbg-ring,100%),rgba(91,157,255,.18) 0);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+  mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  mask-composite:exclude;
+  filter:drop-shadow(0 0 8px rgba(91,157,255,.6));
+  animation:bbgRingFill var(--bbg-ring-ms,.65s) linear both,bbgRingGrow .22s ease-out both;
 }
 .ll-seat.bbg-holding-seat .ll-seat-card{box-shadow:0 0 0 3px var(--accent),0 0 18px rgba(91,157,255,.7)}
 @keyframes bbgRingFill{from{--bbg-ring:0%}to{--bbg-ring:100%}}
-@keyframes bbgRingGrow{from{transform:translate(-50%,-50%) scale(.7);opacity:.6}to{transform:translate(-50%,-50%) scale(1);opacity:1}}
+@keyframes bbgRingGrow{from{transform:scale(.8);opacity:.5}to{transform:scale(1);opacity:1}}
+/* 決定の合図（JS: bbgPopFx）: 押していた要素の写しが一瞬ふくらんで消える（再描画で元の要素が消えても残る）。
+   席・カード・ボタン、ながおしで決めるものすべてに同じ合図を出す。 */
+.bbg-popfx{position:fixed;z-index:10001;pointer-events:none;margin:0;transform-origin:center;animation:bbgPopFx .5s ease-out both}
+@keyframes bbgPopFx{0%{transform:scale(1);opacity:1}40%{transform:scale(1.3);opacity:1}100%{transform:scale(1.4);opacity:0}}
 /* 上の1行の小さなボタン（席えらびの「やめる」）と、犯人は踊るの状況の文 */
 .ll-status-btn{flex:0 0 auto;padding:3px 10px;font-size:12px;border-radius:999px;min-height:0}
 .hn-topnote{display:block;color:var(--accent);font-weight:900;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -507,6 +515,16 @@ body.ll-table-screen .app{max-width:980px}
 .ll-table-center--hn{margin-top:-18px}
 
 .ll-table-facedown{position:absolute;left:14px;top:14px;display:flex;flex-direction:column;gap:8px;align-items:center}
+/* 円卓の中央: さいごに使われたカード（すてふだのいちばん上）を大きく見せる。山札と伏せ札は左上の小さな箱へ（2026-09-03） */
+.ll-table-corner{position:absolute;left:12px;top:12px;display:flex;gap:10px;align-items:flex-start;z-index:1}
+.ll-table-corner .ll-table-facedown{position:static}
+.ll-table-deckmini{display:flex;flex-direction:column;gap:6px;align-items:center}
+.ll-table-deckmini-card{position:relative;width:72px;aspect-ratio:3/4;border-radius:10px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
+.ll-table-deckmini-n{position:absolute;right:4px;bottom:3px;font-size:15px;font-weight:900;line-height:1.2;color:#fff;background:rgba(0,0,0,.65);border-radius:999px;padding:1px 7px}
+.ll-table-bigcard{width:auto;height:190px;aspect-ratio:3/4;border-radius:12px;border:1px solid var(--line);overflow:hidden;background:#0f1520;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.ll-table-bigcard-empty{font-size:12px;text-align:center;padding:6px;line-height:1.4}
+/* 矢印の途中の小さなカードは出さない（使われたカードは中央の大きなカードで見せる） */
+.ll-table-arrow-icon{display:none!important}
 .ll-table-facedown-card{width:72px;aspect-ratio:3/4;border-radius:10px;border:1px solid var(--line);overflow:hidden;background:#0f1520}
 
 .ll-table-arrow{position:absolute;inset:0;pointer-events:none;z-index:2}
@@ -532,6 +550,10 @@ body.ll-table-screen .app{max-width:980px}
 .ll-modal-actions button{min-width:120px}
 .ll-guess-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .ll-guess-grid button{width:100%}
+/* 兵士の推測: 文字のボタンではなく カードの絵をならべて、ながおしで決める（2026-09-03） */
+.ll-guess-grid--cards{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.ll-guess-card{position:relative;width:clamp(44px,13vw,72px);aspect-ratio:3/4;border-radius:8px;border:2px solid var(--line);overflow:hidden;background:#0f1520;cursor:pointer;flex:0 0 auto}
+.ll-guess-card--sel{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,157,255,.35)}
 
 /* モーダル。中身が高いときに上端がステータスバーへ潜らないよう安全領域を足す。 */
 .ll-overlay{
@@ -2211,6 +2233,14 @@ body.bbg-demo-on .app{padding-bottom:104px}
   .ll-table .ll-table-facedown{left:4px;top:4px;gap:2px;font-size:9px}
   .ll-table .ll-table-facedown .muted{font-size:9px;line-height:1.1}
   .ll-table .ll-table-facedown-card{width:clamp(20px,7dvh,32px);border-radius:5px}
+  /* 左上の小さな箱（伏せ札＋山札）と、中央の大きなカード */
+  .ll-table .ll-table-corner{left:4px;top:4px;gap:5px}
+  .ll-table .ll-table-corner .muted{font-size:9px;line-height:1.1}
+  .ll-table .ll-table-deckmini{gap:2px}
+  .ll-table .ll-table-deckmini-card{width:clamp(20px,7dvh,32px);border-radius:5px}
+  .ll-table .ll-table-deckmini-n{font-size:9px;padding:0 4px;right:2px;bottom:1px}
+  .ll-table .ll-table-bigcard{height:clamp(64px,32dvh,128px);border-radius:8px}
+  .ll-table .ll-table-bigcard-empty{font-size:8px;padding:3px}
 
   /* 直近のプレイのバナー（1行に収める） */
   .ll-table .ll-table-lastplay-banner{
@@ -2278,6 +2308,13 @@ body.bbg-demo-on .app{padding-bottom:104px}
     display:grid;grid-template-columns:minmax(0,1fr) auto;grid-auto-rows:auto;
     column-gap:14px;row-gap:3px;align-items:center;justify-items:start;
   }
+  /* 相手の手札を見る効果（道化・目撃者）: 見おわったら本人が とじて つぎの人へ。
+     暗幕をつけて「一時的なもの」だとわかるようにする（他の小さな箱は暗幕なし）。 */
+  body.ll-player-screen .ll-overlay--peek .ll-overlay-backdrop{background:rgba(0,0,0,.42)}
+  body.ll-player-screen .ll-overlay--peek .ll-overlay-panel{border-color:var(--accent);background:rgba(20,29,49,.94)}
+  /* 兵士の推測カード: 高さから決めて1行に */
+  body.ll-player-screen .ll-guess-grid--cards{gap:6px;flex-wrap:nowrap}
+  body.ll-player-screen .ll-guess-card{width:auto;height:clamp(52px,26dvh,110px)}
   body.ll-player-screen .ll-overlay--mini .ll-overlay-panel > .stack{
     display:grid;grid-template-columns:minmax(0,1fr) auto;grid-auto-rows:auto;
     column-gap:14px;row-gap:3px;align-items:center;justify-items:start;grid-column:1 / -1;width:100%;
