@@ -1763,9 +1763,25 @@
     return 'lobbies/_index/' + lobbyId;
   }
 
+  // デモが作ったロビーは、ホーム画面の「いま ひらいているロビー」に出さない。
+  // （デモ中に作られる一時的なロビーなので、他の人が入ってしまうと混乱する）
+  var bbgDemoLobbyIds = {};
+
+  function bbgIsDemoLobby(lobbyId, lobby) {
+    try {
+      if (lobbyId && bbgDemoLobbyIds[String(lobbyId)]) return true;
+      if (lobby && lobby.demo) return true;
+      if (String(lobbyId || '').indexOf('demo') === 0) return true;
+    } catch (e) {
+      return false;
+    }
+    return false;
+  }
+
   function updateLobbyIndex(lobbyId, lobby) {
     try {
       if (!lobbyId || !lobby) return Promise.resolve();
+      if (bbgIsDemoLobby(lobbyId, lobby)) return Promise.resolve();
       var members = lobby.members || {};
       var entry = {
         createdAt: parseIntSafe(lobby.createdAt, 0) || serverNowMs(),
@@ -29509,9 +29525,7 @@
 
   var DEMO_TICK_MS = 200; // ドライバーの見張り間隔
   var DEMO_BOT_COUNT = 4;
-  var DEMO_RESTART_MS = 10000; // 決着してから次のデモを始めるまで
   var DEMO_STALL_MS = 25000; // 打てる手が見つからないまま固まったと判断するまで
-  var DEMO_LL_EXTRA_CARDS = ['7:countess', '8:megane']; // 追加カードのルールも確認できるように入れておく
 
   // 進行中のデモは常に1つだけ（多重起動防止）。
   var demoState = null;
@@ -29524,6 +29538,11 @@
   }
 
   function demoMakeRoomId() {
+    return 'demo' + randomId(6);
+  }
+
+  // デモのロビーID。'demo' で始めておくと、ホームの「ひらいているロビー」に出ない。
+  function demoMakeLobbyId() {
     return 'demo' + randomId(6);
   }
 
@@ -29566,6 +29585,7 @@
 
   function demoGameLabel(game) {
     var g = String(game || '');
+    if (!g) return 'デモ';
     if (g === 'll') return 'ラブレター';
     if (g === 'bz') return 'ボーナンザ';
     if (g === 'dd') return 'ドデリド';
@@ -29582,10 +29602,29 @@
     { team: 'blue', role: 'operative' }
   ];
 
-  function demoCnRoleLabel(i) {
-    var a = DEMO_CN_ASSIGN[i];
-    if (!a) return '';
-    return (a.team === 'red' ? '赤' : '青') + (a.role === 'spymaster' ? 'マスター' : '諜報員');
+  // 視点えらびに出す役割の名前。割り当てはロビーで決まるので、ルームの実際の値を優先する。
+  function demoCnRoleLabel(i, s) {
+    var team = '';
+    var role = '';
+    try {
+      var ps = s && s.room && s.room.players ? s.room.players : null;
+      var pid = s && s.botIds ? String(s.botIds[i] || '') : '';
+      var p = ps && pid ? ps[pid] : null;
+      if (p) {
+        team = String(p.team || '');
+        role = String(p.role || '');
+      }
+    } catch (e) {
+      team = '';
+      role = '';
+    }
+    if (!team || !role) {
+      var a = DEMO_CN_ASSIGN[i];
+      if (!a) return '';
+      team = a.team;
+      role = a.role;
+    }
+    return (team === 'red' ? '赤' : '青') + (role === 'spymaster' ? 'マスター' : '諜報員');
   }
 
   function demoRandBetween(min, max) {
@@ -29646,6 +29685,14 @@
   function demoNewState(game) {
     return {
       game: String(game || ''),
+      // デモは「設定（ロビー）→ プレイ → 終わったあと」の3段階で進む（2026-09-03）。
+      //  ・lobby: 本物のロビー画面（ゲームえらび・設定・はじめる）。自動では進めない。
+      //  ・game : ゲーム中。ボットが自動で打つ（表示中のプレイヤーだけは手動）。
+      //  ・done : 決着したあと。結果画面をそのまま置いておく（🔄 で最初から）。
+      stage: 'lobby',
+      lobbyId: '',
+      lobbyUnsub: null,
+      game: String(game || ''),
       roomId: '',
       botIds: [],
       view: 'bot1',
@@ -29659,12 +29706,45 @@
       actAt: 0,
       actKeySince: 0,
       forcedKey: '',
-      restartAt: 0,
       stallSince: 0,
       viewAttached: false,
       stopped: false,
       lastStatus: ''
     };
+  }
+
+  // ロビーの「ゲームの種類」とデモの内部キーの対応。
+  function demoLobbyKindOf(game) {
+    var g = String(game || '');
+    if (g === 'll') return 'loveletter';
+    if (g === 'hn') return 'hannin';
+    if (g === 'bz') return 'bohnanza';
+    if (g === 'dd') return 'dodelido';
+    if (g === 'cn') return 'codenames';
+    return '';
+  }
+
+  function demoGameOfKind(kind) {
+    var k = String(kind || '');
+    if (k === 'loveletter') return 'll';
+    if (k === 'hannin') return 'hn';
+    if (k === 'bohnanza') return 'bz';
+    if (k === 'dodelido') return 'dd';
+    if (k === 'codenames') return 'cn';
+    return ''; // ワードウルフ・おえかきバトルは自動プレイに未対応
+  }
+
+  // ゲームが始まっているか（ロビー段階を抜けたか）。
+  // ラブレター/犯人は踊る/コードネームは 'lobby' から始まり、ボーナンザ/ドデリドは最初から配札済み。
+  function demoRoomInPlay(s, room) {
+    try {
+      if (!room) return false;
+      var ph = String(room.phase || '');
+      if (!ph) return false;
+      return ph !== 'lobby';
+    } catch (e) {
+      return false;
+    }
   }
 
   // -------------------- demo: 後始末 --------------------
@@ -29683,12 +29763,17 @@
       // ignore
     }
     s.unsub = null;
+    try {
+      if (s.lobbyUnsub) s.lobbyUnsub();
+    } catch (e1b) {
+      // ignore
+    }
+    s.lobbyUnsub = null;
     s.room = null;
     s.actKey = '';
     s.actAt = 0;
     s.actKeySince = 0;
     s.forcedKey = '';
-    s.restartAt = 0;
     s.stallSince = 0;
   }
 
@@ -29766,7 +29851,8 @@
             : s.game === 'cn'
               ? 'demo_codenames'
               : 'demo_hannin';
-    q.room = String(s.roomId || '');
+    if (s.lobbyId) q.lobby = String(s.lobbyId);
+    if (s.roomId) q.room = String(s.roomId || '');
     q.view = String(s.view || 'bot1');
     var idx = demoViewIndex(s.view);
     // 犯人は踊る／ボーナンザ／ドデリドの routeXxxPlayer は ?player= から自分のIDを読む。
@@ -29789,108 +29875,96 @@
   }
 
   // -------------------- demo: ルーム作成 --------------------
-  function demoJoinBotsSeq(s, i) {
+  // ロビーにボットを入れる（ボット1はロビーを作った人＝GMなので、ここは2人目から）。
+  function demoJoinLobbyBotsSeq(s, i) {
     if (!s || s.stopped) return Promise.resolve(null);
     if (i >= s.botIds.length) return Promise.resolve(null);
-    var pid = String(s.botIds[i] || '');
-    var nm = demoBotName(i);
-    var isHostPlayer = i === 0;
-    var p =
-      s.game === 'll'
-        ? joinPlayerInLoveLetterRoom(s.roomId, pid, nm, isHostPlayer)
-        : joinPlayerInHanninRoom(s.roomId, pid, nm, isHostPlayer);
-    return p.then(function () {
-      return demoJoinBotsSeq(s, i + 1);
+    var mid = String(s.botIds[i] || '');
+    if (!mid) return demoJoinLobbyBotsSeq(s, i + 1);
+    return joinLobbyMember(s.lobbyId, mid, demoBotName(i), false).then(function () {
+      return demoJoinLobbyBotsSeq(s, i + 1);
     });
   }
 
-  // ボーナンザはロビーが無く、createBohnanzaRoom がメンバー一覧を受け取って配札まで済ませる。
-  // （参加フェーズも開始関数も無いので demoJoinBotsSeq は通らない）
-  function demoCreateBohnanza(s) {
-    var members = [];
-    for (var i = 0; i < s.botIds.length; i++) {
-      var mid = String(s.botIds[i] || '');
-      if (!mid) continue;
-      members.push({ mid: mid, name: demoBotName(i) });
-    }
-    return createBohnanzaRoom(s.roomId, '', members);
-  }
-
-  // コードネームはロビー画面を通さず、作成→4人参加→チーム/役職を固定で割り当ててから開始する。
-  function demoCreateCodenames(s) {
-    return createCodenamesRoom(s.roomId, { size: 5 })
-      .then(function () {
-        return demoCnJoinSeq(s, 0);
-      })
-      .then(function () {
-        return startCodenamesGame(s.roomId);
-      });
-  }
-
-  function demoCnJoinSeq(s, i) {
+  // デモ用のロビーを用意する。この端末はロビーを作った人（ボット1）として入る。
+  // これで「ゲームえらび・設定・はじめる」の本物の画面がそのまま試せる。
+  function demoEnsureLobby(s) {
     if (!s || s.stopped) return Promise.resolve(null);
-    if (i >= s.botIds.length) return Promise.resolve(null);
-    var pid = String(s.botIds[i] || '');
-    var nm = demoBotName(i);
-    var a = DEMO_CN_ASSIGN[i] || DEMO_CN_ASSIGN[0];
-    return joinPlayerInCodenamesRoom(s.roomId, pid, nm, i === 0)
-      .then(function () {
-        return setCodenamesPlayerProfile(s.roomId, pid, nm, a.team, a.role);
-      })
-      .then(function () {
-        return demoCnJoinSeq(s, i + 1);
-      });
-  }
-
-  // ドデリドも同じく createDodelidoRoom が配札まで済ませる。
-  function demoCreateDodelido(s) {
-    var members = [];
-    for (var i = 0; i < s.botIds.length; i++) {
-      var mid = String(s.botIds[i] || '');
-      if (!mid) continue;
-      members.push({ mid: mid, name: demoBotName(i) });
+    var lid = String(s.lobbyId || '');
+    if (!lid) return Promise.reject(new Error('ロビーIDがありません'));
+    bbgDemoLobbyIds[lid] = 1;
+    try {
+      // この端末のロビー参加者IDを ボット1 に固定する（ロビー画面の「自分」がボット1になる）。
+      localStorage.setItem('bbg_lobby_member_' + lid, String(s.botIds[0] || ''));
+    } catch (eLs) {
+      // ignore
     }
-    return createDodelidoRoom(s.roomId, '', members);
-  }
-
-  function demoCreateAndStart(s) {
-    if (s.game === 'bz') return demoCreateBohnanza(s);
-    if (s.game === 'dd') return demoCreateDodelido(s);
-    if (s.game === 'cn') return demoCreateCodenames(s);
-    var settings = { order: s.botIds.slice() };
-    var create = s.game === 'll' ? createLoveLetterRoom(s.roomId, settings) : createHanninRoom(s.roomId, settings);
-    return create
-      .then(function () {
-        return demoJoinBotsSeq(s, 0);
-      })
-      .then(function () {
-        if (s.game !== 'll') return null;
-        // 追加カード（女侯爵・眼鏡）のルールも自動で通るようにしておく。
-        return setLoveLetterExtraCards(s.roomId, DEMO_LL_EXTRA_CARDS.slice()).catch(function () {
-          return null;
+    return getValueOnce(lobbyPath(lid)).then(function (lobby) {
+      if (lobby) return null; // リロード時は作り直さない
+      return createLobby(lid, demoBotName(0), false, 'demo', true)
+        .then(function () {
+          return demoJoinLobbyBotsSeq(s, 1);
+        })
+        .then(function () {
+          // デモ印（ホーム一覧に出さない）と、最初に選ばれているゲームの指定。
+          return setValue(lobbyPath(lid) + '/demo', true).catch(function () {
+            return null;
+          });
+        })
+        .then(function () {
+          var kind = demoLobbyKindOf(s.game);
+          if (!kind) return null;
+          return setValue(lobbyPath(lid) + '/lastKind', kind).catch(function () {
+            return null;
+          });
         });
-      })
-      .then(function () {
-        if (s.game === 'll') return startLoveLetterGame(s.roomId, s.botIds[0]);
-        return dealHanninGame(s.roomId);
-      });
+    });
   }
 
-  function demoEnsureRoom(s) {
-    var path =
-      s.game === 'll'
-        ? loveletterRoomPath(s.roomId)
-        : s.game === 'bz'
-          ? bzRoomPath(s.roomId)
-          : s.game === 'dd'
-            ? ddRoomPath(s.roomId)
-            : s.game === 'cn'
-              ? codenamesRoomPath(s.roomId)
-              : hanninRoomPath(s.roomId);
-    return getValueOnce(path).then(function (room) {
-      if (room) return null; // リロード等で既にあるルームはそのまま使う
-      return demoCreateAndStart(s);
+  // ロビーを見張って、「はじめる」で作られたゲームのルームを受け取る。
+  function demoWatchLobby(s) {
+    var myGen = s.gen;
+    return subscribeLobby(s.lobbyId, function (lobby) {
+      if (!s || s.stopped || s.gen !== myGen || demoState !== s) return;
+      var cg = lobby && lobby.currentGame ? lobby.currentGame : null;
+      var rid = cg && cg.roomId ? String(cg.roomId) : '';
+      if (!rid || rid === String(s.roomId || '')) return;
+      demoAdoptRoom(s, rid, cg && cg.kind ? String(cg.kind) : '');
+    }).then(function (u) {
+      if (!s || s.stopped || s.gen !== myGen || demoState !== s) {
+        try {
+          if (u) u();
+        } catch (e0) {
+          // ignore
+        }
+        return null;
+      }
+      s.lobbyUnsub = u;
+      return null;
     });
+  }
+
+  // ロビーから始まったゲームのルームに乗り換える。
+  function demoAdoptRoom(s, roomId, kind) {
+    try {
+      if (s.unsub) s.unsub();
+    } catch (e0) {
+      // ignore
+    }
+    s.unsub = null;
+    s.room = null;
+    s.roomId = String(roomId || '');
+    var g = demoGameOfKind(kind);
+    if (g) s.game = g;
+    else if (kind) s.game = '';
+    s.actKey = '';
+    s.actAt = 0;
+    s.actKeySince = 0;
+    s.forcedKey = '';
+    s.stallSince = 0;
+    s.lastStatus = '';
+    if (!s.game) return; // 自動プレイに対応していないゲーム（画面は本物のまま試せる）
+    demoSubscribe(s);
   }
 
   function demoSubscribe(s) {
@@ -29924,9 +29998,32 @@
   }
 
   // -------------------- demo: 画面 --------------------
+  // 設定（ロビー）の画面。本物の routeLobbyHost をそのまま出すので、
+  // ゲームえらび・人数・各ゲームの設定・QR まで実物どおりに試せる。
+  function demoAttachLobbyView(s) {
+    if (!s || s.stopped) return;
+    if (demoAttachBusy) return;
+    demoAttachBusy = true;
+    try {
+      demoReplaceUrl(s);
+      if (s.viewAttached) demoFirePopstate(); // 直前の画面の購読/タイマーを解除させる
+      s.viewAttached = true;
+      routeLobbyHost(s.lobbyId);
+    } catch (e) {
+      try {
+        renderError(viewEl, (e && e.message) || 'デモのロビー画面を表示できませんでした');
+      } catch (e2) {
+        // ignore
+      }
+    }
+    demoAttachBusy = false;
+    demoEnsureBar(s);
+  }
+
   // 実際の画面をそのまま出す。既存の route 関数へ委譲するのが一番確実。
   function demoAttachView(s) {
     if (!s || s.stopped) return;
+    if (!s.roomId || s.stage === 'lobby') return demoAttachLobbyView(s);
     if (demoAttachBusy) return;
     demoAttachBusy = true;
     try {
@@ -29999,7 +30096,7 @@
     var viewOpts = '';
     for (var i = 0; i < DEMO_BOT_COUNT; i++) {
       // コードネームは役割が固定なので、視点選択にも役割を出す。
-      var roleTag = s.game === 'cn' ? '（' + demoCnRoleLabel(i) + '）' : '';
+      var roleTag = s.game === 'cn' ? '（' + demoCnRoleLabel(i, s) + '）' : '';
       viewOpts += '<option value="bot' + String(i + 1) + '">' + escapeHtml(demoBotName(i) + roleTag) + 'の画面</option>';
     }
     viewOpts += '<option value="table">テーブル</option>';
@@ -30103,8 +30200,9 @@
 
   function demoSetStatus(s, text) {
     if (!s) return;
-    var line =
-      '🤖 ' + demoGameLabel(s.game) + ' / ' + String(s.roomId || '') + ' / ' + demoViewLabel(s) + ' — ' + String(text || '');
+    var stageLabel = s.stage === 'lobby' ? '設定' : s.stage === 'done' ? '終了' : demoViewLabel(s);
+    var idLabel = String(s.roomId || s.lobbyId || '');
+    var line = '🤖 ' + demoGameLabel(s.game) + ' / ' + idLabel + ' / ' + stageLabel + ' — ' + String(text || '');
     if (line === s.lastStatus) return;
     s.lastStatus = line;
     try {
@@ -30144,25 +30242,78 @@
     }, DEMO_TICK_MS);
   }
 
+  // ロビー段階・決着後の段階では、デモは自分から手を進めない。
+  // ユーザーがその画面（設定・結果）をそのまま確かめられるようにするため（2026-09-03）。
+  function demoStageWatch(s) {
+    if (s.stage === 'lobby') {
+      if (!s.roomId) {
+        demoSetStatus(s, '設定の画面です（ゲームをえらんで「はじめる」）');
+        return;
+      }
+      if (!s.game) {
+        demoSetStatus(s, 'このゲームは自動プレイに対応していません（画面はためせます）');
+        return;
+      }
+      if (s.room && demoRoomInPlay(s, s.room)) {
+        s.stage = 'game';
+        s.actKey = '';
+        s.actAt = 0;
+        s.actKeySince = 0;
+        s.stallSince = 0;
+        s.lastStatus = '';
+        demoAttachView(s);
+        return;
+      }
+      demoSetStatus(s, 'ゲームの準備中…（設定して はじめてください）');
+      return;
+    }
+
+    // 決着後。結果画面をそのまま置いておく（ロビーに戻ったら設定の段階へ）。
+    if (s.roomId && s.room && !demoRoomInPlay(s, s.room)) {
+      demoBackToLobbyStage(s);
+      return;
+    }
+    if (s.room && !demoIsFinished(s, s.room)) {
+      // 「もう一度」などで同じルームが動きだしたとき。
+      s.stage = 'game';
+      s.lastStatus = '';
+      return;
+    }
+    demoSetStatus(s, 'ゲーム終了：この画面をためせます（🔄 で最初から）');
+  }
+
+  // ゲームがロビーに戻ったとき（ラブレターの「次へ」など）は設定の段階へもどす。
+  function demoBackToLobbyStage(s) {
+    try {
+      if (s.unsub) s.unsub();
+    } catch (e0) {
+      // ignore
+    }
+    s.unsub = null;
+    s.room = null;
+    s.roomId = '';
+    s.stage = 'lobby';
+    s.actKey = '';
+    s.actAt = 0;
+    s.actKeySince = 0;
+    s.forcedKey = '';
+    s.stallSince = 0;
+    s.lastStatus = '';
+    demoAttachLobbyView(s);
+  }
+
   function demoTick(s) {
     if (!s || s.stopped || demoState !== s) return;
 
     if (s.paused) {
       // 止めている間は「次に動く時刻」も一緒にずらす（再開直後に一気に動かない）。
       if (s.actAt) s.actAt += DEMO_TICK_MS;
-      if (s.restartAt) s.restartAt += DEMO_TICK_MS;
       demoSetStatus(s, '一時停止中（▶で再開）');
       return;
     }
 
-    if (s.restartAt) {
-      var leftMs = s.restartAt - nowMs();
-      if (leftMs <= 0) {
-        s.restartAt = 0;
-        demoRestart(s);
-        return;
-      }
-      demoSetStatus(s, '決着！ ' + String(Math.ceil(leftMs / 1000)) + '秒後に次のデモ');
+    if (s.stage !== 'game') {
+      demoStageWatch(s);
       return;
     }
 
@@ -30172,12 +30323,20 @@
       return;
     }
 
+    // ゲームがロビーに戻された（ラブレターの「次へ」など）。
+    if (!demoRoomInPlay(s, room)) {
+      demoBackToLobbyStage(s);
+      return;
+    }
+
     if (demoIsFinished(s, room)) {
+      // 決着したら止める。結果の画面をそのまま確かめられるようにする（🔄 で最初から）。
       s.actKey = '';
       s.actAt = 0;
       s.actKeySince = 0;
       s.stallSince = 0;
-      s.restartAt = nowMs() + DEMO_RESTART_MS;
+      s.stage = 'done';
+      s.lastStatus = '';
       return;
     }
 
@@ -30284,14 +30443,38 @@
 
   function demoRestart(s) {
     if (!s || s.stopped || demoState !== s) return;
+    var oldLobby = String(s.lobbyId || '');
     demoTeardownRoom(s);
-    s.roomId = demoMakeRoomId();
-    s.botIds = demoBotIds(s.roomId);
+    if (oldLobby) {
+      // 使い終わったデモのロビーは片づける（失敗しても先へ進む）。
+      try {
+        deleteLobby(oldLobby).catch(function () {
+          return null;
+        });
+      } catch (eDel) {
+        // ignore
+      }
+    }
+    s.stage = 'lobby';
+    s.lobbyId = demoMakeLobbyId();
+    s.botIds = demoBotIds(s.lobbyId);
+    s.roomId = '';
+    s.room = null;
     s.lastStatus = '';
     demoBegin(s);
   }
 
   function demoExit() {
+    try {
+      // デモのロビーは片づけてから出る（残っても一覧には出ないが、DBに溜めない）。
+      if (demoState && demoState.lobbyId) {
+        deleteLobby(String(demoState.lobbyId)).catch(function () {
+          return null;
+        });
+      }
+    } catch (eDl) {
+      // ignore
+    }
     demoStopAll();
     var q = {};
     var v = getCacheBusterParam();
@@ -30304,18 +30487,18 @@
 
   function demoBegin(s) {
     if (!s || s.stopped) return;
-    demoReplaceUrl(s); // 作り直しでroomIdが変わったときにURLを先に合わせておく
+    demoReplaceUrl(s); // 作り直しでIDが変わったときにURLを先に合わせておく
     demoEnsureBar(s);
     demoSetStatus(s, '準備中…');
     try {
       render(
         viewEl,
         '<div class="stack"><div class="badge">デモ</div><div class="big">デモを準備中…</div>' +
-          '<div class="muted">' +
-          escapeHtml(demoGameLabel(s.game)) +
-          ' をボット' +
+          '<div class="muted">ボット' +
           String(DEMO_BOT_COUNT) +
-          '人で自動プレイします。</div></div>'
+          '人のロビーを用意しています。設定して「はじめる」を押すと、' +
+          escapeHtml(demoGameLabel(s.game)) +
+          ' がボットの自動プレイで始まります。</div></div>'
       );
     } catch (eR) {
       // ignore
@@ -30325,13 +30508,24 @@
     firebaseReady()
       .then(function () {
         if (s.stopped || s.gen !== myGen || demoState !== s) return null;
-        return demoEnsureRoom(s);
+        return demoEnsureLobby(s);
       })
       .then(function () {
         if (s.stopped || s.gen !== myGen || demoState !== s) return null;
-        demoAttachView(s);
+        return demoWatchLobby(s);
+      })
+      .then(function () {
+        if (s.stopped || s.gen !== myGen || demoState !== s) return null;
         demoStartTick(s);
-        return demoSubscribe(s);
+        if (s.roomId) {
+          // リロードでゲーム中に戻ってきたとき（URLに room がある）。
+          s.stage = 'game';
+          demoAttachView(s);
+          return demoSubscribe(s);
+        }
+        s.stage = 'lobby';
+        demoAttachLobbyView(s);
+        return null;
       })
       .catch(function (e) {
         if (s.stopped || s.gen !== myGen || demoState !== s) return;
@@ -31287,9 +31481,25 @@
   // ヒント語は固定リストから出す（盤面の単語とは無関係）。
   var DEMO_CN_CLUE_WORDS = ['どうぶつ', 'たべもの', 'のりもの', 'しぜん', 'まるいもの', 'つめたいもの', 'そらのもの', 'いえのなか', 'ちいさいもの', 'ひかるもの'];
 
+  // チーム・役割からボットを探す。割り当てはロビー（またはコードネームの割り当て画面）で
+  // 決まるので、ルームの実際の値を見る。まだ読めないときだけ既定の並びを使う。
   function demoCnBotId(s, team, role) {
-    for (var i = 0; i < DEMO_CN_ASSIGN.length; i++) {
-      if (DEMO_CN_ASSIGN[i].team === team && DEMO_CN_ASSIGN[i].role === role) return String(s.botIds[i] || '');
+    try {
+      var ps = s && s.room && s.room.players ? s.room.players : null;
+      var ids = (s && s.botIds) || [];
+      if (ps) {
+        for (var i = 0; i < ids.length; i++) {
+          var pid = String(ids[i] || '');
+          var p = pid ? ps[pid] : null;
+          if (!p) continue;
+          if (String(p.team || '') === String(team) && String(p.role || '') === String(role)) return pid;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    for (var j = 0; j < DEMO_CN_ASSIGN.length; j++) {
+      if (DEMO_CN_ASSIGN[j].team === team && DEMO_CN_ASSIGN[j].role === role) return String((s && s.botIds && s.botIds[j]) || '');
     }
     return '';
   }
@@ -31442,12 +31652,13 @@
       q = {};
     }
     var roomId = q && q.room ? String(q.room) : '';
+    var lobbyId = q && q.lobby ? String(q.lobby) : '';
     var view = q && q.view ? String(q.view) : 'bot1';
     var sp = q && q.sp ? Number(q.sp) : 0;
     var paused = String((q && q.pz) || '') === '1';
 
     // 同じデモへの再入（視点切替の合成popstate等）：ドライバーは1つのまま画面だけ張り直す。
-    if (demoState && demoState.game === game && roomId && String(demoState.roomId) === roomId) {
+    if (demoState && lobbyId && String(demoState.lobbyId) === lobbyId) {
       demoState.view = demoViewIndex(view) >= 0 || view === 'table' ? view : demoState.view;
       demoAttachView(demoState);
       return;
@@ -31456,8 +31667,10 @@
     demoStopAll();
 
     var s = demoNewState(game);
-    s.roomId = roomId || demoMakeRoomId();
-    s.botIds = demoBotIds(s.roomId);
+    s.lobbyId = lobbyId || demoMakeLobbyId();
+    s.botIds = demoBotIds(s.lobbyId);
+    s.roomId = roomId;
+    s.stage = roomId ? 'game' : 'lobby';
     s.view = demoViewIndex(view) >= 0 || view === 'table' ? view : 'bot1';
     if (sp === 1.6 || sp === 1 || sp === 0.5) s.speed = sp;
     s.paused = paused;
