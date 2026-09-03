@@ -6840,6 +6840,33 @@
           '</div>' +
           '</div>' +
           '</div>';
+      } else if (pmsg && String(pmsg.type || '') === 'deal') {
+        // 取引の結果（当事者2人だけ）。左=出したカード / 右=もらったカード。
+        var dOther = String(pmsg.otherPid || '');
+        var dOtherName = dOther ? hnPlayerName(room, dOther) : '';
+        privateHtml =
+          '<div class="ll-overlay ll-sheet" role="dialog" aria-modal="true" data-modal-key="priv:deal">' +
+          '<div class="ll-overlay-backdrop"></div>' +
+          '<div class="ll-overlay-panel">' +
+          '<div class="stack">' +
+          '<div class="big ll-modal-title">取引：' + escapeHtml(dOtherName ? (dOtherName + ' と交換') : '交換') + '</div>' +
+          '<div class="ll-compare-row">' +
+          '<div class="ll-compare-col">' +
+          '<div class="ll-modal-name">出したカード</div>' +
+          '<div class="ll-compare-card hn-dealcard">' + hnCardImgHtml(String(pmsg.gave || '')) + '</div>' +
+          '</div>' +
+          '<div class="ll-swap-mark" aria-hidden="true">⇄</div>' +
+          '<div class="ll-compare-col">' +
+          '<div class="ll-modal-name">もらったカード</div>' +
+          '<div class="ll-compare-card hn-dealcard bbg-pop hn-pop-delay">' + hnCardImgHtml(String(pmsg.got || '')) + '</div>' +
+          '</div>' +
+          '</div>' +
+          '<div class="row ll-modal-actions" style="justify-content:center">' +
+          '<button class="primary" id="hnPrivateOk">とじる</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>';
       } else if (pmsg && String(pmsg.type || '') === 'notice') {
         var title2 = String(pmsg.title || '注意');
         var msg2 = String(pmsg.message || '');
@@ -6887,7 +6914,9 @@
     // スマホ横: 自分だけに見える結果（少年・目撃者・注意）は 席が見える小さな箱にする（2026-09-02）。
     // 目撃者（相手の手札を見る）だけは暗幕つき＝「見おわったら とじる」一時的な表示。
     if (paneMode && privateHtml) {
-      var isPeekP = privateHtml.indexOf('data-modal-key="priv:witness"') >= 0;
+      var isPeekP =
+        privateHtml.indexOf('data-modal-key="priv:witness"') >= 0 ||
+        privateHtml.indexOf('data-modal-key="priv:deal"') >= 0;
       privateHtml = privateHtml.replace(
         'class="ll-overlay ll-sheet"',
         'class="ll-overlay ll-sheet ll-overlay--mini' + (isPeekP ? ' ll-overlay--peek' : '') + '"'
@@ -8540,7 +8569,7 @@
           if (pKind === 'notice' || pKind === 'dog_not_culprit' || pKind === 'detective_alibi') {
             // 「はずれ」スタンプ(0.55秒遅れ)に合わせて低い音を鳴らす。
             bbgFx.miss();
-          } else if (pKind === 'boy' || pKind === 'witness') {
+          } else if (pKind === 'boy' || pKind === 'witness' || pKind === 'deal') {
             bbgFx.reveal();
           } else {
             bbgFx.notify();
@@ -8860,7 +8889,16 @@
       if (!st.private || typeof st.private !== 'object') return room;
       if (!st.private[pid]) return room;
 
-      if (wf && String(wf.by || '') === String(pid)) {
+      // 取引の結果（priv:deal）は進行のゲートではない（手番はすでに進んでいる）。
+      // たまたま自分が次の待機の相手だったときに、とじるで手番を飛ばしてしまわないようにする。
+      var isDealMsg = false;
+      try {
+        isDealMsg = String((st.private[pid] && st.private[pid].type) || '') === 'deal';
+      } catch (eDm) {
+        isDealMsg = false;
+      }
+
+      if (!isDealMsg && wf && String(wf.by || '') === String(pid)) {
         clearWaitPrivate(pid);
         st.waitFor = null;
         advanceFrom(pid);
@@ -9601,6 +9639,29 @@
       hands[actorPid] = aHand;
       hands[targetPid] = tHand;
       st.hands = hands;
+
+      // 取引の結果を当事者2人だけに見せる（出したカード／もらったカード。2026-09-03）。
+      // 進行のゲートではないので、OKは自分の表示を消すだけ（手番はこのあと進む）。
+      try {
+        if (!st.private || typeof st.private !== 'object') st.private = {};
+        var dealAt = serverNowMs();
+        st.private[String(actorPid)] = {
+          type: 'deal',
+          createdAt: dealAt,
+          otherPid: String(targetPid || ''),
+          gave: String(giveCard || ''),
+          got: String(takeCard || '')
+        };
+        st.private[String(targetPid)] = {
+          type: 'deal',
+          createdAt: dealAt,
+          otherPid: String(actorPid || ''),
+          gave: String(takeCard || ''),
+          got: String(giveCard || '')
+        };
+      } catch (eDealPriv) {
+        // ignore
+      }
 
       st.pending = null;
       var rf = '';

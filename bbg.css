@@ -33,6 +33,17 @@ body{
   font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Sans","Noto Sans JP",sans-serif;
   -webkit-font-smoothing:antialiased;
 }
+/* どのゲームも「ながおしで決定」するので、押しっぱなしでブラウザの文字選択や
+   長押しメニュー（コピー・画像を保存）が出ないようにする（2026-09-03）。
+   文字を選びたいところ（入力欄・キーやURLの表示）だけ選べるようにもどす。 */
+body{
+  -webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;
+  -webkit-touch-callout:none;
+}
+input,textarea,select,[contenteditable="true"],.code,.bbg-code,.bbg-selectable{
+  -webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;
+  -webkit-touch-callout:default;
+}
 /* スマホのノッチ／ステータスバー（充電・電波マーク）と重ならないよう、
    端末が教えてくる安全領域のぶんだけ内側に寄せる。
    ホーム画面から起動したPWA（全画面）では上に値が入り、ブラウザのタブでは0になる。 */
@@ -1053,6 +1064,8 @@ body.ok-player-screen .ok-pen-row input[type="range"]{touch-action:pan-x}
 .ll-deck-low{color:var(--danger)}
 
 /* 将軍の交換マーク */
+/* 取引の結果（犯人は踊る）: 出したカード ⇄ もらったカード。カードの枠は他の場面と同じ見た目に。 */
+.hn-dealcard{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#0f1520}
 .ll-swap-mark{align-self:center;font-size:26px;font-weight:900;color:var(--accent);flex:0 0 auto;padding:0 2px}
 
 /* 効果解決モーダルの結果行(スタンプ用) */
