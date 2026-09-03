@@ -463,6 +463,9 @@ body.ll-table-screen .app{max-width:980px}
 .ll-seat--eliminated .ll-seat-card::after{transform:translateY(-50%) rotate(-45deg)}
 .ll-seat--turn.ll-seat--eliminated .ll-seat-card::before,.ll-seat--turn.ll-seat--eliminated .ll-seat-card::after{background:var(--bg);opacity:.55}
 .ll-seat--effect .ll-seat-card{box-shadow:0 0 0 6px var(--accent)}
+/* 僧侶で保護中の席は赤（2026-09-03）。対象えらび中(.ll-seat--pick)の点線はこのあとの規則が勝つ */
+.ll-seat--protected .ll-seat-card{background:#c62828;border-color:#ff8a80;color:#fff}
+.ll-seat--protected .ll-seat-card .ll-seat-sub{color:#ffd6d6;opacity:1}
 /* 対象えらび（スマホ横・2026-09-02）: えらべる席は青い点線でうき上がり、ながおしで決まる。ほかの席はうすくする。 */
 .ll-table--pick .ll-seat:not(.ll-seat--pick){opacity:.4}
 .ll-seat--pick{z-index:4}
@@ -523,6 +526,12 @@ body.ll-table-screen .app{max-width:980px}
 .ll-table-deckmini-n{position:absolute;right:4px;bottom:3px;font-size:15px;font-weight:900;line-height:1.2;color:#fff;background:rgba(0,0,0,.65);border-radius:999px;padding:1px 7px}
 .ll-table-bigcard{width:auto;height:190px;aspect-ratio:3/4;border-radius:12px;border:1px solid var(--line);overflow:hidden;background:#0f1520;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
 .ll-table-bigcard-empty{font-size:12px;text-align:center;padding:6px;line-height:1.4}
+/* 1ターンに2枚以上が墓地へ行ったとき: そのターンのカードを重ねる（先に行ったほうが下・左上、あとのほうが上・右下。2026-09-03）
+   --ll-stack-k = 何枚目(0〜) / --ll-stack-n = 枚数-1 */
+.ll-table-bigstack{position:relative;display:grid;place-items:center;flex:0 0 auto}
+.ll-table-bigstack .ll-table-bigcard--stack{grid-area:1/1;transform:translate(calc((var(--ll-stack-k,0) - var(--ll-stack-n,1)/2)*30%),calc((var(--ll-stack-k,0) - var(--ll-stack-n,1)/2)*10%)) rotate(calc((var(--ll-stack-k,0) - var(--ll-stack-n,1))*7deg))}
+.ll-table-bigstack .ll-table-bigcard--stack:not(.ll-table-bigcard--top){filter:brightness(.78)}
+.ll-table-bigstack .ll-table-bigcard--top{box-shadow:0 6px 18px rgba(0,0,0,.55)}
 /* 矢印の途中の小さなカードは出さない（使われたカードは中央の大きなカードで見せる） */
 .ll-table-arrow-icon{display:none!important}
 .ll-table-facedown-card{width:72px;aspect-ratio:3/4;border-radius:10px;border:1px solid var(--line);overflow:hidden;background:#0f1520}

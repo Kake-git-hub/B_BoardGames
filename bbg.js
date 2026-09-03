@@ -7584,7 +7584,8 @@
       // 席えらび中もテーブルへ寄せる（モーダルは無いので 'pick:カード' を合図にする）
       if (!hnFxModal && hnSeatPick) hnFxModal = 'pick:' + String(hnSeatPickCard);
       var hnPm = bbgPaneModalWant(ui, hnFxModal, wantHand0 ? 1 : 0);
-      bbgPaneAutoWant('hn_player', hnPm.want, hnPaneTok + hnPm.tok);
+      // 自分の番になっても すぐ手札へ行かず、前の人のプレイをテーブルで1拍見せてから動く。
+      bbgPaneAutoWant('hn_player', hnPm.want, hnPaneTok + hnPm.tok, { beatMs: BBG_PANE_BEAT_MS });
     } catch (ePane1) {
       // ignore
     }
@@ -9824,6 +9825,8 @@
       var grave = Array.isArray(round.grave) ? round.grave.slice() : [];
       // Played card goes to global grave.
       grave.push(card);
+      // このターンに墓地へ行ったカード（行った順）。テーブル中央で重ねて見せる（2026-09-03）。
+      var turnCards = [String(card)];
 
       var eliminated = assign({}, round.eliminated || {});
       var protectedMap = assign({}, round.protected || {});
@@ -9871,6 +9874,7 @@
         if (cardRank) d.push(String(cardRank));
         discards[pid] = d;
         if (cardRank) grave.push(String(cardRank));
+        if (cardRank) turnCards.push(String(cardRank));
       }
 
       function eliminatePlayer(pid, reason, opts) {
@@ -10112,6 +10116,7 @@
           by: String(actorId || ''),
           to: String(lastPlayTo || ''),
           card: String(card || ''),
+          cards: turnCards.slice(),
           at: serverNowMs(),
           text: lastPlayText
         };
@@ -10337,6 +10342,7 @@
             by: String(overPid0 || ''),
             to: '',
             card: String(other0 || ''),
+            cards: ['7'].concat(other0 ? [String(other0)] : []),
             at: serverNowMs(),
             text:
               pname0(overPid0) +
@@ -10529,6 +10535,7 @@
                 by: overPid,
                 to: '',
                 card: String(other || ''),
+                cards: ['7'].concat(other ? [String(other)] : []),
                 at: serverNowMs(),
                 text:
                   (function () {
@@ -23013,33 +23020,25 @@
     // スマホ横の結果表示（2026-09-03）:
     //  ・兵士の推測結果・騎士の比較・道化の確認 = カードが要るので、席が見える小さな箱（.ll-overlay--mini）。
     //    道化（相手の手札を見る）は暗幕つき（.ll-overlay--peek）＝見おわったら本人が とじる 一時的な表示。
-    //  ・将軍・魔術師・大臣 = モーダルは出さず、上の1行に文と「次へ」（当事者だけ）。捨てられたカードは中央の大きなカードで見える。
+    //  ・将軍・魔術師 = 騎士と同じ小さな箱（交換した/捨てさせたカードと「次へ」が同じ位置に出る。2026-09-03）。
+    //  ・大臣 = モーダルは出さず、上の1行に文と「脱落」（当事者だけ）。捨てられたカードは中央の大きなカードで見える。
     //  ・全員公開（山札切れ）はカードが多いので ふつうの大きさのまま。
     if (paneMode && modalHtml) {
       try {
         var mkM = /data-modal-key="([^"]*)"/.exec(modalHtml);
         var mkey = mkM && mkM[1] ? String(mkM[1]) : '';
         var rvS = r && r.reveal ? r.reveal : null;
-        if (/^(rev:general_swap|rev:wizard|rev:minister_self|rev:minister_other)$/.test(mkey) && rvS) {
+        if (/^(rev:minister_self|rev:minister_other)$/.test(mkey) && rvS) {
           var byS = String(rvS.by || '');
-          var tgS = String(rvS.target || '');
           var byNS = ps[byS] ? formatPlayerDisplayName(ps[byS]) : byS;
-          var tgNS = ps[tgS] ? formatPlayerDisplayName(ps[tgS]) : tgS;
-          if (mkey === 'rev:general_swap') {
-            llRevealNote = '将軍：' + byNS + ' と ' + tgNS + ' が手札を交換しました';
-            if (String(playerId) === byS) llRevealAckLabel = '次へ';
-          } else if (mkey === 'rev:wizard') {
-            var dcS = String((llCardDef(String(rvS.discarded || '')) || {}).name || '');
-            llRevealNote = '魔術師：' + tgNS + ' が ' + (dcS ? dcS + ' を' : '') + '捨てて 1枚引きました';
-            if (String(playerId) === byS) llRevealAckLabel = '次へ';
-          } else if (mkey === 'rev:minister_self') {
+          if (mkey === 'rev:minister_self') {
             llRevealNote = '大臣：手札の合計が12以上 → 脱落';
             llRevealAckLabel = '脱落';
           } else {
             llRevealNote = byNS + ' は大臣の効果で脱落しました（手札の合計が12以上）';
           }
           modalHtml = '';
-        } else if (/^(peek|rev:guard|rev:knight)$/.test(mkey)) {
+        } else if (/^(peek|rev:guard|rev:knight|rev:general_swap|rev:wizard)$/.test(mkey)) {
           modalHtml = modalHtml.replace(
             'class="ll-overlay ll-sheet"',
             'class="ll-overlay ll-sheet ll-overlay--mini' + (mkey === 'peek' ? ' ll-overlay--peek' : '') + '"'
@@ -23087,7 +23086,8 @@
         String(phase) + '|' + String((r && r.no) || '') + '|' + String((r && r.currentPlayerId) || '');
       // 席えらび中もテーブルへ寄せる（モーダルは無いので 'pick:カード' を合図にする）
       var llPm = bbgPaneModalWant(ui, modalHtml || (llSeatPick ? 'pick:' + String(llSeatPickCard) : ''), phase === 'playing' && isMyTurn ? 1 : 0);
-      bbgPaneAutoWant('ll_player', llPm.want, llPaneTok + llPm.tok);
+      // 自分の番になっても すぐ手札へ行かず、前の人のプレイをテーブルで1拍見せてから動く。
+      bbgPaneAutoWant('ll_player', llPm.want, llPaneTok + llPm.tok, { beatMs: BBG_PANE_BEAT_MS });
     } catch (ePane0) {
       // ignore
     }
@@ -24973,11 +24973,39 @@
       var visibleGrave = graveArr && graveArr.length > 1 ? graveArr.slice(1) : [];
       var graveTop = visibleGrave.length ? String(visibleGrave[visibleGrave.length - 1] || '') : '';
 
+      // 1ターンに2枚以上が墓地へ行ったとき（魔術師で捨てさせた・兵士の的中・騎士の負け・大臣で12以上 など）は
+      // そのターンのカードを重ねて出す（先に墓地へ行ったほうが下）。なんのカードの効果で何が起きたかが見える（2026-09-03）。
+      var turnCards = [];
+      try {
+        var lpc = r && r.lastPlay && Array.isArray(r.lastPlay.cards) ? r.lastPlay.cards : [];
+        for (var tci = 0; tci < lpc.length; tci++) if (lpc[tci]) turnCards.push(String(lpc[tci]));
+      } catch (eTc) {
+        turnCards = [];
+      }
+      var bigHtml = '';
+      if (turnCards.length >= 2 && graveTop && String(turnCards[turnCards.length - 1]) === graveTop) {
+        bigHtml = '<div class="ll-table-bigstack" style="--ll-stack-n:' + String(turnCards.length - 1) + '">';
+        for (var tck = 0; tck < turnCards.length; tck++) {
+          bigHtml +=
+            '<div class="ll-table-bigcard ll-table-bigcard--stack' +
+            (tck === turnCards.length - 1 ? ' ll-table-bigcard--top' : '') +
+            '" style="--ll-stack-k:' +
+            String(tck) +
+            '">' +
+            llCardImgHtml(turnCards[tck]) +
+            '</div>';
+        }
+        bigHtml += '</div>';
+      } else {
+        bigHtml =
+          '<div class="ll-table-bigcard">' +
+          (graveTop ? llCardImgHtml(graveTop) : '<div class="ll-table-bigcard-empty muted">まだ<br>ありません</div>') +
+          '</div>';
+      }
+
       centerHtml =
         '<div class="ll-table-center ll-table-center--ll">' +
-        '<div class="ll-table-bigcard">' +
-        (graveTop ? llCardImgHtml(graveTop) : '<div class="ll-table-bigcard-empty muted">まだ<br>ありません</div>') +
-        '</div>' +
+        bigHtml +
         // バナー枠は常設（最初のプレイで中央の位置が上へ寄らないように）。
         '<div class="ll-table-center-bottom">' +
         (lastPlayHtml ||
@@ -25057,6 +25085,7 @@
         (isSelfSeat ? ' ll-seat--self' : '') +
         (isTurnSeat ? ' ll-seat--turn' : '') +
         (isElimSeat ? ' ll-seat--eliminated' : '') +
+        (isProtectedSeat && !isElimSeat ? ' ll-seat--protected' : '') +
         (isSoloEffectSeat ? ' ll-seat--effect' : '') +
         (isPickSeat ? ' ll-seat--pick' : '') +
         (isPickSeat && pickSelected === String(pid) ? ' ll-seat--picked' : '') +
@@ -28928,6 +28957,19 @@
   var bbgPaneAutoTok = {};
   // key -> 描画のあとにスライドさせたい目標ペイン（アニメを見せるため1フレーム遅らせる）。
   var bbgPanePending = {};
+  // 「1拍おいてから手札へ」のタイマー（key -> timeout id）。手でペインを変えたら取り消す。
+  var bbgPaneBeatTimer = {};
+  // 自分の番が来たとき、前の人のプレイ（テーブル）を見せてから手札ペインへ動くまでの間（2026-09-03）。
+  var BBG_PANE_BEAT_MS = 1300;
+
+  function bbgPaneBeatCancel(key) {
+    try {
+      if (bbgPaneBeatTimer[key]) clearTimeout(bbgPaneBeatTimer[key]);
+    } catch (e) {
+      // ignore
+    }
+    delete bbgPaneBeatTimer[key];
+  }
 
   function bbgPanesActive() {
     try {
@@ -28946,7 +28988,9 @@
   // 自動スライド: turnToken（だれの番か）が変わった瞬間だけ、見せたいペインへ寄せる。
   // 同じ合図のあいだはプレイヤーのスワイプが優先される（いつでも手で変えられる）。
   // 画面を開いたいちばん最初だけはアニメなしで、その場から目的のペインを出す。
-  function bbgPaneAutoWant(key, wantIdx, turnToken) {
+  // opts.beatMs: 目的がテーブル(0)以外のとき、まずテーブルを見せてから beatMs 後に目的のペインへ動く
+  //（前の人のカード提出・効果の結果をひと目見てから手札へ。2026-09-03）。
+  function bbgPaneAutoWant(key, wantIdx, turnToken, opts) {
     try {
       if (!key) return;
       var tok = String(turnToken == null ? '' : turnToken);
@@ -28954,11 +28998,27 @@
       var first = seen === undefined;
       if (!first && String(seen) === tok) return;
       bbgPaneAutoTok[key] = tok;
+      bbgPaneBeatCancel(key);
       if (!bbgPanesActive()) return; // 縦・タブレットはペインを重ねないので何もしない
       var w = parseIntSafe(wantIdx, -1);
       if (w < 0) return;
       if (first) {
         bbgPaneIdx[key] = w;
+        return;
+      }
+      var beat = opts && opts.beatMs ? parseIntSafe(opts.beatMs, 0) : 0;
+      if (beat > 0 && w !== 0) {
+        bbgPanePending[key] = 0;
+        bbgPaneBeatTimer[key] = setTimeout(function () {
+          delete bbgPaneBeatTimer[key];
+          try {
+            if (!bbgPanesActive()) return;
+            var host = document.querySelector('.bbg-panes[data-pane-key="' + String(key).replace(/"/g, '') + '"]');
+            if (host) bbgPaneSet(host, w);
+          } catch (eB) {
+            // ignore
+          }
+        }, beat);
         return;
       }
       bbgPanePending[key] = w;
@@ -29100,6 +29160,7 @@
   function bbgPaneStep(host, delta) {
     if (!host) return;
     var key = String(host.getAttribute('data-pane-key') || '');
+    bbgPaneBeatCancel(key);
     var cur = typeof bbgPaneIdx[key] === 'number' ? bbgPaneIdx[key] : 0;
     bbgPaneSet(host, cur + delta);
   }
@@ -29367,6 +29428,11 @@
         if (!t || !t.closest) return;
         var dot = t.closest('.bbg-pane-dot');
         if (!dot) return;
+        try {
+          bbgPaneBeatCancel(String(t.closest('.bbg-panes').getAttribute('data-pane-key') || ''));
+        } catch (eBc) {
+          // ignore
+        }
         bbgPaneSet(t.closest('.bbg-panes'), dot.getAttribute('data-pane-i'));
       },
       true
