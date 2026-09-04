@@ -2,17 +2,19 @@
 
 ここにスキャンしたカード画像（PNG）を置くと、アプリが**自動でプレースホルダー表示から画像表示に切り替わります**。特別な登録作業は不要です。ファイルを置いて、ブラウザをリロードするだけです。
 
+**2026-09-05 時点で 30まい（5色×5どうぶつ ＋ ワニ5）すべて そろっています。**
+
 ## 置くファイル名
 
 ファイル名は `<いろ>_<どうぶつ>.png` です（ワニだけ `croc1.png`〜`croc5.png`）。
 
-| | flamingo（フラミンゴ） | penguin（ペンギン） | turtle（カメ） | camel（ラクダ） | zebra（シマウマ） |
+| | flamingo（フラミンゴ） | penguin（ペンギン） | turtle（カメ） | camel（ラクダ） | sloth（ナマケモノ） |
 |---|---|---|---|---|---|
-| **white（しろ）** | `white_flamingo.png` | `white_penguin.png` | `white_turtle.png` | `white_camel.png` | `white_zebra.png` |
-| **pink（ピンク）** | `pink_flamingo.png` | `pink_penguin.png` | `pink_turtle.png` | `pink_camel.png` | `pink_zebra.png` |
-| **yellow（きいろ）** | `yellow_flamingo.png` | `yellow_penguin.png` | `yellow_turtle.png` | `yellow_camel.png` | `yellow_zebra.png` |
-| **blue（あお）** | `blue_flamingo.png` | `blue_penguin.png` | `blue_turtle.png` | `blue_camel.png` | `blue_zebra.png` |
-| **green（みどり）** | `green_flamingo.png` | `green_penguin.png` | `green_turtle.png` | `green_camel.png` | `green_zebra.png` |
+| **white（しろ）** | `white_flamingo.png` | `white_penguin.png` | `white_turtle.png` | `white_camel.png` | `white_sloth.png` |
+| **pink（ピンク）** | `pink_flamingo.png` | `pink_penguin.png` | `pink_turtle.png` | `pink_camel.png` | `pink_sloth.png` |
+| **yellow（きいろ）** | `yellow_flamingo.png` | `yellow_penguin.png` | `yellow_turtle.png` | `yellow_camel.png` | `yellow_sloth.png` |
+| **blue（あお）** | `blue_flamingo.png` | `blue_penguin.png` | `blue_turtle.png` | `blue_camel.png` | `blue_sloth.png` |
+| **green（みどり）** | `green_flamingo.png` | `green_penguin.png` | `green_turtle.png` | `green_camel.png` | `green_sloth.png` |
 
 - `croc1.png` 〜 `croc5.png` … ワニ（5まいとも絵がちがうので、それぞれ別ファイル）
 - `back.png`（任意） … カード裏面
