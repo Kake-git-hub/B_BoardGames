@@ -606,6 +606,37 @@
     }
   }
 
+  // ドデリドのプレイ画面は ヘッダーを「タイトルバー」として使う（のこり枚数・⇄・効果音）。
+  // route() の updateHeaderLobbyBackButton でも同じことをしているが、
+  // **デモは route() を通らずに routeDodelidoPlayer() を直接よぶ**（URLの screen は demo_dodelido のまま）。
+  // route() のほうは「room があるゲーム画面」を見て header を display:none にするので、
+  // 描画のたびにここで出しなおさないと ⇄ のタイトル行ごと消えてしまう。
+  // GMの「ロビーへ」ヘッダーが出ているときは、そちらを優先してクラスは足さない
+  //（header--dd は たて画面で非表示になるので、GMが ロビーへ戻れなくなるため）。
+  function ddApplyTitleBarHeader(on) {
+    try {
+      var headerEl = document.querySelector('header.header');
+      if (!headerEl) return;
+      var titleEl = headerEl.querySelector('h1');
+      var isGmReturn = !!(titleEl && titleEl.classList && titleEl.classList.contains('gm-lobby-return'));
+      if (!on) {
+        // けっか画面・さんかしていない画面。ほかのゲームのプレイ中と同じで ヘッダーは出さない
+        //（GMの「ロビーへ」だけは いつでも押せるように のこす）。
+        if (isGmReturn) return;
+        if (headerEl.classList) headerEl.classList.remove('header--dd');
+        headerEl.style.display = 'none';
+        return;
+      }
+      headerEl.style.display = '';
+      if (headerEl.classList) {
+        headerEl.classList.add('header--slim');
+        if (!isGmReturn) headerEl.classList.add('header--dd');
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // ターン開始オーバーレイ（約1.2秒で自動消滅・タップは奪わない）
   var _bbgTurnOverlayTimer = null;
 
@@ -13770,6 +13801,7 @@
       var winnerMid = room && room.result ? String(room.result.winnerMid || '') : '';
       var backHtml = lobbyId && isHost ? '<button id="ddNextToLobby" class="primary">ロビーへもどる</button>' : '';
       bbgSetHeaderExtra('');
+      ddApplyTitleBarHeader(false);
       render(
         viewEl,
         '<div class="stack bz-screen dd-screen">' +
@@ -13784,6 +13816,7 @@
 
     if (!inGame && !isTableGmDevice) {
       bbgSetHeaderExtra('');
+      ddApplyTitleBarHeader(false);
       render(
         viewEl,
         '<div class="stack bz-screen dd-screen">' +
@@ -13849,12 +13882,14 @@
     // のこり枚数は タイトルバーの右へ（スマホ横置きで カードの高さを かせぐため）。
     // たて画面では CSS で出さず、画面内の .dd-count のほうを見せる。
     // ⇄ は 順番リストと タップ枠の 左右いれかえ（スマホ横置きだけ効く。CSSでこのスロットごと出し分け）。
+    var useTitleBar = !!(inGame && !isTableGmDevice);
     bbgSetHeaderExtra(
-      inGame && !isTableGmDevice
+      useTitleBar
         ? '<span class="bbg-head-remain">のこり<b>' + escapeHtml(String(me.deck.length)) + '</b>まい</span>' +
           '<button type="button" id="ddSwapBtn" class="bbg-head-btn" aria-label="ひだり・みぎを いれかえ" title="ひだり・みぎを いれかえ">⇄</button>'
         : ''
     );
+    ddApplyTitleBarHeader(useTitleBar);
 
     // 並び: 番手（カードの上）→ 順番リスト（横置きは左） → 3つの場 → タップエリア（横置きは右）
     //       → のこり枚数 → ワニのタップ順

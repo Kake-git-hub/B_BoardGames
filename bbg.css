@@ -1488,7 +1488,9 @@ body.bbg-demo-on .app{padding-bottom:104px}
 .dd-pilesbox{padding:14px 10px}
 .dd-piles{display:flex;gap:10px;justify-content:center;align-items:center}
 .dd-pile{position:relative;border-radius:14px;--dd-pad:6px;padding:var(--dd-pad);flex:0 1 auto}
-.dd-pile--last{background:rgba(91,157,255,.10);box-shadow:0 0 0 2px rgba(91,157,255,.45)}
+/* .dd-pile--last は「さいごにめくった山」の目じるし。見た目は付けない（青いわくは出さない・
+   めくれたことは カードが上から降りる演出 .dd-card--drop と .dd-flipflash で分かる）。
+   クラス自体は JS（ddPlayCardDrop）が その山のカードを探すのに使うので消さないこと。 */
 
 /* カード（プレースホルダー + 画像の重ね） */
 .dd-card{
