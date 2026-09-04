@@ -1248,7 +1248,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
   width:92px;
   aspect-ratio:3/4;
   border-radius:10px;
-  border:2px solid var(--bz-bean,#6b7280);
+  /* 豆いろの枠は描かない（実物のカード画像そのままを見せる）。 */
+  border:0;
   background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(0,0,0,.25)), var(--card2);
   overflow:hidden;
   flex:0 0 auto;
@@ -1280,6 +1281,8 @@ body.bbg-demo-on .app{padding-bottom:104px}
   -webkit-user-drag:none;user-drag:none;pointer-events:none;
 }
 .bz-card-img.is-loaded{opacity:1}
+/* 画像が出たらプレースホルダー（豆いろの光・絵文字・名前・豆メーター）は消す。 */
+.bz-card:has(.bz-card-img.is-loaded) .bz-card-ph{opacity:0}
 .bz-card-tag{
   position:absolute;left:2px;right:2px;bottom:2px;z-index:2;
   font-size:9.5px;font-weight:900;line-height:1.3;padding:1px 3px;border-radius:5px;
@@ -1493,7 +1496,9 @@ body.bbg-demo-on .app{padding-bottom:104px}
   width:min(104px,27vw);
   aspect-ratio:3/4;
   border-radius:12px;
-  border:3px solid var(--dd-col,#6b7280);
+  /* いろの枠は描かない（実物のカード画像そのままを見せる）。画像が無いときだけ
+     .dd-card-ph 側の色でどのカードか分かるようにしてある。 */
+  border:0;
   background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(0,0,0,.25)), var(--card2);
   overflow:hidden;
   flex:0 0 auto;
@@ -1528,6 +1533,9 @@ body.bbg-demo-on .app{padding-bottom:104px}
   -webkit-user-drag:none;user-drag:none;pointer-events:none;
 }
 .dd-card-img.is-loaded{opacity:1}
+/* 画像が出たらプレースホルダー（いろの光・絵文字・名前・色名）は消す。
+   カードは たて長で わくは 3:4 なので、消さないと絵の左右に色と文字がのぞく。 */
+.dd-card:has(.dd-card-img.is-loaded) .dd-card-ph{opacity:0}
 
 /* 下に積まれている1まい。position:absolute なので山の大きさには影響しない
    （.dd-card の position:relative を上書きするため、かならず .dd-card より後に置くこと）。 */

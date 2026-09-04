@@ -4,24 +4,26 @@
 
 **2026-09-05 時点で 30まい（5色×5どうぶつ ＋ ワニ5）すべて そろっています。**
 
+※ もとのスキャン（`ゲーム用画像/ドデリド/`）では シマウマのファイル名が `<いろ>_ナマケモノ.jpg` になっていますが、**カードは シマウマ**です（`*_zebra.png` として取りこみます）。
+
 ## 置くファイル名
 
 ファイル名は `<いろ>_<どうぶつ>.png` です（ワニだけ `croc1.png`〜`croc5.png`）。
 
-| | flamingo（フラミンゴ） | penguin（ペンギン） | turtle（カメ） | camel（ラクダ） | sloth（ナマケモノ） |
+| | flamingo（フラミンゴ） | penguin（ペンギン） | turtle（カメ） | camel（ラクダ） | zebra（シマウマ） |
 |---|---|---|---|---|---|
-| **white（しろ）** | `white_flamingo.png` | `white_penguin.png` | `white_turtle.png` | `white_camel.png` | `white_sloth.png` |
-| **pink（ピンク）** | `pink_flamingo.png` | `pink_penguin.png` | `pink_turtle.png` | `pink_camel.png` | `pink_sloth.png` |
-| **yellow（きいろ）** | `yellow_flamingo.png` | `yellow_penguin.png` | `yellow_turtle.png` | `yellow_camel.png` | `yellow_sloth.png` |
-| **blue（あお）** | `blue_flamingo.png` | `blue_penguin.png` | `blue_turtle.png` | `blue_camel.png` | `blue_sloth.png` |
-| **green（みどり）** | `green_flamingo.png` | `green_penguin.png` | `green_turtle.png` | `green_camel.png` | `green_sloth.png` |
+| **white（しろ）** | `white_flamingo.png` | `white_penguin.png` | `white_turtle.png` | `white_camel.png` | `white_zebra.png` |
+| **pink（ピンク）** | `pink_flamingo.png` | `pink_penguin.png` | `pink_turtle.png` | `pink_camel.png` | `pink_zebra.png` |
+| **yellow（きいろ）** | `yellow_flamingo.png` | `yellow_penguin.png` | `yellow_turtle.png` | `yellow_camel.png` | `yellow_zebra.png` |
+| **blue（あお）** | `blue_flamingo.png` | `blue_penguin.png` | `blue_turtle.png` | `blue_camel.png` | `blue_zebra.png` |
+| **green（みどり）** | `green_flamingo.png` | `green_penguin.png` | `green_turtle.png` | `green_camel.png` | `green_zebra.png` |
 
 - `croc1.png` 〜 `croc5.png` … ワニ（5まいとも絵がちがうので、それぞれ別ファイル）
 - `back.png`（任意） … カード裏面
 
 ## 注意点
 
-- 形式は **PNG**、**縦長のカード画像**を想定しています。表示は 230x390 くらいなので、それ以上に大きくしても意味がありません。
+- 形式は **PNG**、**縦長のカード画像**を想定しています。**カード30まいは 261x390 でそろえてあります**（1つのデッキなので形はぜんぶ同じ。スキャンのたてよこ比の中央値 0.670）。表示はこれより小さいので、大きくしても意味がありません。
 - **かならず減色して軽くしてから置いてください**（1まい 30〜45KB めやす）。スキャンそのままの PNG は 1まい 200KB ちかくあり、105まいぶんだと初回表示で待たされます。
   変換のしかた（Python + Pillow・見た目はほぼ変わりません）:
 

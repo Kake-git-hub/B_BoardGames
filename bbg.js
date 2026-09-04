@@ -12725,11 +12725,9 @@
     penguin: { name: 'ペンギン', emoji: '🐧' },
     turtle: { name: 'カメ', emoji: '🐢' },
     camel: { name: 'ラクダ', emoji: '🐫' },
-    sloth: { name: 'ナマケモノ', emoji: '🦥' },
-    // 昔のへや（5ばんめを シマウマ としていたころ）のカードも名前が出るように残してある。
     zebra: { name: 'シマウマ', emoji: '🦓' }
   };
-  var DD_ANIMAL_KEYS = ['flamingo', 'penguin', 'turtle', 'camel', 'sloth'];
+  var DD_ANIMAL_KEYS = ['flamingo', 'penguin', 'turtle', 'camel', 'zebra'];
 
   var DD_COLOR_DEFS = {
     white: { name: 'しろ', color: '#e8eaf0' },
